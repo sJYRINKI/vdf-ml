@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+*.vlsv
+*.npy
+*.npz
+
+vdf-ml-env/
