@@ -6,3 +6,5 @@ __pycache__/
 *.npz
 
 vdf-ml-env/
+externals/analysator/
+data/
