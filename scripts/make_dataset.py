@@ -8,12 +8,12 @@ sys.path.append(str(PRPJECT_ROOT))
 from src.config import load_config
 from src.timesteps import create_timestep_list, create_file_location
 
-def main(config_path, start_timestep, n_timestep):
+def main(config_path, start_timestep, n_timesteps):
     config = load_config(config_path)
 
     timesteps = create_timestep_list(
         start_timestep=start_timestep,
-        n_timesteps=n_timestep
+        n_timesteps=n_timesteps
     )
 
     print("success")
@@ -59,5 +59,5 @@ if __name__=="__main__":
     main(
         config_path=args.config,
         start_timestep=args.start_timestep,
-        n_timestep=args.n_timesteps
+        n_timesteps=args.n_timesteps
     )
