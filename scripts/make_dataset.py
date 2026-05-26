@@ -7,6 +7,8 @@ sys.path.append(str(PRPJECT_ROOT))
 
 from src.config import load_config
 from src.timesteps import create_timestep_list, create_file_location
+from src.vdf_helpers import get_cellid_with_vdf
+from src.vdf_extract import extract_vdf
 
 def main(config_path, start_timestep, n_timesteps):
     config = load_config(config_path)
