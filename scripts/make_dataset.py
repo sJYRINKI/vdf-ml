@@ -1,6 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
+import analysator as pt
 
 PRPJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PRPJECT_ROOT))
@@ -18,18 +19,37 @@ def main(config_path, start_timestep, n_timesteps):
         n_timesteps=n_timesteps
     )
 
-    print("success")
-    print(config["population"])
+    first_timestep = timesteps[0]
 
-    file_template = config["file_template"]
+    file_location = create_file_location(
+        file_template=config["file_template"],
+        timestep=first_timestep
+    )
 
-    for timestep in timesteps:
-        file_location = create_file_location(
-            file_template=file_template,
-            timestep=timestep
-        )
+    test_coord_re = config["test_coord_re"]
 
-        print(f"{timestep}->{file_location}")
+    print(f"First timestep: {first_timestep}")
+    print(f"First file: {file_location}")
+    print(f"Test coordinate RE: {test_coord_re}")
+
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+
+    cid = get_cellid_with_vdf(
+        reader=reader,
+        coord_re=test_coord_re,
+    )
+
+    print(f"Cell ID: {cid}")
+
+    vdf = extract_vdf(
+        file=file_location,
+        cid=int(cid)
+    )
+
+    print(f"VDF shape: {vdf.shape}")
+    print(f"VDF dtype: {vdf.dtype}")
+    print(f"VDF min: {vdf.min()}")
+    print(f"VDF max: {vdf.max()}")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(

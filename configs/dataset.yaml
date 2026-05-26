@@ -1,8 +1,9 @@
 file_template: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
-population: avgs
 
-output_dir: data/loaded
+output_dir: data/processed
 
 labels:
   lobe: 0
   reconnection: 1
+
+test_coord_re: [-12, 0, 0]

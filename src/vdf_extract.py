@@ -1,7 +1,7 @@
 import numpy as np
 import analysator as pt
 
-def extract_vdf(file, cid, box=-1, pop="avg"):
+def extract_vdf(file, cid, box=-1, pop="avgs"):
     """
     Extract a 3D VDF from one Vlasiator cell.
 
