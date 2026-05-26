@@ -1,18 +1,11 @@
-from pathlib import Path
 import numpy as np
-import pandas as pd
 
-def load_dataset(dataset_dir):
+def print_dataset_info(X, y, metadata):
     """
-    Load saved VDF dataset.
+    Print info about a loaded VDF dataset.
 
     Parameters
     ----------
-    dataset_ddir : str
-        Directory containing ``vdf.npz`` and ``metadata.csv``.
-    
-    Returns
-    -------
     X : numpy.ndarray
         VDF samples.
     y : numpy.ndarray
@@ -20,16 +13,36 @@ def load_dataset(dataset_dir):
     metadata : pandas.DataFrame
         Metadata table for the samples.
     """
+    print("Dataset information:")
+    print(f"X shape: {X.shape}")
+    print(f"X dtype: {X.dtype}")
+    print(f"y shape: {y.shape}")
+    print(f"y dtype: {y.dtype}")
+    print(f"metadata shape: {metadata.shape}")
+    print("\n")
 
-    dataset_dir = Path(dataset_dir)
+    print("Metadata:")
+    print(metadata)
+    print("\n")
 
-    npz_path = dataset_dir / "vdf.npz"
-    metadata_path = dataset_dir / "metadata.csv"
+    if "class_name" in metadata.columns:
+        print("Class counts:")
+        print(metadata["class_name"].value_counts())
 
-    data = np.load(npz_path)
-    X = data["X"]
-    y = data["y"]
+    print("\n")
 
-    metadata = pd.read_csv(metadata_path)
+def print_vdf_statisctics(X):
+    """
+    Print statistics fo VDF samples.
 
-    return X, y, metadata
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples.
+    """
+
+    print("VDF statistic:")
+    print(f"min: {X.min()}")
+    print(f"max: {X.max()}")
+    print(f"mean: {X.mean()}")
+    print(f"std: {X.std()}")
