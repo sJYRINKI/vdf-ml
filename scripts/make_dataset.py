@@ -1,6 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
+import numpy as np
 import analysator as pt
 
 PRPJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +12,7 @@ from src.timesteps import create_timestep_list, create_file_location
 from src.vdf_helpers import get_cellid_with_vdf
 from src.vdf_extract import extract_vdf
 from src.dataset_items import iter_labeled_coords
+from src.dataset_io import create_dataset_output_dir, save_dataset
 
 def main(config_path, start_timestep, n_timesteps):
     config = load_config(config_path)
@@ -20,9 +22,23 @@ def main(config_path, start_timestep, n_timesteps):
         n_timesteps=n_timesteps
     )
 
-    n_samples = 0
+    output_dir = config["output_dir"]
 
-    first_timestep = timesteps[0]
+    outdir = create_dataset_output_dir(
+        output_dir=output_dir,
+        start_timestep=start_timestep,
+        n_timestep=n_timesteps,
+    )
+
+    print(f"Output directory: {outdir}")
+
+    X = []
+    y = []
+    metadata = []
+
+    sample_index = 0
+
+    
 
     for timestep in timesteps:
         file_location = create_file_location(
@@ -35,7 +51,12 @@ def main(config_path, start_timestep, n_timesteps):
 
         reader = pt.vlsvfile.VlsvReader(str(file_location))
 
+        simulation_time = reader.read_parameter("time")
+
+        print(simulation_time)
+
         for class_name, label, coord_re in iter_labeled_coords(config):
+            print(f"Sample index: {sample_index}")
             print(f"Class: {class_name}, label: {label}")
             print(f"Coordinate RE: {coord_re}")
 
@@ -51,14 +72,44 @@ def main(config_path, start_timestep, n_timesteps):
                 cid=int(cid)
             )
 
+            X.append(vdf)
+            y.append(label)
+
+            metadata.append(
+                {
+                    "sample_index": sample_index,
+                    "timestep": int(timestep),
+                    "simulation_time": simulation_time,
+                    "cid": int(cid),
+                    "label": int(label),
+                    "class_name": class_name,
+                    "x_re": float(coord_re[0]),
+                    "y_re": float(coord_re[1]),
+                    "z_re": float(coord_re[2]),
+                    "file_location": str(file_location),
+                }
+            )
+
             print(f"VDF shape: {vdf.shape}")
             print(f"VDF dtype: {vdf.dtype}")
             print(f"VDF min: {vdf.min()}")
             print(f"VDF max: {vdf.max()}")
 
-            n_samples += 1
-            
-    print(f"Extracted {n_samples} VDF samples.")  
+            sample_index += 1
+
+    X = np.stack(X).astype(np.float32)
+    y = np.array(y, dtype=np.int64)
+
+    save_dataset(
+        outdir=outdir,
+        X=X,
+        y=y,
+        metadata=metadata,
+    )
+
+    print(f"X shape: {X.shape}")
+    print(f"y shape: {y.shape}")
+    print(f"y: {y}")
     
 
 
