@@ -1,3 +1,5 @@
+#python scripts/make_dataset.py --config configs/dataset.yaml --start-timestep 3408 --n-timesteps 100
+
 import argparse
 import sys
 from pathlib import Path
