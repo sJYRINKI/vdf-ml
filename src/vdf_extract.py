@@ -1,7 +1,7 @@
 import numpy as np
 import analysator as pt
 
-def extract_vdf(file, cid, box=-1, pop="avgs"):
+def extract_vdf(file_location, cid, box=-1, pop="avgs"):
     """
     Extract a 3D VDF from one Vlasiator cell.
 
@@ -28,7 +28,7 @@ def extract_vdf(file, cid, box=-1, pop="avgs"):
     """
 
     assert cid>0
-    reader = pt.vlsvfile.VlsvReader(file)
+    reader = pt.vlsvfile.VlsvReader(file_location)
     #read phase space density
     vcells = reader.read_velocity_cells(cid, pop)
     keys = list(vcells.keys())

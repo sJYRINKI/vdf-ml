@@ -10,6 +10,7 @@ from src.config import load_config
 from src.timesteps import create_timestep_list, create_file_location
 from src.vdf_helpers import get_cellid_with_vdf
 from src.vdf_extract import extract_vdf
+from src.dataset_items import iter_labeled_coords
 
 def main(config_path, start_timestep, n_timesteps):
     config = load_config(config_path)
@@ -19,37 +20,48 @@ def main(config_path, start_timestep, n_timesteps):
         n_timesteps=n_timesteps
     )
 
+    n_samples = 0
+
     first_timestep = timesteps[0]
 
-    file_location = create_file_location(
-        file_template=config["file_template"],
-        timestep=first_timestep
-    )
+    for timestep in timesteps:
+        file_location = create_file_location(
+            file_template=config["file_template"],
+            timestep=timestep
+        )
 
-    test_coord_re = config["test_coord_re"]
+        print(f"Timestep: {timestep}")
+        print(f"File: {file_location}")
 
-    print(f"First timestep: {first_timestep}")
-    print(f"First file: {file_location}")
-    print(f"Test coordinate RE: {test_coord_re}")
+        reader = pt.vlsvfile.VlsvReader(str(file_location))
 
-    reader = pt.vlsvfile.VlsvReader(str(file_location))
+        for class_name, label, coord_re in iter_labeled_coords(config):
+            print(f"Class: {class_name}, label: {label}")
+            print(f"Coordinate RE: {coord_re}")
 
-    cid = get_cellid_with_vdf(
-        reader=reader,
-        coord_re=test_coord_re,
-    )
+            cid = get_cellid_with_vdf(
+                reader=reader,
+                coord_re=coord_re,
+            )
 
-    print(f"Cell ID: {cid}")
+            print(f"Cell ID: {cid}")
 
-    vdf = extract_vdf(
-        file=file_location,
-        cid=int(cid)
-    )
+            vdf = extract_vdf(
+                file_location=file_location,
+                cid=int(cid)
+            )
 
-    print(f"VDF shape: {vdf.shape}")
-    print(f"VDF dtype: {vdf.dtype}")
-    print(f"VDF min: {vdf.min()}")
-    print(f"VDF max: {vdf.max()}")
+            print(f"VDF shape: {vdf.shape}")
+            print(f"VDF dtype: {vdf.dtype}")
+            print(f"VDF min: {vdf.min()}")
+            print(f"VDF max: {vdf.max()}")
+
+            n_samples += 1
+            
+    print(f"Extracted {n_samples} VDF samples.")  
+    
+
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
