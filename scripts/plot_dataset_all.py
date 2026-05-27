@@ -25,8 +25,6 @@ def main(config_path, timestep):
         timestep=timestep
     )
 
-    sample_index = 0
-
     plot_config = config["plot"]
 
     dv = float(plot_config.get("dv", 30000.0))
@@ -35,15 +33,24 @@ def main(config_path, timestep):
 
     X, y, metadata = load_dataset(dataset_dir)
 
+    class_frame_counts = {}
+
     for sample_index in range(X.shape[0]):
         metadata_row = metadata.iloc[sample_index]
+        class_name = metadata_row["class_name"]
         file_location = metadata_row["file_location"]
+
+        if class_name not in class_frame_counts:
+            class_frame_counts[class_name] = 0
+
+        class_frame_index = class_frame_counts[class_name]
 
         extent = get_velocity_mesh_extent_from_file(
             file_location=file_location
         )
 
-        output_path = output_dir / f"sample_{sample_index:04d}_xz.png"
+        class_output_dir = output_dir / class_name
+        output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
 
         plot_vdf_xz_slice(
             vdf=X[sample_index],
@@ -55,6 +62,8 @@ def main(config_path, timestep):
             threshold=threshold,
             vdflim=vdflim,
         )
+
+        class_frame_counts[class_name] += 1
 
     print(f"Dataset directory: {dataset_dir}")
     print(f"Output directory: {output_dir}")
