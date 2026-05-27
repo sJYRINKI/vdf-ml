@@ -1,4 +1,4 @@
-#python scripts/make_dataset.py --config configs/dataset.yaml --start-timestep 3408 --n-timesteps 100
+#python scripts/make_dataset.py --config configs/create_dataset.yaml --start-timestep 3408 --n-timesteps 100
 
 import argparse
 import sys

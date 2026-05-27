@@ -31,10 +31,18 @@ def main(config_path, timestep):
         "{class_name}_xz.mp4"
     )
 
-    class_dirs = sorted(
-        path for path in frames_dir.iterdir()
-        if path.is_dir()
-    )
+    ignore_dirs = set(animation_config.get("ignore_dirs", []))
+
+    class_dirs = []
+
+    for path in sorted(frames_dir.iterdir()):
+        if not path.is_dir():
+            continue
+
+        if path.name in ignore_dirs:
+            continue
+
+        class_dirs.append(path)
 
     for class_dir in class_dirs:
         class_name = class_dir.name

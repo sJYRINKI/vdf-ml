@@ -4,3 +4,5 @@ output_dir: data/processed/timesteps_{timestep}/animations
 animation:
   frame_pattern: sample_%04d_xz.png
   output_file_template: "{class_name}_xz.mp4"
+  ignore_dirs:
+    - sample_plots
