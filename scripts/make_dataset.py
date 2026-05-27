@@ -10,7 +10,7 @@ PRPJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PRPJECT_ROOT))
 
 from src.config import load_config
-from src.timesteps import create_timestep_list, create_file_location
+from src.timesteps import create_timestep_list, create_timestep_path
 from src.vdf_helpers import get_cellid_with_vdf
 from src.vdf_extract import extract_vdf
 from src.dataset_items import iter_labeled_coords
@@ -40,11 +40,9 @@ def main(config_path, start_timestep, n_timesteps):
 
     sample_index = 0
 
-    
-
     for timestep in timesteps:
-        file_location = create_file_location(
-            file_template=config["file_template"],
+        file_location = create_timestep_path(
+            path_template=config["file_template"],
             timestep=timestep
         )
 

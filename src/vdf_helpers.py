@@ -1,4 +1,5 @@
 import numpy as np
+import analysator as pt
 
 R_EARTH = 6.371e6
 
@@ -41,3 +42,23 @@ def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
     cid = reader.get_cellid_with_vdf(coord_m, pop=pop)
 
     return int(cid)
+
+def get_velocity_mesh_extent_from_file(file_location, pop="avgs"):
+    """
+    Get the velocity mesh extent from a VLSV file.
+
+    Parameters
+    ----------
+    file_location : str
+        Path to the VLSV file.
+    pop : str, optional
+        Particle population name.
+
+    Returns
+    -------
+    numpy.ndarray
+        Velocity mesh extent.
+    """
+
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    return reader.get_velocity_mesh_extent(pop=pop)
