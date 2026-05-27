@@ -1,4 +1,4 @@
-#python scripts/plot_dataset_sample.py --config configs/plot_dataset.yaml --timestep 3408_100
+#python scripts/plot_dataset_sample.py --config configs/plot_dataset_sample.yaml --timestep 3408_100 --sample-index 11
 import argparse
 import sys
 from pathlib import Path
@@ -12,7 +12,7 @@ from src.dataset_plot import plot_vdf_xz_slice
 from src.timesteps import create_timestep_path
 from src.vdf_helpers import get_velocity_mesh_extent_from_file
 
-def main(config_path, timestep):
+def main(config_path, timestep, sample_index):
     config = load_config(config_path)
 
     dataset_dir = create_timestep_path(
@@ -25,9 +25,9 @@ def main(config_path, timestep):
         timestep=timestep
     )
 
-    sample_index = 0
-
     plot_config = config["plot"]
+
+    sample_index = int(sample_index)
 
     dv = float(plot_config.get("dv", 30000.0))
     threshold = float(plot_config.get("threshold", 8.301134972025815e-16))
@@ -76,9 +76,16 @@ if __name__=="__main__":
         help="Dataset timestep identifier."
     )
 
+    parser.add_argument(
+        "--sample-index",
+        required=True,
+        help="Sample identifier."
+    )
+
     args = parser.parse_args()
 
     main(
         config_path=args.config,
-        timestep=args.timestep
+        timestep=args.timestep,
+        sample_index=args.sample_index
     )

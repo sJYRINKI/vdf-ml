@@ -1,5 +1,5 @@
 dataset_dir: data/processed/timesteps_{timestep}
-output_dir: data/processed/timesteps_{timestep}/plots
+output_dir: data/processed/timesteps_{timestep}/all_plots
 
 plot:
   dv: 30000.0

@@ -1,4 +1,4 @@
-#python scripts/plot_dataset_all.py --config configs/plot_dataset.yaml --timestep 3408_100
+#python scripts/plot_dataset_all.py --config configs/plot_dataset_all.yaml --timestep 3408_100
 import argparse
 import sys
 from pathlib import Path
@@ -55,6 +55,10 @@ def main(config_path, timestep):
             threshold=threshold,
             vdflim=vdflim,
         )
+
+    print(f"Dataset directory: {dataset_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Saved plots to: {output_path}")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(

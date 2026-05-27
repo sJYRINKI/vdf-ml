@@ -1,0 +1,7 @@
+dataset_dir: data/processed/timesteps_{timestep}
+output_dir: data/processed/timesteps_{timestep}/sample_plots
+
+plot:
+  dv: 30000.0
+  threshold: 8.301134972025815e-16
+  vdflim: 2000000.0

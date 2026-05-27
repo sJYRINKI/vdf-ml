@@ -78,9 +78,8 @@ def plot_vdf_xz_slice(
 
     ax1.set_title(
         f"sample {metadata_row["sample_index"]}, "
-        f"label={int(y_label)}, "
         f"class={metadata_row["class_name"]}, "
-        f"timestep={metadata_row["timestep"]}"
+        f"t={metadata_row["timestep"] / 2}"
         
     )
 
