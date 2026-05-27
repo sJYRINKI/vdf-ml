@@ -1,0 +1,6 @@
+frames_dir: data/processed/timesteps_{timestep}/all_plots
+output_dir: data/processed/timesteps_{timestep}/animations
+
+animation:
+  frame_pattern: sample_%04d_xz.png
+  output_file: vdf_xz.mp4
