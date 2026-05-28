@@ -10,7 +10,7 @@ from src.config import load_config
 from src.dataset_io import load_dataset
 from src.dataset_plot import plot_vdf_xz_slice
 from src.timesteps import create_timestep_path
-from src.vdf_helpers import get_velocity_mesh_extent_from_file
+from src.vdf_helpers import get_vdf_plot_parameters_from_file
 
 def main(config_path, timestep):
     config = load_config(config_path)
@@ -27,8 +27,6 @@ def main(config_path, timestep):
 
     plot_config = config["plot"]
 
-    dv = float(plot_config.get("dv", 30000.0))
-    threshold = float(plot_config.get("threshold", 8.301134972025815e-16))
     vdflim = float(plot_config.get("vdflim", 2e6))
 
     X, y, metadata = load_dataset(dataset_dir)
@@ -39,15 +37,21 @@ def main(config_path, timestep):
         metadata_row = metadata.iloc[sample_index]
         class_name = metadata_row["class_name"]
         file_location = metadata_row["file_location"]
+        cid = int(metadata_row["cid"])
 
         if class_name not in class_frame_counts:
             class_frame_counts[class_name] = 0
 
         class_frame_index = class_frame_counts[class_name]
 
-        extent = get_velocity_mesh_extent_from_file(
-            file_location=file_location
+        extent, dv, threshold = get_vdf_plot_parameters_from_file(
+            file_location=file_location,
+            cid=cid,
+            vdf_shape=X[sample_index].shape,
         )
+
+        print(dv)
+        print(threshold)
 
         class_output_dir = output_dir / class_name
         output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"

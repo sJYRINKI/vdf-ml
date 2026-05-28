@@ -43,22 +43,99 @@ def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
 
     return int(cid)
 
-def get_velocity_mesh_extent_from_file(file_location, pop="avgs"):
+def get_min_value_from_file(file_location, cid):
     """
-    Get the velocity mesh extent from a VLSV file.
+    Read the VDF minimum value.
 
     Parameters
     ----------
     file_location : str
-        Path to the VLSV file.
+        Path to VLSV file.
+    cid : int
+        Spatial cell ID.
+
+    Returns
+    -------
+    float
+        VDF minimum value threshold.
+    """
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    return float(reader.read_variable("MinValue", int(cid)))
+
+def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
+    """
+    Compute velocity cell size from velocity mesh and VDF shape.
+
+    Parameters
+    ----------
+    extent : array-like of float
+        Velocity mesh extent.
+    vdf_shape : tuple of int
+        Shape of the VDF array.
+    axis : {"vx", "vy", "vz"}, optional
+        Velocity axis.
+
+    Returns
+    -------
+    float
+        Velocity cell size.
+    """
+
+    extent = np.asarray(extent, dtype=float)
+
+    axis_map = {
+        "vx": 0,
+        "vy": 1,
+        "vz": 2,
+    }
+
+    axis_index = axis_map[axis]
+
+    vmin = extent[axis_index]
+    vmax = [extent[axis_index + 3]]
+
+    return float((vmax - vmin) / vdf_shape[axis_index])
+
+def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs"):
+    """
+    Read sample specific parameters from a VLSV file.
+
+    Parameters
+    ----------
+    file_location : str
+        Path to VLSV file.
+    cid : int
+        Spatial cell ID..
+    vdf_shape : tuple of int
+        Shape of the VDF array.
     pop : str, optional
         Particle population name.
 
     Returns
     -------
-    numpy.ndarray
+    extent : numpy.ndarray
         Velocity mesh extent.
+    dc : float
+        Velocity cell size.
+    threshold : float
+        VDF sparsity threshold.
     """
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
-    return reader.get_velocity_mesh_extent(pop=pop)
+
+    extent = np.asarray(
+        reader.get_velocity_mesh_extent(pop=pop),
+        dtype=float
+    )
+
+    dv = get_velocity_cell_size_from_extent(
+        extent=extent,
+        vdf_shape=vdf_shape,
+    )
+
+    threshold = get_min_value_from_file(
+        file_location=file_location,
+        cid=cid
+    )
+
+    return extent, dv, threshold

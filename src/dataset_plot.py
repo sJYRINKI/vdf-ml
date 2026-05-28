@@ -12,8 +12,8 @@ def plot_vdf_xz_slice(
         metadata_row,
         extent,
         output_path,
-        dv=30000.0,
-        threshold=8.301134972025815e-16,
+        dv,
+        threshold,
         vdflim=2e6
 ):
     """
@@ -31,9 +31,9 @@ def plot_vdf_xz_slice(
         Velocity mesh extent ``[vxmin, vymin, vzmin, vxmax, vymax, vzmax]``.
     output_path : str
         Output PNG path.
-    dv : float, optional
+    dv : float
         Velocity grid cell size in m/s.
-    threshold : float, optional
+    threshold : float
         VDF threshold before multiplying by ``dv``.
     vdflim : float, optional
         Visible velocity limit in m/s.
