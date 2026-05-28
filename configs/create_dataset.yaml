@@ -7,4 +7,4 @@ labels:
   lobe: 0
 
 reconnection_coord_re: [-12, 0, 0]
-lobe_coord_re: [-12, 0, 6]
+lobe_coord_re: [-12, 0, 8]
