@@ -139,3 +139,21 @@ def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs")
     )
 
     return extent, dv, threshold
+
+def create_xz_slice(vdf):
+    """
+    Extract the middle xz slice from 3D VDF.
+
+    Parameters
+    ----------
+    vdf:numpy.ndarray
+        VDF array.
+
+    Returns
+    -------
+    numpy.ndarray
+        xz slice.
+    """
+
+    mid_y = vdf.shape[1] // 2
+    return vdf[:, mid_y, :]
