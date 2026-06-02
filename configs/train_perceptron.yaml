@@ -1,7 +1,8 @@
 dataset_dir: data/processed/timesteps_{timestep}
 output_dir: data/processed/timesteps_{timestep}/models
 
+features:
+  downsample_factor: 128
+
 model:
-  downsample_factor: 8
-  test_size: 0.40
-  ramdom_state: 1234
+  max_iter: 100
