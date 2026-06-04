@@ -67,6 +67,8 @@ def main(config_path, timestep, model_id, coord_re):
 
     downsample_factor = int(preprocessing["downsample_factor"])
     log_eps = float(preprocessing["log_eps"])
+    features_mean = preprocessing["features_mean"]
+    features_std = preprocessing["features_std"]
 
     features = create_perceptron_features(
         X=vdf[None, ...],
@@ -74,9 +76,10 @@ def main(config_path, timestep, model_id, coord_re):
         log_eps=log_eps,
     )
 
-    features_scaled, features_mean, features_std = standardize_features(
-        features=features
-    )
+    features_scaled = (features - features_mean) / features_std
+
+    print(features)
+    print(features_scaled)
 
     predicted_label = int(model.predict(features_scaled)[0])
     decision_score = float(model.decision_function(features_scaled)[0])
@@ -116,6 +119,7 @@ def main(config_path, timestep, model_id, coord_re):
         )
 
     print(f"Saved plot: {output_plot_path}")
+    print(model.classes_)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

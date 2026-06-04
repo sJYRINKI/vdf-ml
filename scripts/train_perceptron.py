@@ -55,12 +55,6 @@ def main(config_path, dataset_id, model_id):
         downsample_factor=downsample_factor
     )
 
-    features, features_mean, features_std = standardize_features(features)
-
-    print(features.shape)
-    print(features_mean)
-    print(features_std)
-
     train_indices, test_indices, train_timesteps, test_timesteps = split_by_timestep(
         metadata=metadata
     )
@@ -71,8 +65,8 @@ def main(config_path, dataset_id, model_id):
     y_train = y[train_indices]
     y_test = y[test_indices]
 
-    X_train, X_train_mean, X_train_std = standardize_features(X_train_raw)
-    X_test, X_test_mean, X_test_std= standardize_features(X_test_raw)
+    X_train, features_mean, features_std = standardize_features(X_train_raw)
+    X_test =  (X_test_raw - features_mean) / features_std
 
     model = Perceptron(
         max_iter=max_iter,
