@@ -1,4 +1,4 @@
-#python scripts/make_dataset.py --config configs/create_dataset.yaml --start-timestep 3408 --n-timesteps 100
+#python scripts/make_dataset.py --config configs/create_dataset.yaml --start-timestep 3408 --n-timesteps 100 --dataset-kind train
 
 import argparse
 import sys
@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import analysator as pt
 
-PRPJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(PRPJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.timesteps import create_timestep_list, create_timestep_path
@@ -16,7 +16,7 @@ from src.vdf_extract import extract_vdf
 from src.dataset_items import iter_labeled_coords
 from src.dataset_io import create_dataset_output_dir, save_dataset
 
-def main(config_path, start_timestep, n_timesteps):
+def main(config_path, start_timestep, n_timesteps, dataset_kind):
     config = load_config(config_path)
 
     timesteps = create_timestep_list(
@@ -24,7 +24,8 @@ def main(config_path, start_timestep, n_timesteps):
         n_timesteps=n_timesteps
     )
 
-    output_dir = config["output_dir"]
+    output_dirs = config["output_dirs"]
+    output_dir = output_dirs[dataset_kind]
 
     outdir = create_dataset_output_dir(
         output_dir=output_dir,
@@ -32,6 +33,7 @@ def main(config_path, start_timestep, n_timesteps):
         n_timestep=n_timesteps,
     )
 
+    print(f"Dataset kind: {dataset_kind}")
     print(f"Output directory: {outdir}")
 
     X = []
@@ -139,10 +141,18 @@ if __name__=="__main__":
         help="Number of timesteps to process starting from start timestep"
     )
 
+    parser.add_argument(
+        "--dataset-kind",
+        choices=["train", "test"],
+        required=True,
+        help="Save the complete dataset under the configured train or test directory."
+    )
+
     args = parser.parse_args()
 
     main(
         config_path=args.config,
         start_timestep=args.start_timestep,
-        n_timesteps=args.n_timesteps
+        n_timesteps=args.n_timesteps,
+        dataset_kind=args.dataset_kind,
     )

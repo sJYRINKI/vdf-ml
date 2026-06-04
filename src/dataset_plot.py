@@ -14,7 +14,9 @@ def plot_vdf_xz_slice(
         output_path,
         dv,
         threshold,
-        vdflim=2e6
+        vdflim=2e6,
+        decision_score=None,
+        predicted_class_name=None,
 ):
     """
     Plot and save an xz VDF slice from one saved VDF sample.
@@ -76,12 +78,21 @@ def plot_vdf_xz_slice(
     ax1.set_xlabel("v_x")
     ax1.set_ylabel("v_z")
 
-    ax1.set_title(
-        f"sample {metadata_row["sample_index"]}, "
-        f"class={metadata_row["class_name"]}, "
-        f"t={metadata_row["timestep"] / 2}"
-        
-    )
+    title_parts = [
+        f"timestep={metadata_row.get('timestep', 'unknown')}",
+        f"cid={metadata_row.get('cid', 'unknown')}",
+    ]
+
+    if y_label is not None:
+        title_parts.append(f"true={int(y_label)}")
+
+    if predicted_class_name is not None:
+        title_parts.append(f"pred={predicted_class_name}")
+
+    if decision_score is not None:
+        title_parts.append(f"score={decision_score:.3g}")
+
+    ax1.set_title(", ".join(title_parts))
 
     fig.colorbar(im, ax=ax1, label="f(v)")
     fig.tight_layout()

@@ -1,6 +1,8 @@
 file_template: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
 
-output_dir: data/processed
+output_dirs:
+  train: data/train
+  test: data/test
 
 labels:
   reconnection: 1

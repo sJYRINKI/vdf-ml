@@ -1,4 +1,4 @@
-#python scripts/train_perceptron.py --config configs/train_perceptron.yaml --timestep 3408_100
+#python scripts/train_perceptron.py --config configs/train_perceptron.yaml --dataset-id 3408_100 --model-id v1.0
 import argparse
 import sys
 from pathlib import Path
@@ -17,21 +17,23 @@ from src.perceptron_features import (
     create_perceptron_features,
     standardize_features,
 )
-from src.timesteps import create_timestep_path
+from src.timesteps import create_path
 from src.model_evaluation import create_predictions_dataframe
 from src.model_split import split_by_timestep
 
-def main(config_path, timestep):
+def main(config_path, dataset_id, model_id):
     config = load_config(config_path)
 
-    dataset_dir = create_timestep_path(
+    dataset_dir = create_path(
         path_template=config["dataset_dir"],
-        timestep=timestep
+        dataset_id=dataset_id,
+        model_id=model_id,
     )
 
-    output_dir = create_timestep_path(
+    output_dir = create_path(
         path_template=config["output_dir"],
-        timestep=timestep
+        dataset_id=dataset_id,
+        model_id=model_id
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -40,7 +42,7 @@ def main(config_path, timestep):
     model_config = config["model"]
 
     downsample_factor = int(features_config.get("downsample_factor", 8))
-    max_iter = int(model_config.get("downsample_factor", 8))
+    max_iter = int(model_config.get("max_iter", 1000))
 
     X, y, metadata = load_dataset(dataset_dir)
 
@@ -73,7 +75,7 @@ def main(config_path, timestep):
     X_test, X_test_mean, X_test_std= standardize_features(X_test_raw)
 
     model = Perceptron(
-        max_iter=1000,
+        max_iter=max_iter,
         random_state=1234
     )
 
@@ -115,7 +117,7 @@ def main(config_path, timestep):
     )
 
     model_path = output_dir / "perceptron.joblib"
-    preprocessing_path = output_dir / "perceptron_preoprocessing.npz"
+    preprocessing_path = output_dir / "preprocessing.npz"
     predictions_path = output_dir / "predictions.csv"
     metrics_path = output_dir / "metrics.txt"
 
@@ -126,6 +128,9 @@ def main(config_path, timestep):
         features_mean=features_mean,
         features_std=features_std,
         downsample_factor=downsample_factor,
+        dataset_id=dataset_id,
+        model_id=model_id,
+        log_eps=1e-30,
     )
 
     predictions.to_csv(predictions_path, index=False)
@@ -133,6 +138,8 @@ def main(config_path, timestep):
     with open(metrics_path, "w") as f:
         f.write("Perceptron evaluation\n")
         f.write("=" * 70 + "\n")
+        f.write(f"Dataset ID: {dataset_id}\n")
+        f.write(f"Model ID: {model_id}\n")
         f.write(f"Dataset directory: {dataset_dir}\n")
         f.write(f"Feature shape: {features.shape}\n")
         f.write(f"Train samples: {len(train_indices)}\n")
@@ -165,14 +172,21 @@ if __name__=="__main__":
     )
 
     parser.add_argument(
-        "--timestep",
+        "--dataset-id",
         required=True,
-        help="Dataset timestep identifier."
+        help="Dataset identifier."
+    )
+
+    parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Model identifier."
     )
 
     args = parser.parse_args()
 
     main(
         config_path=args.config,
-        timestep=args.timestep,
+        dataset_id=args.dataset_id,
+        model_id=args.model_id,
     )

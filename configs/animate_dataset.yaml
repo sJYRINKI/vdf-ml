@@ -1,5 +1,5 @@
-frames_dir: data/processed/timesteps_{timestep}/plots
-output_dir: data/processed/timesteps_{timestep}/animations
+frames_dir: data/train/timesteps_{timestep}/plots
+output_dir: data/train/timesteps_{timestep}/animations
 
 animation:
   frame_pattern: sample_%04d_xz.png

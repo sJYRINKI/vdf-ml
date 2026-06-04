@@ -1,0 +1,11 @@
+file_template: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+
+model_dir: data/models/perceptron/{model_id}
+output_dir: data/predictions/perceptron/{model_id}/timesteps_{timestep}
+
+labels:
+  reconnection: 1
+  lobe: 0
+
+plot:
+  vdflim: 2000000.0

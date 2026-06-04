@@ -19,6 +19,26 @@ def coord_re_to_m(coord_re):
     """
     return np.array(coord_re, dtype=float) *R_EARTH
 
+def create_coordinate_name(coord_re):
+    """
+    Create a string name for the coordinate.
+
+    Parameters
+    ----------
+    coord_re : array-like of float
+        Coordinate in Earth radii, given as ``[x, y, z]``.
+
+    Returns
+    -------
+    str
+        Coordinate name.
+    """
+    return (
+        f"x{coord_re[0]:g}_y{coord_re[1]:g}_z{coord_re[2]:g}"
+        .replace(".", "p")
+        .replace("-", "m")
+    )
+
 def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
     """
     Find the nearest cell ID with a VDF.
