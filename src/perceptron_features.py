@@ -67,30 +67,3 @@ def create_perceptron_features(X, downsample_factor=8, log_eps=1e-30):
     features = np.array(features, dtype=np.float32)
 
     return features
-
-def standardize_features(features):
-    """
-    Standardize features to zero mean and to unit standard deviation.
-
-    Parameters
-    ----------
-    features : numpy.ndarray
-        Feature matrix.
-
-    Returns
-    -------
-    features_scaled : numpy.ndarray
-        Standardized feature matrix.
-    mean : numpy.ndarray
-        Feature means.
-    std : numpy.ndarray
-        Feature standard deviations.
-    """
-    mean = features.mean(axis=0)
-    std = features.std(axis=0)
-
-    std[std == 0] = 1.0
-
-    features_scaled = (features - mean) / std
-
-    return features_scaled, mean, std

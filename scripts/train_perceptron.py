@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 import numpy as np
 from sklearn.linear_model import Perceptron
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import joblib
 import pandas as pd
@@ -13,10 +15,7 @@ sys.path.append(str(PRPJECT_ROOT))
 
 from src.config import load_config
 from src.dataset_io import load_dataset
-from src.perceptron_features import (
-    create_perceptron_features,
-    standardize_features,
-)
+from src.perceptron_features import create_perceptron_features
 from src.timesteps import create_path
 from src.model_evaluation import create_predictions_dataframe
 from src.model_split import split_by_timestep
@@ -59,18 +58,18 @@ def main(config_path, dataset_id, model_id):
         metadata=metadata
     )
 
-    X_train_raw = features[train_indices]
-    X_test_raw = features[test_indices]
+    X_train = features[train_indices]
+    X_test = features[test_indices]
 
     y_train = y[train_indices]
     y_test = y[test_indices]
 
-    X_train, features_mean, features_std = standardize_features(X_train_raw)
-    X_test =  (X_test_raw - features_mean) / features_std
-
-    model = Perceptron(
-        max_iter=max_iter,
-        random_state=1234
+    model = make_pipeline(
+        StandardScaler(),
+        Perceptron(
+            max_iter=max_iter,
+            random_state=1234
+        ),
     )
 
     model.fit(X_train, y_train)
@@ -119,8 +118,6 @@ def main(config_path, dataset_id, model_id):
 
     np.savez(
         preprocessing_path,
-        features_mean=features_mean,
-        features_std=features_std,
         downsample_factor=downsample_factor,
         dataset_id=dataset_id,
         model_id=model_id,

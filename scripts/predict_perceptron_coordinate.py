@@ -12,7 +12,7 @@ sys.path.append(str(PROJECT_ROOT))
 from src.config import load_config
 from src.dataset_plot import plot_vdf_xz_slice
 from src.model_io import load_perceptron_model
-from src.perceptron_features import create_perceptron_features, standardize_features
+from src.perceptron_features import create_perceptron_features
 from src.timesteps import create_path
 from src.vdf_extract import extract_vdf
 from src.vdf_helpers import get_vdf_plot_parameters_from_file, get_cellid_with_vdf
@@ -67,8 +67,6 @@ def main(config_path, timestep, model_id, coord_re):
 
     downsample_factor = int(preprocessing["downsample_factor"])
     log_eps = float(preprocessing["log_eps"])
-    features_mean = preprocessing["features_mean"]
-    features_std = preprocessing["features_std"]
 
     features = create_perceptron_features(
         X=vdf[None, ...],
@@ -76,13 +74,8 @@ def main(config_path, timestep, model_id, coord_re):
         log_eps=log_eps,
     )
 
-    features_scaled = (features - features_mean) / features_std
-
-    print(features)
-    print(features_scaled)
-
-    predicted_label = int(model.predict(features_scaled)[0])
-    decision_score = float(model.decision_function(features_scaled)[0])
+    predicted_label = int(model.predict(features)[0])
+    decision_score = float(model.decision_function(features)[0])
 
     predicted_class_name = label_to_class[predicted_label]
 
