@@ -14,7 +14,11 @@ from src.timesteps import create_timestep_list, create_timestep_path
 from src.vdf_helpers import get_cellid_with_vdf
 from src.vdf_extract import extract_vdf
 from src.dataset_items import iter_labeled_coords
-from src.dataset_io import create_dataset_output_dir, save_dataset
+from src.dataset_io import (
+    create_dataset_output_dir,
+    create_memmap_dataset,
+    save_metadata,
+)
 
 def main(config_path, start_timestep, n_timesteps, dataset_kind):
     config = load_config(config_path)
@@ -36,8 +40,11 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     print(f"Dataset kind: {dataset_kind}")
     print(f"Output directory: {outdir}")
 
-    X = []
-    y = []
+    labeled_coords = list(iter_labeled_coords(config))
+    n_samples = len(timesteps) * len(labeled_coords)
+
+    X = None
+    y = None
     metadata = []
 
     sample_index = 0
@@ -52,12 +59,11 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         print(f"File: {file_location}")
 
         reader = pt.vlsvfile.VlsvReader(str(file_location))
-
         simulation_time = reader.read_parameter("time")
 
         print(simulation_time)
 
-        for class_name, label, coord_re in iter_labeled_coords(config):
+        for class_name, label, coord_re in labeled_coords:
             print(f"Sample index: {sample_index}")
             print(f"Class: {class_name}, label: {label}")
             print(f"Coordinate RE: {coord_re}")
@@ -72,10 +78,18 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             vdf = extract_vdf(
                 file_location=file_location,
                 cid=int(cid)
-            )
+            ).astype(np.float32, copy=False)
 
-            X.append(vdf)
-            y.append(label)
+            if X is None:
+                X, y = create_memmap_dataset(
+                    outdir=outdir,
+                    n_samples=n_samples,
+                    sample_shape=vdf.shape,
+                    dtype=np.float32,
+                )
+
+            X[sample_index] = vdf
+            y[sample_index] = int(label)
 
             metadata.append(
                 {
@@ -99,13 +113,11 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
 
             sample_index += 1
 
-    X = np.stack(X).astype(np.float32)
-    y = np.array(y, dtype=np.int64)
+    X = flush()
+    y = flush()
 
-    save_dataset(
+    save_metadata(
         outdir=outdir,
-        X=X,
-        y=y,
         metadata=metadata,
     )
 
@@ -113,8 +125,9 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     print(f"y shape: {y.shape}")
     print(f"y: {y}")
     
-
-
+    print(f"Saved X: {outdir / 'X.npy'}")
+    print(f"Saved y: {outdir / 'y.npy'}")
+    print(f"Saved metadata: {outdir / 'metadata.csv'}")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(

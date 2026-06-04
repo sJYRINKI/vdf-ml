@@ -31,7 +31,7 @@ def main(config_path, timestep, sample_index):
 
     vdflim = float(plot_config.get("vdflim", 2e6))
 
-    X, y, metadata = load_dataset(dataset_dir)
+    X, y, metadata = load_dataset(dataset_dir, mmap=True)
 
     metadata_row = metadata.iloc[sample_index]
     file_location = metadata_row["file_location"]

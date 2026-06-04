@@ -26,6 +26,74 @@ def create_dataset_output_dir(output_dir, start_timestep, n_timestep):
 
     return outdir
 
+def create_memmap_dataset(outdir,n_samples, sample_shape, dtype=np.float32):
+    """
+    Create memory-mapped dataset file.
+
+    Parameters
+    ----------
+    outdir : str
+        Directory where dataset file is saved.
+    n_samples : int
+        Number of samples in the dataset.
+    sample_shape : tuple of int
+        Shape of one VDF sample.
+    dtype : data-type, optional
+        Desired data type for the array.
+
+    Returns
+    -------
+    X : numpy.memmap
+        Memory mapped array for the VDF.
+    y : numpy.memmap
+        Memory mapped array for the labels.
+    """
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    X = np.lib.format.open_memmap(
+        outdir / "X.npy",
+        mode="w+",
+        dtype=dtype,
+        shape=(int(n_samples), *sample_shape)
+    )
+
+    y = np.lib.format.open_memmap(
+        outdir / "y.npy",
+        mode="w+",
+        dtype=np.int64,
+        shape=(int(n_samples),),
+    )
+
+    return X, y
+
+def save_metadata(outdir, metadata):
+    """
+    Save dataset metadata.
+
+    Parameters
+    ----------
+    outdir : str
+        Directory where metadata file is saved.
+    metadata : list of dict
+        Metadata rows, one row per sample.
+    """
+    outdir = Path(outdir)
+
+    pd.DataFrame(metadata).to_csv(
+        outdir / "metadata.csv",
+        index=False
+    )
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(metadata).to_csv(
+        outdir / "metadata.csv",
+        index=False
+    )
+
 def save_dataset(outdir, X, y, metadata):
     """
     Save VDF data, labels, and metadata.
@@ -43,27 +111,24 @@ def save_dataset(outdir, X, y, metadata):
     """
 
     outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    np.savez_compressed(
-        outdir / "vdf.npz",
-        X=X,
-        y=y,
-    )
+    np.save(outdir / "X.npy", np.asanyarray(X, dtype=np.float32))
+    np.save(outdir / "y.npy", np.asanyarray(y, dtype=np.int64))
 
-    pd.DataFrame(metadata).to_csv(
-        outdir / "metadata.csv",
-        index=False
-    )
+    save_metadata(outdir, metadata)
 
-def load_dataset(dataset_dir):
+def load_dataset(dataset_dir, mmap=True):
     """
     Load saved VDF dataset.
 
     Parameters
     ----------
-    dataset_ddir : str
-        Directory containing ``vdf.npz`` and ``metadata.csv``.
-    
+    dataset_dir : str
+        Directory containing dataset arrays and metadata.
+    mmap : bool, optional
+        Whether to load the dataset as a memory-mapped array.
+
     Returns
     -------
     X : numpy.ndarray
@@ -76,12 +141,16 @@ def load_dataset(dataset_dir):
 
     dataset_dir = Path(dataset_dir)
 
-    npz_path = dataset_dir / "vdf.npz"
+    X_path = dataset_dir / "X.npy"
+    y_path = dataset_dir / "y.npy"
     metadata_path = dataset_dir / "metadata.csv"
 
-    data = np.load(npz_path)
-    X = data["X"]
-    y = data["y"]
+    if mmap:
+        X = np.load(X_path, mmap_mode="r")
+        y = np.load(y_path, mmap_mode="r")
+    else:
+        X = np.load(X_path)
+        y = np.load(y_path)
 
     metadata = pd.read_csv(metadata_path)
 
