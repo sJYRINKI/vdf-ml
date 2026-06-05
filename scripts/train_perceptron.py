@@ -78,6 +78,7 @@ def main(config_path, dataset_id, model_id):
     first_batch = True
 
     for epoch in range(max_iter):
+        print(f"Epoch {epoch + 1}/{max_iter}")
         for batch_indices in iter_index_batches(train_indices, batch_size):
             features_batch = create_perceptron_features(
                 X[batch_indices],
