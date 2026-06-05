@@ -113,8 +113,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
 
             sample_index += 1
 
-    X = flush()
-    y = flush()
+    X.flush()
+    y.flush()
 
     save_metadata(
         outdir=outdir,

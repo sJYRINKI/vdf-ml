@@ -174,7 +174,7 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Dataset ID: {dataset_id}\n")
         f.write(f"Model ID: {model_id}\n")
         f.write(f"Dataset directory: {dataset_dir}\n")
-        f.write(f"Feature shape: {features.shape}\n")
+        f.write(f"Feature shape: {X.shape}\n")
         f.write(f"Train samples: {len(train_indices)}\n")
         f.write(f"Test samples: {len(test_indices)}\n")
         f.write(f"Train timesteps: {train_timesteps[0]} ... {train_timesteps[-1]}\n")

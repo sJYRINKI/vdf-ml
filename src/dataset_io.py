@@ -79,15 +79,8 @@ def save_metadata(outdir, metadata):
     metadata : list of dict
         Metadata rows, one row per sample.
     """
+    
     outdir = Path(outdir)
-
-    pd.DataFrame(metadata).to_csv(
-        outdir / "metadata.csv",
-        index=False
-    )
-
-    outdir = Path(outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
 
     pd.DataFrame(metadata).to_csv(
         outdir / "metadata.csv",

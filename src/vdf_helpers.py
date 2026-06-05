@@ -112,7 +112,7 @@ def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
     axis_index = axis_map[axis]
 
     vmin = extent[axis_index]
-    vmax = [extent[axis_index + 3]]
+    vmax = extent[axis_index + 3]
 
     return float((vmax - vmin) / vdf_shape[axis_index])
 
