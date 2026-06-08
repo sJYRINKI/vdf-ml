@@ -2,8 +2,9 @@ dataset_dir: data/train/timesteps_{dataset_id}
 output_dir: data/models/perceptron/{model_id}
 
 features:
-  downsample_factor: 128
-  batch_size: 64
+  downsample_factor: 8
+  batch_size: 512
+  n_jobs: 4
 
 model:
-  max_iter: 10
+  max_iter: 1000

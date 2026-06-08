@@ -16,11 +16,10 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.dataset_io import load_dataset
-from src.features import create_features
 from src.timesteps import create_path
 from src.model_evaluation import create_predictions_dataframe
 from src.model_split import split_by_timestep
-from src.batches import iter_index_batches, predict_in_batches
+from src.batches import create_features_in_batches
 
 def main(config_path, dataset_id, model_id):
     config = load_config(config_path)
@@ -44,6 +43,8 @@ def main(config_path, dataset_id, model_id):
 
     downsample_factor = int(features_config.get("downsample_factor", 8))
     batch_size = int(features_config.get("batch_size", 64))
+    n_jobs = int(features_config.get("n_jobs", 1))
+    log_eps = float(features_config.get("log_eps", 1e-30))
     max_iter = int(model_config.get("max_iter", 1000))
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
@@ -58,66 +59,40 @@ def main(config_path, dataset_id, model_id):
 
     y_train = np.asarray(y[train_indices])
     y_test = np.asarray(y[test_indices])
-    classes = np.unique(y)
+    print("Creating train features")
+    X_train_features = create_features_in_batches(
+        X=X,
+        indices=train_indices,
+        downsample_factor=downsample_factor,
+        batch_size=batch_size,
+        n_jobs=n_jobs,
+        log_eps=log_eps,
+    )
+
+    print("Creating test features")
+    X_test_features = create_features_in_batches(
+        X=X,
+        indices=test_indices,
+        downsample_factor=downsample_factor,
+        batch_size=batch_size,
+        n_jobs=n_jobs,
+        log_eps=log_eps,
+    )
+
+    print(f"Train features: {X_train_features.shape}")
+    print(f"Test features: {X_test_features.shape}")
 
     scaler = StandardScaler()
     perceptron = Perceptron(
         max_iter=max_iter,
         random_state=1234,
-        warm_start=True,
     )
 
-    for batch_indices in iter_index_batches(train_indices, batch_size):
-        features_batch = create_features(
-            X=X[batch_indices],
-            downsample_factor=downsample_factor,
-        )
-
-        scaler.partial_fit(features_batch)
-
-    first_batch = True
-
-    for epoch in range(max_iter):
-        print(f"Epoch {epoch + 1}/{max_iter}")
-        for batch_indices in iter_index_batches(train_indices, batch_size):
-            features_batch = create_features(
-                X[batch_indices],
-                downsample_factor=downsample_factor,
-            )
-
-            features_batch = scaler.transform(features_batch)
-            y_batch = np.asarray(y[batch_indices])
-
-            if first_batch:
-                perceptron.partial_fit(
-                    features_batch,
-                    y_batch,
-                    classes=classes,
-                )
-                first_batch = False
-            else:
-                perceptron.partial_fit(
-                    features_batch,
-                    y_batch,
-                )
-    
     model = make_pipeline(scaler, perceptron)
+    model.fit(X_train_features, y_train)
 
-    y_train_pred = predict_in_batches(
-        model_pipeline=model,
-        X=X,
-        indices=train_indices,
-        downsample_factor=downsample_factor,
-        batch_size=batch_size,
-    )
-
-    y_test_pred = predict_in_batches(
-        model_pipeline=model,
-        X=X,
-        indices=test_indices,
-        downsample_factor=downsample_factor,
-        batch_size=batch_size,
-    )
+    y_train_pred = model.predict(X_train_features)
+    y_test_pred = model.predict(X_test_features)
 
     train_accuracy = accuracy_score(y_train, y_train_pred)
     test_accuracy = accuracy_score(y_test, y_test_pred)
@@ -163,8 +138,9 @@ def main(config_path, dataset_id, model_id):
         downsample_factor=downsample_factor,
         dataset_id=dataset_id,
         model_id=model_id,
-        log_eps=1e-30,
+        log_eps=log_eps,
         batch_size=batch_size,
+        n_jobs=n_jobs,
     )
 
     predictions.to_csv(predictions_path, index=False)
@@ -175,9 +151,12 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Dataset ID: {dataset_id}\n")
         f.write(f"Model ID: {model_id}\n")
         f.write(f"Dataset directory: {dataset_dir}\n")
-        f.write(f"Feature shape: {X.shape}\n")
+        f.write(f"Raw dataset shape: {X.shape}\n")
+        f.write(f"Train feature shape: {X_train_features.shape}\n")
+        f.write(f"Test feature shape: {X_test_features.shape}\n")
         f.write(f"Train samples: {len(train_indices)}\n")
         f.write(f"Test samples: {len(test_indices)}\n")
+        f.write(f"Feature extraction jobs: {n_jobs}\n")
         f.write(f"Train timesteps: {train_timesteps[0]} ... {train_timesteps[-1]}\n")
         f.write(f"Test timesteps: {test_timesteps[0]} ... {test_timesteps[-1]}\n")
         f.write(f"Train accuracy: {train_accuracy}\n")
