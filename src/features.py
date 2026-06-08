@@ -32,7 +32,7 @@ def downsample_2d(array, factor):
         factor,
     ).mean(axis=(1, 3))
 
-def create_perceptron_features(X, downsample_factor=8, log_eps=1e-30):
+def create_features(X, downsample_factor=8, log_eps=1e-30):
     """
     Convert 3D VDF into flattened 2D features.
 

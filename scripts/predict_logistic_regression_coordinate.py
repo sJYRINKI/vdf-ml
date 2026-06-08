@@ -1,9 +1,8 @@
-#python scripts/predict_perceptron_coordinate.py --config configs/predict_coordinate_perceptron.yaml --timestep 4000 --model-id v1.0 --coord-re -12 0 0
+#python scripts/predict_logistic_regression_coordinate.py --config configs/predict_coordinate_logistic_regression.yaml --timestep 4000 --model-id v1.0 --coord-re -12 0 0
 
 import argparse
 import sys
 from pathlib import Path
-import pandas as pd
 import analysator as pt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,12 +10,13 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.dataset_plot import plot_vdf_xz_slice
-from src.model_io import load_perceptron_model
+from src.model_io import load_logistic_regression_model
 from src.features import create_features
 from src.timesteps import create_path
 from src.vdf_extract import extract_vdf
 from src.vdf_helpers import get_vdf_plot_parameters_from_file, get_cellid_with_vdf
 from src.vdf_helpers import create_coordinate_name
+
 
 def main(config_path, timestep, model_id, coord_re):
     config = load_config(config_path)
@@ -63,7 +63,7 @@ def main(config_path, timestep, model_id, coord_re):
         cid=cid,
     )
 
-    model, preprocessing = load_perceptron_model(model_dir)
+    model, preprocessing = load_logistic_regression_model(model_dir)
 
     downsample_factor = int(preprocessing["downsample_factor"])
     log_eps = float(preprocessing["log_eps"])
@@ -75,7 +75,9 @@ def main(config_path, timestep, model_id, coord_re):
     )
 
     predicted_label = int(model.predict(features)[0])
-    decision_score = float(model.decision_function(features)[0])
+    class_probabilities = model.predict_proba(features)[0]
+    predicted_class_index = list(model.classes_).index(predicted_label)
+    predicted_probability = float(class_probabilities[predicted_class_index])
 
     predicted_class_name = label_to_class[predicted_label]
 
@@ -108,15 +110,18 @@ def main(config_path, timestep, model_id, coord_re):
             threshold=threshold,
             vdflim=vdflim,
             predicted_class_name=predicted_class_name,
-            decision_score=decision_score,
+            decision_score=predicted_probability,
         )
 
     print(f"Saved plot: {output_plot_path}")
+    print(f"Predicted class: {predicted_class_name}")
+    print(f"Predicted probability: {predicted_probability}")
     print(model.classes_)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Predict one VDF from coordinates using a trained perceptron."
+        description="Predict one VDF from coordinates using a trained logistic regression classifier."
     )
 
     parser.add_argument(

@@ -1,10 +1,10 @@
-#python scripts/train_perceptron.py --config configs/train_perceptron.yaml --dataset-id 3408_100 --model-id v1.0
+#python scripts/train_logistic_regression.py --config configs/train_logistic_regression.yaml --dataset-id 3408_100 --model-id v1.0
 
 import argparse
 import sys
 from pathlib import Path
 import numpy as np
-from sklearn.linear_model import Perceptron
+from sklearn.linear_model import SGDClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
@@ -21,6 +21,7 @@ from src.timesteps import create_path
 from src.model_evaluation import create_predictions_dataframe
 from src.model_split import split_by_timestep
 from src.batches import iter_index_batches, predict_in_batches
+
 
 def main(config_path, dataset_id, model_id):
     config = load_config(config_path)
@@ -45,6 +46,10 @@ def main(config_path, dataset_id, model_id):
     downsample_factor = int(features_config.get("downsample_factor", 8))
     batch_size = int(features_config.get("batch_size", 64))
     max_iter = int(model_config.get("max_iter", 1000))
+    alpha = float(model_config.get("alpha", 0.0001))
+    penalty = model_config.get("penalty", "l2")
+    learning_rate = model_config.get("learning_rate", "optimal")
+    eta0 = float(model_config.get("eta0", 0.0))
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
 
@@ -61,10 +66,16 @@ def main(config_path, dataset_id, model_id):
     classes = np.unique(y)
 
     scaler = StandardScaler()
-    perceptron = Perceptron(
-        max_iter=max_iter,
+    logistic_regression = SGDClassifier(
+        loss="log_loss",
+        alpha=alpha,
+        penalty=penalty,
+        learning_rate=learning_rate,
+        eta0=eta0,
         random_state=1234,
         warm_start=True,
+        max_iter=max_iter,
+        tol=None,
     )
 
     for batch_indices in iter_index_batches(train_indices, batch_size):
@@ -89,19 +100,19 @@ def main(config_path, dataset_id, model_id):
             y_batch = np.asarray(y[batch_indices])
 
             if first_batch:
-                perceptron.partial_fit(
+                logistic_regression.partial_fit(
                     features_batch,
                     y_batch,
                     classes=classes,
                 )
                 first_batch = False
             else:
-                perceptron.partial_fit(
+                logistic_regression.partial_fit(
                     features_batch,
                     y_batch,
                 )
-    
-    model = make_pipeline(scaler, perceptron)
+
+    model = make_pipeline(scaler, logistic_regression)
 
     y_train_pred = predict_in_batches(
         model_pipeline=model,
@@ -122,7 +133,7 @@ def main(config_path, dataset_id, model_id):
     train_accuracy = accuracy_score(y_train, y_train_pred)
     test_accuracy = accuracy_score(y_test, y_test_pred)
 
-    print("Perceptron results")
+    print("Logistic regression results")
     print("\n")
     print(f"Train accuracy: {train_accuracy}")
     print("\n")
@@ -151,7 +162,7 @@ def main(config_path, dataset_id, model_id):
         ignore_index=True,
     )
 
-    model_path = output_dir / "perceptron.joblib"
+    model_path = output_dir / "logistic_regression.joblib"
     preprocessing_path = output_dir / "preprocessing.npz"
     predictions_path = output_dir / "predictions.csv"
     metrics_path = output_dir / "metrics.txt"
@@ -170,7 +181,7 @@ def main(config_path, dataset_id, model_id):
     predictions.to_csv(predictions_path, index=False)
 
     with open(metrics_path, "w") as f:
-        f.write("Perceptron evaluation\n")
+        f.write("Logistic regression evaluation\n")
         f.write("=" * 70 + "\n")
         f.write(f"Dataset ID: {dataset_id}\n")
         f.write(f"Model ID: {model_id}\n")
@@ -180,6 +191,11 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Test samples: {len(test_indices)}\n")
         f.write(f"Train timesteps: {train_timesteps[0]} ... {train_timesteps[-1]}\n")
         f.write(f"Test timesteps: {test_timesteps[0]} ... {test_timesteps[-1]}\n")
+        f.write(f"Max iterations: {max_iter}\n")
+        f.write(f"Alpha: {alpha}\n")
+        f.write(f"Penalty: {penalty}\n")
+        f.write(f"Learning rate: {learning_rate}\n")
+        f.write(f"Eta0: {eta0}\n")
         f.write(f"Train accuracy: {train_accuracy}\n")
         f.write(f"Test accuracy: {test_accuracy}\n\n")
         f.write("Test classification report\n")
@@ -194,15 +210,16 @@ def main(config_path, dataset_id, model_id):
     print(metrics_path)
     print(predictions)
 
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
-        description="Train a one-neuron perceptron on VDF data."
+        description="Train a logistic regression classifier on VDF data."
     )
 
     parser.add_argument(
         "--config",
         required=True,
-        help="Path to perceptron training config"
+        help="Path to logistic regression training config"
     )
 
     parser.add_argument(

@@ -5,7 +5,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.perceptron_features import create_perceptron_features
+from src.features import create_features
 
 
 
@@ -81,7 +81,7 @@ def predict_in_batches(model_pipeline, X, indices, downsample_factor, batch_size
     y_pred_batches = []
 
     for batch_indices in iter_index_batches(indices, batch_size):
-        features_batch = create_perceptron_features(
+        features_batch = create_features(
             X[batch_indices],
             downsample_factor=downsample_factor,
         )
