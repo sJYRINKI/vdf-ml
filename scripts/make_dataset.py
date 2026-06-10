@@ -1,18 +1,18 @@
 #python scripts/make_dataset.py --config configs/create_dataset.yaml --start-timestep 3408 --n-timesteps 100 --dataset-kind train
 
 import argparse
+import os
 import sys
 from pathlib import Path
 import numpy as np
-import analysator as pt
+from joblib import Parallel, delayed
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
-from src.timesteps import create_timestep_list, create_timestep_path
-from src.vdf_helpers import get_cellid_with_vdf
-from src.vdf_extract import extract_vdf
+from src.timesteps import create_timestep_list
+from src.dataset_helpers import iter_chunks, process_timestep, write_timestep_samples
 from src.dataset_items import iter_labeled_coords
 from src.dataset_io import (
     create_dataset_output_dir,
@@ -40,78 +40,76 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     print(f"Dataset kind: {dataset_kind}")
     print(f"Output directory: {outdir}")
 
+    creation_config = config.get("creation", {})
+    n_jobs = int(creation_config.get("n_jobs", 1))
+    if n_jobs < 0:
+        worker_count = os.cpu_count() or 1
+    else:
+        worker_count = max(1, n_jobs)
+
     labeled_coords = list(iter_labeled_coords(config))
     n_samples = len(timesteps) * len(labeled_coords)
 
-    X = None
-    y = None
     metadata = []
-
     sample_index = 0
 
-    for timestep in timesteps:
-        file_location = create_timestep_path(
-            path_template=config["file_template"],
-            timestep=timestep
-        )
+    first_timestep = timesteps[0]
+    first_samples = process_timestep(
+        config=config,
+        timestep=first_timestep,
+        labeled_coords=labeled_coords,
+    )
 
-        print(f"Timestep: {timestep}")
-        print(f"File: {file_location}")
+    X, y = create_memmap_dataset(
+        outdir=outdir,
+        n_samples=n_samples,
+        sample_shape=first_samples[0]["vdf"].shape,
+        dtype=np.float32,
+    )
 
-        reader = pt.vlsvfile.VlsvReader(str(file_location))
-        simulation_time = reader.read_parameter("time")
+    sample_index = write_timestep_samples(
+        X=X,
+        y=y,
+        metadata=metadata,
+        timestep_samples=first_samples,
+        sample_index=sample_index,
+    )
 
-        print(simulation_time)
+    remaining_timesteps = timesteps[1:]
 
-        for class_name, label, coord_re in labeled_coords:
-            print(f"Sample index: {sample_index}")
-            print(f"Class: {class_name}, label: {label}")
-            print(f"Coordinate RE: {coord_re}")
-
-            cid = get_cellid_with_vdf(
-                reader=reader,
-                coord_re=coord_re,
+    if n_jobs == 1:
+        for timestep in remaining_timesteps:
+            timestep_samples = process_timestep(
+                config=config,
+                timestep=timestep,
+                labeled_coords=labeled_coords,
             )
-
-            print(f"Cell ID: {cid}")
-
-            vdf = extract_vdf(
-                file_location=file_location,
-                cid=int(cid)
-            ).astype(np.float32, copy=False)
-
-            if X is None:
-                X, y = create_memmap_dataset(
-                    outdir=outdir,
-                    n_samples=n_samples,
-                    sample_shape=vdf.shape,
-                    dtype=np.float32,
+            sample_index = write_timestep_samples(
+                X=X,
+                y=y,
+                metadata=metadata,
+                timestep_samples=timestep_samples,
+                sample_index=sample_index,
+            )
+    else:
+        for timestep_chunk in iter_chunks(remaining_timesteps, worker_count):
+            chunk_results = Parallel(n_jobs=n_jobs)(
+                delayed(process_timestep)(
+                    config=config,
+                    timestep=timestep,
+                    labeled_coords=labeled_coords,
                 )
-
-            X[sample_index] = vdf
-            y[sample_index] = int(label)
-
-            metadata.append(
-                {
-                    "sample_index": sample_index,
-                    "timestep": int(timestep),
-                    "simulation_time": simulation_time,
-                    "cid": int(cid),
-                    "label": int(label),
-                    "class_name": class_name,
-                    "x_re": float(coord_re[0]),
-                    "y_re": float(coord_re[1]),
-                    "z_re": float(coord_re[2]),
-                    "file_location": str(file_location),
-                }
+                for timestep in timestep_chunk
             )
 
-            print(f"VDF shape: {vdf.shape}")
-            print(f"VDF dtype: {vdf.dtype}")
-            print(f"VDF min: {vdf.min()}")
-            print(f"VDF max: {vdf.max()}")
-
-            sample_index += 1
+            for timestep_samples in chunk_results:
+                sample_index = write_timestep_samples(
+                    X=X,
+                    y=y,
+                    metadata=metadata,
+                    timestep_samples=timestep_samples,
+                    sample_index=sample_index,
+                )
 
     X.flush()
     y.flush()
@@ -124,7 +122,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     print(f"X shape: {X.shape}")
     print(f"y shape: {y.shape}")
     print(f"y: {y}")
-    
+
     print(f"Saved X: {outdir / 'X.npy'}")
     print(f"Saved y: {outdir / 'y.npy'}")
     print(f"Saved metadata: {outdir / 'metadata.csv'}")

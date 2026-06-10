@@ -9,6 +9,9 @@ labels:
   lobe: 0
   other: -1
 
+creation:
+  n_jobs: 4
+
 class_coords_re:
   reconnection:
     - [-12, 0, 0]

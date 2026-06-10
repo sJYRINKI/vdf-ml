@@ -104,6 +104,11 @@ def main(config_path, dataset_id, model_id):
 
     train_accuracy = accuracy_score(y_train, y_train_pred)
     test_accuracy = accuracy_score(y_test, y_test_pred)
+    train_error = 1.0 - train_accuracy
+    test_error = 1.0 - test_accuracy
+    generalization_gap = test_error - train_error
+    bias_proxy = train_error
+    variance_proxy = max(0.0, generalization_gap)
 
     print("Logistic regression lobe-vs-rest results")
     print("\n")
@@ -173,7 +178,12 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Solver: {solver}\n")
         f.write(f"C: {C}\n")
         f.write(f"Train accuracy: {train_accuracy}\n")
-        f.write(f"Test accuracy: {test_accuracy}\n\n")
+        f.write(f"Test accuracy: {test_accuracy}\n")
+        f.write(f"Train error: {train_error}\n")
+        f.write(f"Test error: {test_error}\n")
+        f.write(f"Generalization gap: {generalization_gap}\n")
+        f.write(f"Bias proxy: {bias_proxy}\n")
+        f.write(f"Variance proxy: {variance_proxy}\n\n")
         f.write("Test classification report\n")
         f.write("=" * 70 + "\n")
         f.write(classification_report(y_test, y_test_pred, zero_division=0))
