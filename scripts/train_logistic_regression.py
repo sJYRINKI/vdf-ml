@@ -17,7 +17,7 @@ sys.path.append(str(PROJECT_ROOT))
 from src.config import load_config
 from src.dataset_io import load_dataset
 from src.timesteps import create_path
-from src.model_evaluation import create_predictions_dataframe
+from src.model_evaluation import create_lobe_vs_rest_labels, create_predictions_dataframe
 from src.model_split import split_by_timestep
 from src.batches import create_features_in_batches
 
@@ -61,8 +61,9 @@ def main(config_path, dataset_id, model_id):
         metadata=metadata
     )
 
-    y_train = np.asarray(y[train_indices])
-    y_test = np.asarray(y[test_indices])
+    binary_y = create_lobe_vs_rest_labels(metadata)
+    y_train = binary_y[train_indices]
+    y_test = binary_y[test_indices]
     print("Creating train features")
     X_train_features = create_features_in_batches(
         X=X,
@@ -104,7 +105,7 @@ def main(config_path, dataset_id, model_id):
     train_accuracy = accuracy_score(y_train, y_train_pred)
     test_accuracy = accuracy_score(y_test, y_test_pred)
 
-    print("Logistic regression results")
+    print("Logistic regression lobe-vs-rest results")
     print("\n")
     print(f"Train accuracy: {train_accuracy}")
     print("\n")
@@ -153,7 +154,7 @@ def main(config_path, dataset_id, model_id):
     predictions.to_csv(predictions_path, index=False)
 
     with open(metrics_path, "w") as f:
-        f.write("Logistic regression evaluation\n")
+        f.write("Logistic regression lobe-vs-rest evaluation\n")
         f.write("=" * 70 + "\n")
         f.write(f"Dataset ID: {dataset_id}\n")
         f.write(f"Model ID: {model_id}\n")
@@ -164,6 +165,7 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Train samples: {len(train_indices)}\n")
         f.write(f"Test samples: {len(test_indices)}\n")
         f.write(f"Feature extraction jobs: {n_jobs}\n")
+        f.write("Target: lobe=1, rest=0\n")
         f.write(f"Train timesteps: {train_timesteps[0]} ... {train_timesteps[-1]}\n")
         f.write(f"Test timesteps: {test_timesteps[0]} ... {test_timesteps[-1]}\n")
         f.write(f"Max iterations: {max_iter}\n")

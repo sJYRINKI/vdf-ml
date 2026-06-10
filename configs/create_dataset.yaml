@@ -7,6 +7,13 @@ output_dirs:
 labels:
   reconnection: 1
   lobe: 0
+  other: -1
 
-reconnection_coord_re: [-12, 0, 0]
-lobe_coord_re: [-12, 0, 8]
+class_coords_re:
+  reconnection:
+    - [-12, 0, 0]
+  lobe:
+    - [-12, 0, 8]
+  other:
+    - [-10, 0, 0]
+    - [-17, 0, 0]

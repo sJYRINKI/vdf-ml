@@ -4,8 +4,8 @@ model_dir: data/models/logistic_regression/{model_id}
 output_dir: data/predictions/logistic_regression/{model_id}/timesteps_{timestep}
 
 labels:
-  reconnection: 1
-  lobe: 0
+  rest: 0
+  lobe: 1
 
 plot:
   vdflim: 2000000.0

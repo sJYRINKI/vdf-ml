@@ -83,6 +83,10 @@ def plot_vdf_xz_slice(
         f"cid={metadata_row.get('cid', 'unknown')}",
     ]
 
+    class_name = metadata_row.get("class_name")
+    if class_name is not None:
+        title_parts.append(f"class={class_name}")
+
     if y_label is not None:
         title_parts.append(f"true={int(y_label)}")
 
