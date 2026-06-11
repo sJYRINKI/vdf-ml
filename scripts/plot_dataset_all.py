@@ -1,14 +1,17 @@
 #python scripts/plot_dataset_all.py --config configs/plot_dataset_all.yaml --timestep 3408_100
 import argparse
+import os
 import sys
 from pathlib import Path
+
+os.environ['PTNOLATEX']='1'
 
 PRPJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PRPJECT_ROOT))
 
 from src.config import load_config
 from src.dataset_io import load_dataset
-from src.dataset_plot import plot_vdf_xz_slice
+from src.dataset_plot import plot_labeled_colormap, plot_vdf_xz_slice
 from src.timesteps import create_timestep_path
 from src.vdf_helpers import get_vdf_plot_parameters_from_file
 
@@ -28,8 +31,20 @@ def main(config_path, timestep):
     plot_config = config["plot"]
 
     vdflim = float(plot_config.get("vdflim", 2e6))
+    colormap_config = plot_config.get("colormap", {})
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
+
+    for frame_index, (_, timestep_metadata) in enumerate(metadata.groupby("timestep")):
+        colormap_output_path = output_dir / "colormaps" / f"colormap_{frame_index:04d}.png"
+
+        plot_labeled_colormap(
+            metadata_rows=timestep_metadata,
+            output_path=colormap_output_path,
+            boxre=colormap_config.get("boxre", [-40, -1, -6, 6]),
+            vmin=float(colormap_config.get("vmin", -1.5e6)),
+            vmax=float(colormap_config.get("vmax", 1.5e6)),
+        )
 
     class_frame_counts = {}
 

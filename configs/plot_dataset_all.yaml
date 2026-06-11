@@ -3,3 +3,7 @@ output_dir: data/train/timesteps_{timestep}/plots
 
 plot:
   vdflim: 2000000.0
+  colormap:
+    boxre: [-27, -7, -9, 9]
+    vmin: -1500000.0
+    vmax: 1500000.0

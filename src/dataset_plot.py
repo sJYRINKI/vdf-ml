@@ -1,10 +1,13 @@
 from pathlib import Path
+import analysator as pt
 import matplotlib
 
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from src.colormap_helpers import expr_velocity, scatter_label_points
 
 def plot_vdf_xz_slice(
         vdf,
@@ -101,4 +104,47 @@ def plot_vdf_xz_slice(
     fig.colorbar(im, ax=ax1, label="f(v)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_labeled_colormap(metadata_rows, output_path, boxre, vmin, vmax):
+    """
+    Plot and save a spatial colormap with saved label points overlaid.
+
+    Parameters
+    ----------
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    output_path : str
+        Output PNG path.
+    boxre : list of float
+        Plot box in Earth radii: ``[xmin, xmax, zmin, zmax]``.
+    vmin : float
+        Minimum color scale value for the selected velocity component.
+    vmax : float
+        Maximum color scale value for the selected velocity component.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_location = metadata_rows.iloc[0]["file_location"]
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    pt.plot.plot_colormap(
+        filename=file_location,
+        axes=ax1,
+        boxre=boxre,
+        expression=expr_velocity,
+        operator="x",
+        vmin=vmin,
+        vmax=vmax,
+        streamlines="B",
+        streamlinecolor="black",
+    )
+
+    scatter_label_points(ax1, metadata_rows)
+
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
