@@ -1,4 +1,5 @@
-file_template: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+file_template_bulk: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+file_template_flux: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/flux/bulk.000{timestep:04d}.bin
 
 output_dirs:
   train: data/train
@@ -10,13 +11,15 @@ labels:
   other: -1
 
 creation:
-  n_jobs: 4
+  n_jobs: 8
+
+flux_points:
+  x_class_name: reconnection
+  o_class_name: other
+  region_re:
+    x_between: [-25.0, -5.0]
+    z_abs_max: 1.0
 
 class_coords_re:
-  reconnection:
-    - [-12, 0, 0]
   lobe:
     - [-12, 0, 8]
-  other:
-    - [-10, 0, 0]
-    - [-17, 0, 0]

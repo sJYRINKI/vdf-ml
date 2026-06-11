@@ -26,7 +26,7 @@ def process_timestep(config, timestep, labeled_coords):
     """
 
     file_location = create_timestep_path(
-        path_template=config["file_template"],
+        path_template=config["file_template_bulk"],
         timestep=timestep
     )
 

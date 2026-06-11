@@ -13,7 +13,7 @@ sys.path.append(str(PROJECT_ROOT))
 from src.config import load_config
 from src.timesteps import create_timestep_list
 from src.dataset_helpers import iter_chunks, process_timestep, write_timestep_samples
-from src.dataset_items import iter_labeled_coords
+from src.flux_point_labels import create_labeled_coords_by_timestep
 from src.dataset_io import (
     create_dataset_output_dir,
     create_memmap_dataset,
@@ -47,8 +47,10 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     else:
         worker_count = max(1, n_jobs)
 
-    labeled_coords = list(iter_labeled_coords(config))
-    n_samples = len(timesteps) * len(labeled_coords)
+    labeled_coords_by_timestep = create_labeled_coords_by_timestep(config=config, timesteps=timesteps)
+    n_samples = sum(len(labeled_coords) for labeled_coords in labeled_coords_by_timestep.values())
+
+    print(n_samples)
 
     metadata = []
     sample_index = 0
@@ -57,7 +59,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     first_samples = process_timestep(
         config=config,
         timestep=first_timestep,
-        labeled_coords=labeled_coords,
+        labeled_coords=labeled_coords_by_timestep[first_timestep],
     )
 
     X, y = create_memmap_dataset(
@@ -82,7 +84,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             timestep_samples = process_timestep(
                 config=config,
                 timestep=timestep,
-                labeled_coords=labeled_coords,
+                labeled_coords=labeled_coords_by_timestep[timestep],
             )
             sample_index = write_timestep_samples(
                 X=X,
@@ -97,7 +99,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
                 delayed(process_timestep)(
                     config=config,
                     timestep=timestep,
-                    labeled_coords=labeled_coords,
+                    labeled_coords=labeled_coords_by_timestep[timestep],
                 )
                 for timestep in timestep_chunk
             )
