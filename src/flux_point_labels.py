@@ -11,6 +11,33 @@ import logging
 from src.vdf_helpers import R_EARTH
 from src.timesteps import create_timestep_path
 
+def create_labeled_coords_for_timestep(config, timestep):
+    """
+    Create labeled coordinates for one timestep.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset config.
+    timestep : int
+        Timestep to process.
+
+    Returns
+    -------
+    tuple
+        Pair of ``(timestep, labeled_coords)``.
+    """
+
+    timestep_labeled_coords = list(iter_labeled_coords(config))
+    timestep_labeled_coords.extend(
+        iter_point_labeled_coords(
+            config=config,
+            timestep=timestep,
+        )
+    )
+
+    return int(timestep), timestep_labeled_coords
+
 def create_labeled_coords_by_timestep(config, timesteps):
     """
     Create labeled coordinates for each timestep.
@@ -28,21 +55,14 @@ def create_labeled_coords_by_timestep(config, timesteps):
         Mapping from timestep to labeled coordinates.
     """
 
-    manual_labeled_coords = list(iter_labeled_coords(config))
-    labeled_coords_by_timestep = {}
-
-    for timestep in timesteps:
-        timestep_labeled_coords = list(manual_labeled_coords)
-        timestep_labeled_coords.extend(
-            iter_point_labeled_coords(
-                config=config,
-                timestep=timestep
-            )
+    return dict(
+        create_labeled_coords_for_timestep(
+            config=config,
+            timestep=timestep,
         )
+        for timestep in timesteps
+    )
 
-        labeled_coords_by_timestep[int(timestep)] = timestep_labeled_coords
-
-    return labeled_coords_by_timestep
 def iter_labeled_coords(config):
     """
     Iterate over labeled coordinates for each class from config.
