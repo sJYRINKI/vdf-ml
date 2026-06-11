@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from joblib import Parallel, delayed
 import analysator as pt
 import matplotlib
 
@@ -8,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.colormap_helpers import expr_velocity, scatter_label_points
+from src.vdf_helpers import get_vdf_plot_parameters_from_file
 
 def plot_vdf_xz_slice(
         vdf,
@@ -148,3 +151,132 @@ def plot_labeled_colormap(metadata_rows, output_path, boxre, vmin, vmax):
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+def run_plot_jobs(plot_function, plot_jobs, n_jobs):
+    """
+    Run plotting jobs serially or in parallel.
+
+    Parameters
+    ----------
+    plot_function : callable
+        Plotting function called with each job dictionary as keyword arguments.
+    plot_jobs : list of dict
+        Plot job dictionaries.
+    n_jobs : int
+        Number of parallel workers. Use 1 for serial plotting.
+    """
+
+    if n_jobs == 1:
+        for plot_job in plot_jobs:
+            plot_function(**plot_job)
+        return
+
+    Parallel(n_jobs=n_jobs)(
+        delayed(plot_function)(**plot_job)
+        for plot_job in plot_jobs
+    )
+
+def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
+    """
+    Create plot jobs for one labeled colormap per timestep.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        Dataset metadata containing timestep, class, coordinate, and file columns.
+    output_dir : pathlib.Path
+        Base plot output directory for the dataset.
+    colormap_config : dict
+        Colormap plotting options.
+
+    Returns
+    -------
+    list of dict
+        Keyword argument dictionaries for ``plot_labeled_colormap``.
+    """
+
+    colormap_jobs = []
+
+    for frame_index, (_, timestep_metadata) in enumerate(metadata.groupby("timestep")):
+        colormap_output_path = output_dir / "colormaps" / f"colormap_{frame_index:04d}.png"
+
+        colormap_jobs.append(
+            {
+                "metadata_rows": timestep_metadata,
+                "output_path": colormap_output_path,
+                "boxre": colormap_config.get("boxre", [-40, -1, -6, 6]),
+                "vmin": float(colormap_config.get("vmin", -1.5e6)),
+                "vmax": float(colormap_config.get("vmax", 1.5e6)),
+            }
+        )
+
+    return colormap_jobs
+
+def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
+    """
+    Create plot jobs for all saved VDF samples.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF sample array.
+    y : numpy.ndarray
+        Integer labels for VDF samples.
+    metadata : pandas.DataFrame
+        Dataset metadata with one row per sample.
+    output_dir : pathlib.Path
+        Base plot output directory for the dataset.
+    vdflim : float
+        Velocity axis limit in m/s for VDF plots.
+
+    Returns
+    -------
+    list of dict
+        Keyword argument dictionaries for ``plot_vdf_xz_slice``.
+    """
+
+    class_frame_counts = {}
+    plot_parameter_cache = {}
+    vdf_jobs = []
+
+    for sample_index in range(X.shape[0]):
+        metadata_row = metadata.iloc[sample_index]
+        class_name = metadata_row["class_name"]
+        file_location = metadata_row["file_location"]
+        cid = int(metadata_row["cid"])
+
+        if class_name not in class_frame_counts:
+            class_frame_counts[class_name] = 0
+
+        class_frame_index = class_frame_counts[class_name]
+        vdf_shape = tuple(X[sample_index].shape)
+        cache_key = (file_location, cid, vdf_shape)
+
+        if cache_key not in plot_parameter_cache:
+            plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
+                file_location=file_location,
+                cid=cid,
+                vdf_shape=vdf_shape,
+            )
+
+        extent, dv, threshold = plot_parameter_cache[cache_key]
+
+        class_output_dir = output_dir / class_name
+        output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
+
+        vdf_jobs.append(
+            {
+                "vdf": X[sample_index],
+                "y_label": y[sample_index],
+                "metadata_row": metadata_row,
+                "extent": extent,
+                "output_path": output_path,
+                "dv": dv,
+                "threshold": threshold,
+                "vdflim": vdflim,
+            }
+        )
+
+        class_frame_counts[class_name] += 1
+
+    return vdf_jobs

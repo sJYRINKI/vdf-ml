@@ -4,16 +4,21 @@ import os
 import sys
 from pathlib import Path
 
-os.environ['PTNOLATEX']='1'
+os.environ["PTNOLATEX"] = "1"
 
 PRPJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PRPJECT_ROOT))
 
 from src.config import load_config
 from src.dataset_io import load_dataset
-from src.dataset_plot import plot_labeled_colormap, plot_vdf_xz_slice
+from src.dataset_plot import (
+    create_colormap_plot_jobs,
+    create_vdf_plot_jobs,
+    plot_labeled_colormap,
+    plot_vdf_xz_slice,
+    run_plot_jobs,
+)
 from src.timesteps import create_timestep_path
-from src.vdf_helpers import get_vdf_plot_parameters_from_file
 
 def main(config_path, timestep):
     config = load_config(config_path)
@@ -31,62 +36,39 @@ def main(config_path, timestep):
     plot_config = config["plot"]
 
     vdflim = float(plot_config.get("vdflim", 2e6))
+    n_jobs = int(plot_config.get("n_jobs", 1))
     colormap_config = plot_config.get("colormap", {})
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
 
-    for frame_index, (_, timestep_metadata) in enumerate(metadata.groupby("timestep")):
-        colormap_output_path = output_dir / "colormaps" / f"colormap_{frame_index:04d}.png"
+    colormap_jobs = create_colormap_plot_jobs(
+        metadata=metadata,
+        output_dir=output_dir,
+        colormap_config=colormap_config,
+    )
+    run_plot_jobs(
+        plot_function=plot_labeled_colormap,
+        plot_jobs=colormap_jobs,
+        n_jobs=n_jobs,
+    )
 
-        plot_labeled_colormap(
-            metadata_rows=timestep_metadata,
-            output_path=colormap_output_path,
-            boxre=colormap_config.get("boxre", [-40, -1, -6, 6]),
-            vmin=float(colormap_config.get("vmin", -1.5e6)),
-            vmax=float(colormap_config.get("vmax", 1.5e6)),
-        )
-
-    class_frame_counts = {}
-
-    for sample_index in range(X.shape[0]):
-        metadata_row = metadata.iloc[sample_index]
-        class_name = metadata_row["class_name"]
-        file_location = metadata_row["file_location"]
-        cid = int(metadata_row["cid"])
-
-        if class_name not in class_frame_counts:
-            class_frame_counts[class_name] = 0
-
-        class_frame_index = class_frame_counts[class_name]
-
-        extent, dv, threshold = get_vdf_plot_parameters_from_file(
-            file_location=file_location,
-            cid=cid,
-            vdf_shape=X[sample_index].shape,
-        )
-
-        print(dv)
-        print(threshold)
-
-        class_output_dir = output_dir / class_name
-        output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
-
-        plot_vdf_xz_slice(
-            vdf=X[sample_index],
-            y_label=y[sample_index],
-            metadata_row=metadata_row,
-            extent=extent,
-            output_path=output_path,
-            dv=dv,
-            threshold=threshold,
-            vdflim=vdflim,
-        )
-
-        class_frame_counts[class_name] += 1
+    vdf_jobs = create_vdf_plot_jobs(
+        X=X,
+        y=y,
+        metadata=metadata,
+        output_dir=output_dir,
+        vdflim=vdflim,
+    )
+    run_plot_jobs(
+        plot_function=plot_vdf_xz_slice,
+        plot_jobs=vdf_jobs,
+        n_jobs=n_jobs,
+    )
 
     print(f"Dataset directory: {dataset_dir}")
     print(f"Output directory: {output_dir}")
-    print(f"Saved plots to: {output_path}")
+    print(f"Saved {len(colormap_jobs)} colormap plots")
+    print(f"Saved {len(vdf_jobs)} VDF plots")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(

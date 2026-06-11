@@ -2,8 +2,9 @@ dataset_dir: data/train/timesteps_{timestep}
 output_dir: data/train/timesteps_{timestep}/plots
 
 plot:
+  n_jobs: 8
   vdflim: 2000000.0
   colormap:
-    boxre: [-27, -7, -9, 9]
+    boxre: [-15, -7, -9, 9]
     vmin: -1500000.0
     vmax: 1500000.0

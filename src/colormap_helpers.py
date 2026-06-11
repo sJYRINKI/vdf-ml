@@ -53,7 +53,7 @@ def scatter_label_points(ax, metadata_rows):
             row["x_re"],
             row["z_re"],
             label=label,
-            s=50,
+            s=10,
             **style,
         )
 
