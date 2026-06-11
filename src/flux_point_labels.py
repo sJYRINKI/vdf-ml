@@ -1,6 +1,7 @@
 import analysator as pt
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.path import Path as MplPath
 import sys
 from scipy.ndimage import convolve
 from scipy.signal import convolve2d
@@ -8,7 +9,7 @@ from shapely import geometry
 from numpy import linalg as LA
 import logging
 
-from src.vdf_helpers import R_EARTH
+from src.vdf_helpers import R_EARTH, get_cellid_with_vdf
 from src.timesteps import create_timestep_path
 
 def create_labeled_coords_for_timestep(config, timestep):
@@ -137,11 +138,88 @@ def iter_point_labeled_coords(config, timestep):
         flux_points_config=flux_points_config,
     )
 
+    x_point_coords_re, o_point_coords_re = remove_shared_cellid_points(
+        reader=reader,
+        x_point_coords_re=x_point_coords_re,
+        o_point_coords_re=o_point_coords_re,
+    )
+
     for coord_re in x_point_coords_re:
         yield x_class_name, int(labels[x_class_name]), coord_re
 
     for coord_re in o_point_coords_re:
         yield o_class_name, int(labels[o_class_name]), coord_re
+
+def remove_shared_cellid_points(reader, x_point_coords_re, o_point_coords_re):
+    """
+    Remove duplicate or contradictory flux-point labels by VDF cell ID.
+
+    Coordinates are grouped with ``get_cellid_with_vdf``, which is the same
+    cell-ID lookup used when samples are saved to metadata. If an X-point and
+    an O-point map to the same VDF cell ID, both are discarded. If multiple
+    points from the same class map to one VDF cell ID, only the first point is
+    kept.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader for the matching timestep.
+    x_point_coords_re : list of list of float
+        X-point coordinates in Earth radii, each given as ``[x, y, z]``.
+    o_point_coords_re : list of list of float
+        O-point coordinates in Earth radii, each given as ``[x, y, z]``.
+
+    Returns
+    -------
+    filtered_x_point_coords_re : list of list of float
+        One X-point coordinate per non-conflicting VDF cell ID.
+    filtered_o_point_coords_re : list of list of float
+        One O-point coordinate per non-conflicting VDF cell ID.
+    """
+
+    x_points_by_cellid = group_coords_by_cellid(reader, x_point_coords_re)
+    o_points_by_cellid = group_coords_by_cellid(reader, o_point_coords_re)
+
+    shared_cellids = set(x_points_by_cellid) & set(o_points_by_cellid)
+
+    filtered_x_point_coords_re = [
+        coords_re[0]
+        for cellid, coords_re in x_points_by_cellid.items()
+        if cellid not in shared_cellids
+    ]
+
+    filtered_o_point_coords_re = [
+        coords_re[0]
+        for cellid, coords_re in o_points_by_cellid.items()
+        if cellid not in shared_cellids
+    ]
+
+    return filtered_x_point_coords_re, filtered_o_point_coords_re
+
+def group_coords_by_cellid(reader, coords_re):
+    """
+    Group coordinates by the VDF cell ID used for saved samples.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader used to convert coordinates to VDF cell IDs.
+    coords_re : list of list of float
+        Coordinates in Earth radii, each given as ``[x, y, z]``.
+
+    Returns
+    -------
+    dict[int, list of list of float]
+        Mapping from VDF cell ID to all coordinates that resolve to that cell.
+    """
+
+    coords_by_cellid = {}
+
+    for coord_re in coords_re:
+        cellid = get_cellid_with_vdf(reader, coord_re)
+        coords_by_cellid.setdefault(cellid, []).append(coord_re)
+
+    return coords_by_cellid
 
 def find_point_coords_re(reader, flux_file_location, flux_points_config=None):
     """
@@ -289,7 +367,14 @@ def get_contour_paths(contour):
     if hasattr(contour, "collections"):
         return contour.collections[0].get_paths()
 
-    return contour.get_paths()
+    paths = []
+
+    for path in contour.get_paths():
+        for vertices in path.to_polygons(closed_only=False):
+            if len(vertices) > 1:
+                paths.append(MplPath(vertices))
+
+    return paths
 
 def find_intersection(v1,v2):
     """

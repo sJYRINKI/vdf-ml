@@ -15,7 +15,7 @@ def coord_re_to_m(coord_re):
     Returns
     -------
     numpy.ndarray
-        Coordinate in maters.
+        Coordinate in meters.
     """
     return np.array(coord_re, dtype=float) *R_EARTH
 

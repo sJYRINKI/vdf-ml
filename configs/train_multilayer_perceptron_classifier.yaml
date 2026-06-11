@@ -4,16 +4,16 @@ output_dir: data/models/multilayer_perceptron_classifier/{model_id}
 features:
   downsample_factor: 2
   batch_size: 512
-  n_jobs: 4
+  n_jobs: 16
   log_eps: 1e-30
 
 model:
-  hidden_layer_sizes: [128, 64]
+  hidden_layer_sizes: [64]
   activation: relu
   solver: adam
-  alpha: 0.01
+  alpha: 0.05
   batch_size: auto
-  learning_rate_init: 0.001
+  learning_rate_init: 0.0005
   max_iter: 1000
   early_stopping: true
   validation_fraction: 0.2
