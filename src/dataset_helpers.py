@@ -3,7 +3,148 @@ import analysator as pt
 
 from src.timesteps import create_timestep_path
 from src.vdf_extract import extract_vdf
-from src.vdf_helpers import get_cellid_with_vdf
+from src.vdf_helpers import get_neighbor_vdf_cellids
+
+def create_timestep_sample_specs(config, timestep, labeled_coords):
+    """
+    Create VDF sample specifications for one timestep.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration containing the VLSV file template.
+    timestep : int
+        Timestep to process.
+    labeled_coords : iterable of tuple
+        Tuples of ``(class_name, label, coord_re)``
+
+    Returns
+    -------
+    list of dict
+        Sample specification dictionaries.
+    """
+
+    file_location = create_timestep_path(
+        path_template=config["file_template_bulk"],
+        timestep=timestep
+    )
+
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    simulation_time = reader.read_parameter("time")
+    neighborhood_config = config.get("vdf_neighborhood", {})
+
+    sample_specs = []
+    seen_class_cellids = set()
+
+    for class_name, label, coord_re in labeled_coords:
+        cellids_by_position = get_neighbor_vdf_cellids(
+            reader=reader,
+            coord_re=coord_re,
+            neighborhood_config=neighborhood_config,
+        )
+
+        for neighbor_position, cid in cellids_by_position.items():
+            class_cellid = (class_name, int(cid))
+
+            if class_cellid in seen_class_cellids:
+                continue
+
+            seen_class_cellids.add(class_cellid)
+            sample_specs.append(
+                {
+                    "file_location": file_location,
+                    "simulation_time": simulation_time,
+                    "cid": int(cid),
+                    "label": int(label),
+                    "class_name": class_name,
+                    "coord_re": coord_re,
+                    "neighbor_position": neighbor_position,
+                }
+            )
+
+    return remove_shared_flux_point_cellids(
+        sample_specs=sample_specs,
+        config=config,
+    )
+
+
+def remove_shared_flux_point_cellids(sample_specs, config):
+    """
+    Remove VDF cells shared by configured X-point and O-point classes.
+
+    Parameters
+    ----------
+    sample_specs : list of dict
+        Sample specification dictionaries.
+    config : dict
+        Dataset configuration.
+
+    Returns
+    -------
+    list of dict
+        Sample specifications with shared flux-point cells removed.
+    """
+
+    flux_points_config = config.get("flux_points", {})
+    x_class_name = flux_points_config.get("x_class_name")
+    o_class_name = flux_points_config.get("o_class_name")
+
+    if x_class_name is None or o_class_name is None:
+        return sample_specs
+
+    x_cellids = {
+        sample_spec["cid"]
+        for sample_spec in sample_specs
+        if sample_spec["class_name"] == x_class_name
+    }
+    o_cellids = {
+        sample_spec["cid"]
+        for sample_spec in sample_specs
+        if sample_spec["class_name"] == o_class_name
+    }
+    shared_cellids = x_cellids & o_cellids
+
+    if not shared_cellids:
+        return sample_specs
+
+    flux_point_classes = {x_class_name, o_class_name}
+
+    return [
+        sample_spec
+        for sample_spec in sample_specs
+        if not (
+            sample_spec["class_name"] in flux_point_classes
+            and sample_spec["cid"] in shared_cellids
+        )
+    ]
+
+
+def count_timestep_samples(config, timestep, labeled_coords):
+    """
+    Count VDF samples for one timestep after neighborhood expansion.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration containing the VLSV file template.
+    timestep : int
+        Timestep to process.
+    labeled_coords : iterable of tuple
+        Tuples of ``(class_name, label, coord_re)``
+
+    Returns
+    -------
+    int
+        Number of samples for the timestep.
+    """
+
+    return len(
+        create_timestep_sample_specs(
+            config=config,
+            timestep=timestep,
+            labeled_coords=labeled_coords,
+        )
+    )
 
 
 def process_timestep(config, timestep, labeled_coords):
@@ -25,30 +166,27 @@ def process_timestep(config, timestep, labeled_coords):
         Sample dictionaries.
     """
 
-    file_location = create_timestep_path(
-        path_template=config["file_template_bulk"],
-        timestep=timestep
+    sample_specs = create_timestep_sample_specs(
+        config=config,
+        timestep=timestep,
+        labeled_coords=labeled_coords,
     )
 
     print(f"Timestep: {timestep}")
-    print(f"File: {file_location}")
-
-    reader = pt.vlsvfile.VlsvReader(str(file_location))
-    simulation_time = reader.read_parameter("time")
-
-    print(simulation_time)
 
     samples = []
 
-    for class_name, label, coord_re in labeled_coords:
-        print(f"Class: {class_name}, label: {label}")
-        print(f"Coordinate RE: {coord_re}")
+    for sample_spec in sample_specs:
+        coord_re = sample_spec["coord_re"]
+        cid = sample_spec["cid"]
+        file_location = sample_spec["file_location"]
 
-        cid = get_cellid_with_vdf(
-            reader=reader,
-            coord_re=coord_re,
+        print(
+            f"Class: {sample_spec['class_name']}, "
+            f"label: {sample_spec['label']}, "
+            f"position: {sample_spec['neighbor_position']}"
         )
-
+        print(f"Coordinate RE: {coord_re}")
         print(f"Cell ID: {cid}")
 
         vdf = extract_vdf(
@@ -59,13 +197,14 @@ def process_timestep(config, timestep, labeled_coords):
         samples.append(
             {
                 "vdf": vdf,
-                "label": int(label),
+                "label": sample_spec["label"],
                 "metadata": {
                     "timestep": int(timestep),
-                    "simulation_time": simulation_time,
+                    "simulation_time": sample_spec["simulation_time"],
                     "cid": int(cid),
-                    "label": int(label),
-                    "class_name": class_name,
+                    "label": sample_spec["label"],
+                    "class_name": sample_spec["class_name"],
+                    "neighbor_position": sample_spec["neighbor_position"],
                     "x_re": float(coord_re[0]),
                     "y_re": float(coord_re[1]),
                     "z_re": float(coord_re[2]),

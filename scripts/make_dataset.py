@@ -12,7 +12,12 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.timesteps import create_timestep_list
-from src.dataset_helpers import iter_chunks, process_timestep, write_timestep_samples
+from src.dataset_helpers import (
+    count_timestep_samples,
+    iter_chunks,
+    process_timestep,
+    write_timestep_samples,
+)
 from src.flux_point_labels import (
     create_labeled_coords_by_timestep,
     create_labeled_coords_for_timestep,
@@ -65,7 +70,25 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         )
         labeled_coords_by_timestep = dict(label_results)
 
-    n_samples = sum(len(labeled_coords) for labeled_coords in labeled_coords_by_timestep.values())
+    if n_jobs == 1:
+        n_samples = sum(
+            count_timestep_samples(
+                config=config,
+                timestep=timestep,
+                labeled_coords=labeled_coords_by_timestep[timestep],
+            )
+            for timestep in timesteps
+        )
+    else:
+        sample_count_results = Parallel(n_jobs=n_jobs)(
+            delayed(count_timestep_samples)(
+                config=config,
+                timestep=timestep,
+                labeled_coords=labeled_coords_by_timestep[timestep],
+            )
+            for timestep in timesteps
+        )
+        n_samples = sum(sample_count_results)
 
     print(n_samples)
 
