@@ -9,8 +9,51 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.colormap_helpers import expr_velocity, scatter_label_points
+from src.config import load_config
+from src.colormap_helpers import (
+    draw_flux_point_boxes,
+    expr_velocity,
+    scatter_label_points,
+)
 from src.vdf_helpers import get_vdf_plot_parameters_from_file
+
+def add_dataset_sampling_plot_config(colormap_config, dataset_config_path):
+    """
+    Add dataset sampling settings needed for colormap overlays.
+
+    The plotting config keeps visual options such as color scale and plot bounds,
+    while the dataset-creation config owns the VDF box size and the class names
+    used for X-point and O-point samples. This helper copies those sampling
+    settings into a colormap config dictionary so plotted boxes match the boxes
+    used when the dataset was created.
+
+    Parameters
+    ----------
+    colormap_config : dict
+        Colormap plotting options from the plotting config.
+    dataset_config_path : str or pathlib.Path
+        Path to the dataset-creation YAML config containing ``vdf_box`` and
+        ``flux_points`` sections.
+
+    Returns
+    -------
+    dict
+        Copy of ``colormap_config`` with ``vdf_box`` and ``box_classes`` added.
+    """
+
+    dataset_config = load_config(dataset_config_path)
+    flux_points_config = dataset_config.get("flux_points", {})
+    box_classes = [
+        flux_points_config[class_key]
+        for class_key in ("x_class_name", "o_class_name")
+        if class_key in flux_points_config
+    ]
+
+    colormap_config = dict(colormap_config)
+    colormap_config["vdf_box"] = dataset_config["vdf_box"]
+    colormap_config["box_classes"] = box_classes
+
+    return colormap_config
 
 def plot_vdf_xz_slice(
         vdf,
@@ -45,6 +88,10 @@ def plot_vdf_xz_slice(
         VDF threshold before multiplying by ``dv``.
     vdflim : float, optional
         Visible velocity limit in m/s.
+    decision_score : float, optional
+        Optional model score or probability to show in the plot title.
+    predicted_class_name : str, optional
+        Optional predicted class name to show in the plot title.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +157,15 @@ def plot_vdf_xz_slice(
     plt.close(fig)
 
 
-def plot_labeled_colormap(metadata_rows, output_path, boxre, vmin, vmax):
+def plot_labeled_colormap(
+        metadata_rows,
+        output_path,
+        boxre,
+        vmin,
+        vmax,
+        vdf_box_config=None,
+        box_classes=None,
+):
     """
     Plot and save a spatial colormap with saved label points overlaid.
 
@@ -126,6 +181,13 @@ def plot_labeled_colormap(metadata_rows, output_path, boxre, vmin, vmax):
         Minimum color scale value for the selected velocity component.
     vmax : float
         Maximum color scale value for the selected velocity component.
+    vdf_box_config : dict, optional
+        VDF sampling box config from dataset creation. Expected keys are
+        ``x_half_width_re`` and ``z_half_width_re``. The boxes are drawn around
+        the source X/O point coordinates stored in metadata.
+    box_classes : iterable of str, optional
+        Class names whose source coordinates should get boxes, normally the
+        configured X-point and O-point classes.
     """
 
     output_path = Path(output_path)
@@ -147,7 +209,19 @@ def plot_labeled_colormap(metadata_rows, output_path, boxre, vmin, vmax):
         streamlinecolor="black",
     )
 
-    scatter_label_points(ax1, metadata_rows)
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    draw_flux_point_boxes(
+        ax=ax1,
+        metadata_rows=metadata_rows,
+        box_config=vdf_box_config,
+        box_classes=box_classes,
+    )
+    scatter_label_points(
+        ax=ax1,
+        reader=reader,
+        metadata_rows=metadata_rows,
+    )
+    ax1.legend()
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -161,7 +235,8 @@ def run_plot_jobs(plot_function, plot_jobs, n_jobs):
     plot_function : callable
         Plotting function called with each job dictionary as keyword arguments.
     plot_jobs : list of dict
-        Plot job dictionaries.
+        Plot job dictionaries. Each dictionary is expanded into keyword
+        arguments for ``plot_function``.
     n_jobs : int
         Number of parallel workers. Use 1 for serial plotting.
     """
@@ -187,7 +262,8 @@ def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
     output_dir : pathlib.Path
         Base plot output directory for the dataset.
     colormap_config : dict
-        Colormap plotting options.
+        Colormap plotting options. This may include ``boxre``, ``vmin``,
+        ``vmax``, ``vdf_box``, and ``box_classes``.
 
     Returns
     -------
@@ -207,6 +283,8 @@ def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
                 "boxre": colormap_config.get("boxre", [-40, -1, -6, 6]),
                 "vmin": float(colormap_config.get("vmin", -1.5e6)),
                 "vmax": float(colormap_config.get("vmax", 1.5e6)),
+                "vdf_box_config": colormap_config.get("vdf_box"),
+                "box_classes": colormap_config.get("box_classes", []),
             }
         )
 

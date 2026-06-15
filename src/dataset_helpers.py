@@ -3,7 +3,10 @@ import analysator as pt
 
 from src.timesteps import create_timestep_path
 from src.vdf_extract import extract_vdf
-from src.vdf_helpers import get_neighbor_vdf_cellids
+from src.vdf_helpers import (
+    get_cellid_with_vdf,
+    get_vdf_cellids_in_box,
+)
 
 def create_timestep_sample_specs(config, timestep, labeled_coords):
     """
@@ -31,17 +34,25 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
     simulation_time = reader.read_parameter("time")
-    neighborhood_config = config.get("vdf_neighborhood", {})
+    flux_point_class_names = get_flux_point_class_names(config)
+    box_config = config["vdf_box"]
 
     sample_specs = []
     seen_class_cellids = set()
 
     for class_name, label, coord_re in labeled_coords:
-        cellids_by_position = get_neighbor_vdf_cellids(
-            reader=reader,
-            coord_re=coord_re,
-            neighborhood_config=neighborhood_config,
-        )
+        if class_name in flux_point_class_names:
+            cellids_by_position = get_vdf_cellids_in_box(
+                reader=reader,
+                coord_re=coord_re,
+                box_config=box_config,
+            )
+        else:
+            cid = get_cellid_with_vdf(
+                reader=reader,
+                coord_re=coord_re,
+            )
+            cellids_by_position = {"closest": cid}
 
         for neighbor_position, cid in cellids_by_position.items():
             class_cellid = (class_name, int(cid))
@@ -66,6 +77,30 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
         sample_specs=sample_specs,
         config=config,
     )
+
+
+def get_flux_point_class_names(config):
+    """
+    Return configured flux-point class names.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration.
+
+    Returns
+    -------
+    set of str
+        X-point and O-point class names.
+    """
+
+    flux_points_config = config.get("flux_points", {})
+    class_names = {
+        flux_points_config.get("x_class_name"),
+        flux_points_config.get("o_class_name"),
+    }
+
+    return {class_name for class_name in class_names if class_name is not None}
 
 
 def remove_shared_flux_point_cellids(sample_specs, config):

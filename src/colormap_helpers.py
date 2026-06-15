@@ -1,3 +1,16 @@
+from matplotlib.patches import Rectangle
+import numpy as np
+
+from src.vdf_helpers import R_EARTH
+
+
+SOURCE_POINT_STYLES = {
+    "reconnection": {"color": "blue", "marker": "x", "label": "reconnection"},
+    "other": {"color": "blue", "marker": "o", "label": "o point"},
+    "lobe": {"color": "gold", "marker": "2", "label": "lobe"},
+}
+
+
 def expr_velocity(exprmaps, requestvariables=False):
     """
     Return bulk velocity for Analysator colormap plotting.
@@ -24,40 +37,98 @@ def expr_velocity(exprmaps, requestvariables=False):
     return rhov / rho[:, :, None]
 
 
-def scatter_label_points(ax, metadata_rows):
+def draw_flux_point_boxes(ax, metadata_rows, box_config, box_classes):
     """
-    Scatter saved dataset labels on an x-z colormap.
+    Draw configured x-z boxes around source X/O point coordinates.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes where boxes are drawn.
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    box_config : dict
+        Box half-widths in Earth radii.
+    box_classes : iterable of str
+        Classes whose source coordinates should get boxes.
+    """
+
+    if not box_config or not box_classes:
+        return
+
+    half_width_x = float(box_config["x_half_width_re"])
+    half_width_z = float(box_config["z_half_width_re"])
+    box_classes = set(box_classes)
+    box_rows = metadata_rows[
+        metadata_rows["class_name"].isin(box_classes)
+    ].drop_duplicates(["class_name", "x_re", "z_re"])
+
+    for box_index, (_, row) in enumerate(box_rows.iterrows()):
+        label = "box" if box_index == 0 else None
+
+        rectangle = Rectangle(
+            (row["x_re"] - half_width_x, row["z_re"] - half_width_z),
+            2 * half_width_x,
+            2 * half_width_z,
+            fill=False,
+            edgecolor="red",
+            linewidth=1.2,
+            label=label,
+        )
+        ax.add_patch(rectangle)
+
+
+def scatter_label_points(ax, reader, metadata_rows):
+    """
+    Scatter source label points and sampled VDF cells on an x-z colormap.
 
     Parameters
     ----------
     ax : matplotlib.axes.Axes
         Axes where points are drawn.
+    reader : analysator.vlsvfile.VlsvReader
+        Reader for the timestep VLSV file.
     metadata_rows : pandas.DataFrame
         Metadata rows for one timestep.
     """
 
-    styles = {
-        "reconnection": {"color": "red", "marker": "x"},
-        "other": {"color": "blue", "marker": "o"},
-        "lobe": {"color": "gold", "marker": "2"},
-    }
+    plotted_source_classes = set()
+    source_rows = metadata_rows.drop_duplicates(["class_name", "x_re", "z_re"])
 
-    plotted_classes = set()
-
-    for _, row in metadata_rows.iterrows():
+    for _, row in source_rows.iterrows():
         class_name = row["class_name"]
-        style = styles[class_name]
-        label = class_name if class_name not in plotted_classes else None
+        style = SOURCE_POINT_STYLES.get(
+            class_name,
+            {"color": "black", "marker": ".", "label": class_name},
+        )
+        label = style["label"] if class_name not in plotted_source_classes else None
 
         ax.scatter(
             row["x_re"],
             row["z_re"],
             label=label,
-            s=10,
-            **style,
+            s=28,
+            color=style["color"],
+            marker=style["marker"],
         )
 
-        plotted_classes.add(class_name)
+        plotted_source_classes.add(class_name)
 
-    if plotted_classes:
-        ax.legend()
+    marker_rows = metadata_rows.drop_duplicates(["cid"])
+
+    for cell_index, (_, row) in enumerate(marker_rows.iterrows()):
+        label = "cell" if cell_index == 0 else None
+        cell_coord_re = np.asarray(
+            reader.get_cell_coordinates(int(row["cid"])),
+            dtype=float,
+        ) / R_EARTH
+
+        ax.scatter(
+            cell_coord_re[0],
+            cell_coord_re[2],
+            label=label,
+            marker=".",
+            s=18,
+            color="red",
+            linewidths=0,
+        )

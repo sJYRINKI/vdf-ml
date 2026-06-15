@@ -13,17 +13,16 @@ labels:
 creation:
   n_jobs: 16
 
-vdf_neighborhood:
-  enabled: true
-  max_index_steps: 200
-  x_ranks: [1, 2]
-  z_ranks: [1]
+vdf_box:
+  x_half_width_re: 0.2
+  y_half_width_re: 0.0
+  z_half_width_re: 0.1
 
 flux_points:
   x_class_name: reconnection
   o_class_name: other
   region_re:
-    x_between: [-20.0, -5.0]
+    x_between: [-20.0, -10.0]
     z_abs_max: 1.0
 
 class_coords_re:

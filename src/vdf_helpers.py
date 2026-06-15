@@ -89,141 +89,127 @@ def cell_has_vdf(reader, cid, pop="avgs"):
 
     return len(velocity_cells) > 0
 
-def get_vdf_ranks_in_direction(
-        reader,
-        center_indices,
-        direction,
-        ranks,
-        max_index_steps,
-        pop="avgs",
-):
+def get_spatial_index_range(reader, axis_name, axis_index, min_value, max_value):
     """
-    Find ranked VDF cell IDs by walking in one spatial-index direction.
+    Convert spatial coordinate bounds to clipped fsgrid index bounds.
 
     Parameters
     ----------
     reader : analysator.vlsvfile.VlsvReader
         Open VLSV file reader.
-    center_indices : array-like of int
-        Spatial index of the center cell.
-    direction : tuple of int
-        Spatial-index direction ``(di, dj, dk)``.
-    ranks : iterable of int
-        VDF ranks to return from this direction.
-    max_index_steps : int
-        Maximum number of spatial index steps to scan.
-    pop : str, optional
-        Particle population name.
+    axis_name : str
+        Spatial axis name, one of ``x``, ``y``, or ``z``.
+    axis_index : int
+        Axis index in the spatial mesh size.
+    min_value : float
+        Lower coordinate bound in meters.
+    max_value : float
+        Upper coordinate bound in meters.
 
     Returns
     -------
-    dict
-        Mapping from requested rank to VDF cell ID.
+    tuple of int
+        Inclusive lower and upper fsgrid index bounds.
     """
 
-    ranks = sorted(int(rank) for rank in ranks)
+    mesh_size = np.asarray(reader.get_spatial_mesh_size(), dtype=int)
+    n_cells = int(mesh_size[axis_index])
+    axis_min = float(reader.read_parameter(f"{axis_name}min"))
+    axis_max = float(reader.read_parameter(f"{axis_name}max"))
+    cell_size = (axis_max - axis_min) / n_cells
 
-    if not ranks:
-        return {}
+    lower_index = int(np.floor((min_value - axis_min) / cell_size))
+    upper_index = int(np.floor((max_value - axis_min) / cell_size))
 
-    max_rank = max(ranks)
-    i, j, k = map(int, center_indices)
-    di, dj, dk = direction
-    found_cellids = []
+    lower_index = max(0, min(n_cells - 1, lower_index))
+    upper_index = max(0, min(n_cells - 1, upper_index))
 
-    for step in range(1, int(max_index_steps) + 1):
-        try:
-            cid = int(
-                reader.get_cellid_at_fsgrid_index(
-                    i + step * di,
-                    j + step * dj,
-                    k + step * dk,
-                )
-            )
-        except Exception:
-            break
+    return min(lower_index, upper_index), max(lower_index, upper_index)
 
-        if cid <= 0:
-            break
-        if not cell_has_vdf(reader, cid, pop=pop):
-            continue
 
-        found_cellids.append(cid)
-
-        if len(found_cellids) >= max_rank:
-            break
-
-    return {
-        rank: found_cellids[rank - 1]
-        for rank in ranks
-        if len(found_cellids) >= rank
-    }
-
-def get_neighbor_vdf_cellids(reader, coord_re, neighborhood_config=None, pop="avgs"):
+def get_vdf_cellids_in_box(reader, coord_re, box_config, pop="avgs"):
     """
-    Find VDF cell IDs around the nearest VDF cell.
-
-    The input coordinate is first mapped to the nearest cell with a VDF. Each
-    configured direction is then scanned until the requested VDF ranks are
-    found or the maximum scan distance is reached.
+    Find all VDF cell IDs inside a spatial box around a coordinate.
 
     Parameters
     ----------
     reader : analysator.vlsvfile.VlsvReader
         Open VLSV file reader.
     coord_re : array-like of float
-        Coordinate in Earth radii, given as ``[x, y, z]``.
-    neighborhood_config : dict, optional
-        Neighborhood configuration.
+        Box center in Earth radii, given as ``[x, y, z]``.
+    box_config : dict
+        Box half-widths in Earth radii.
     pop : str, optional
         Particle population name.
 
     Returns
     -------
     dict
-        Mapping from neighborhood position name to VDF cell ID.
+        Mapping from box position name to VDF cell ID.
     """
 
-    center_cid = get_cellid_with_vdf(
-        reader=reader,
-        coord_re=coord_re,
-        pop=pop,
+    center_m = coord_re_to_m(coord_re)
+    half_widths_m = R_EARTH * np.array(
+        [
+            float(box_config["x_half_width_re"]),
+            float(box_config["y_half_width_re"]),
+            float(box_config["z_half_width_re"]),
+        ],
+        dtype=float,
     )
 
-    center_indices = np.asarray(
-        reader.get_cell_indices(center_cid)
-    ).squeeze()
+    lower_bounds = center_m - half_widths_m
+    upper_bounds = center_m + half_widths_m
+    active_axes = half_widths_m > 0
 
-    neighborhood_config = neighborhood_config or {}
+    x_min, x_max = get_spatial_index_range(
+        reader=reader,
+        axis_name="x",
+        axis_index=0,
+        min_value=lower_bounds[0],
+        max_value=upper_bounds[0],
+    )
+    y_min, y_max = get_spatial_index_range(
+        reader=reader,
+        axis_name="y",
+        axis_index=1,
+        min_value=lower_bounds[1],
+        max_value=upper_bounds[1],
+    )
+    z_min, z_max = get_spatial_index_range(
+        reader=reader,
+        axis_name="z",
+        axis_index=2,
+        min_value=lower_bounds[2],
+        max_value=upper_bounds[2],
+    )
 
-    if not neighborhood_config.get("enabled", False):
-        return {"center": center_cid}
+    cellids = {}
+    seen_cellids = set()
 
-    max_index_steps = int(neighborhood_config.get("max_index_steps", 200))
-    x_ranks = neighborhood_config.get("x_ranks", [1, 2])
-    z_ranks = neighborhood_config.get("z_ranks", [1])
+    for i in range(x_min, x_max + 1):
+        for j in range(y_min, y_max + 1):
+            for k in range(z_min, z_max + 1):
+                try:
+                    cid = int(reader.get_cellid_at_fsgrid_index(i, j, k))
+                except Exception:
+                    continue
 
-    directions = {
-        "left": ((-1, 0, 0), x_ranks),
-        "right": ((1, 0, 0), x_ranks),
-        "bottom": ((0, 0, -1), z_ranks),
-        "top": ((0, 0, 1), z_ranks),
-    }
+                if cid <= 0 or cid in seen_cellids:
+                    continue
 
-    cellids = {"center": center_cid}
+                cell_coord = np.asarray(reader.get_cell_coordinates(cid), dtype=float)
+                if (
+                    np.any(cell_coord[active_axes] < lower_bounds[active_axes])
+                    or np.any(cell_coord[active_axes] > upper_bounds[active_axes])
+                ):
+                    continue
 
-    for direction_name, (direction, ranks) in directions.items():
-        ranked_cellids = get_vdf_ranks_in_direction(
-            reader=reader,
-            center_indices=center_indices,
-            direction=direction,
-            ranks=ranks,
-            max_index_steps=max_index_steps,
-            pop=pop,
-        )
+                if not cell_has_vdf(reader, cid, pop=pop):
+                    continue
 
-        for rank, cid in ranked_cellids.items():
-            cellids[f"{direction_name}_{rank}"] = cid
+                seen_cellids.add(cid)
+                cellids[f"box_{len(cellids):04d}"] = cid
 
     return cellids
 

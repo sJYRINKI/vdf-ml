@@ -12,6 +12,7 @@ sys.path.append(str(PROJECT_ROOT))
 from src.config import load_config
 from src.dataset_io import load_dataset
 from src.dataset_plot import (
+    add_dataset_sampling_plot_config,
     create_colormap_plot_jobs,
     create_vdf_plot_jobs,
     plot_labeled_colormap,
@@ -19,6 +20,7 @@ from src.dataset_plot import (
     run_plot_jobs,
 )
 from src.timesteps import create_timestep_path
+
 
 def main(config_path, timestep):
     config = load_config(config_path)
@@ -38,6 +40,10 @@ def main(config_path, timestep):
     vdflim = float(plot_config.get("vdflim", 2e6))
     n_jobs = int(plot_config.get("n_jobs", 1))
     colormap_config = plot_config.get("colormap", {})
+    colormap_config = add_dataset_sampling_plot_config(
+        colormap_config=colormap_config,
+        dataset_config_path=config["dataset_config"],
+    )
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
 

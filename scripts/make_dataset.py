@@ -50,6 +50,9 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
 
     creation_config = config.get("creation", {})
     n_jobs = int(creation_config.get("n_jobs", 1))
+    if n_jobs == 0:
+        raise ValueError("creation.n_jobs must be non-zero")
+
     if n_jobs < 0:
         worker_count = os.cpu_count() or 1
     else:
@@ -92,15 +95,25 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
 
     print(n_samples)
 
+    if n_samples == 0:
+        raise ValueError("No samples were found for the requested timesteps")
+
     metadata = []
     sample_index = 0
 
-    first_timestep = timesteps[0]
-    first_samples = process_timestep(
-        config=config,
-        timestep=first_timestep,
-        labeled_coords=labeled_coords_by_timestep[first_timestep],
-    )
+    first_samples = []
+    first_sample_timestep_index = None
+
+    for timestep_index, timestep in enumerate(timesteps):
+        first_samples = process_timestep(
+            config=config,
+            timestep=timestep,
+            labeled_coords=labeled_coords_by_timestep[timestep],
+        )
+
+        if first_samples:
+            first_sample_timestep_index = timestep_index
+            break
 
     X, y = create_memmap_dataset(
         outdir=outdir,
@@ -117,7 +130,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         sample_index=sample_index,
     )
 
-    remaining_timesteps = timesteps[1:]
+    remaining_timesteps = timesteps[first_sample_timestep_index + 1:]
 
     if n_jobs == 1:
         for timestep in remaining_timesteps:
