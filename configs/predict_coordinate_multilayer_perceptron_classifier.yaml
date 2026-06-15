@@ -4,9 +4,10 @@ model_dir: data/models/multilayer_perceptron_classifier/{model_id}
 output_dir: data/predictions/multilayer_perceptron_classifier/{model_id}/timesteps_{timestep}
 
 labels:
-  reconnection: 1
   lobe: 0
-  other: -1
+  other: 1
+  o_point: 2
+  reconnection: 3
 
 plot:
   vdflim: 2000000.0

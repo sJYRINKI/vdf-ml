@@ -113,12 +113,12 @@ def iter_point_labeled_coords(config, timestep):
         Coordinate in Earth radii, given as ``[x, y, z]``.
     """
 
-    flux_points_config = config.get("flux_points")
+    points_config = config.get("points")
 
     labels = config["labels"]
 
-    x_class_name = flux_points_config["x_class_name"]
-    o_class_name = flux_points_config["o_class_name"]
+    x_class_name = points_config["x_class_name"]
+    o_class_name = points_config["o_class_name"]
 
     bulk_file_location = create_timestep_path(
         path_template=config["file_template_bulk"],
@@ -135,7 +135,7 @@ def iter_point_labeled_coords(config, timestep):
     x_point_coords_re, o_point_coords_re = find_point_coords_re(
         reader=reader,
         flux_file_location=flux_file_location,
-        flux_points_config=flux_points_config,
+        points_config=points_config,
     )
 
     x_point_coords_re, o_point_coords_re = remove_shared_cellid_points(
@@ -152,7 +152,7 @@ def iter_point_labeled_coords(config, timestep):
 
 def remove_shared_cellid_points(reader, x_point_coords_re, o_point_coords_re):
     """
-    Remove duplicate or contradictory flux-point labels by VDF cell ID.
+    Remove duplicate or contradictory point labels by VDF cell ID.
 
     Coordinates are grouped with ``get_cellid_with_vdf``, which is the same
     cell-ID lookup used when samples are saved to metadata. If an X-point and
@@ -221,7 +221,7 @@ def group_coords_by_cellid(reader, coords_re):
 
     return coords_by_cellid
 
-def find_point_coords_re(reader, flux_file_location, flux_points_config=None):
+def find_point_coords_re(reader, flux_file_location, points_config=None):
     """
     Find X- and O-point coordinates from a flux file.
 
@@ -231,8 +231,8 @@ def find_point_coords_re(reader, flux_file_location, flux_points_config=None):
         Open VLSV file reader for matching timestep.
     flux_file_location : pathlib.Path
         Flux filepath
-    flux_points_config : dict, optional
-        Flux point configuration.
+    points_config : dict, optional
+        Point configuration.
 
     returns
     -------
@@ -335,7 +335,7 @@ def find_point_coords_re(reader, flux_file_location, flux_points_config=None):
                 float(coords[2] / R_EARTH),
             ]
 
-            if not is_in_flux_point_region(coord_re, flux_points_config):
+            if not is_in_point_region(coord_re, points_config):
                 continue
 
             if DetHess < 0:
@@ -441,24 +441,24 @@ def intersection_to_points(intersection):
 
     return []
 
-def is_in_flux_point_region(coord_re, flux_points_config):
+def is_in_point_region(coord_re, points_config):
     """
-    Check whether a flux point coordinate is in the configured region.
+    Check whether a point coordinate is in the configured region.
 
     Parameters
     ----------
     coord_re : list of float
         Coordinate in Earth radii, given as ``[x, y, z]``.
-    flux_points_config : dict
-        Flux point configuration.
+    points_config : dict
+        Point configuration.
 
     Returns
     -------
     bool
-        Whether the coordinate should be used as a labeled flux point.
+        Whether the coordinate should be used as a labeled point.
     """
 
-    region_re = (flux_points_config or {}).get("region_re", {})
+    region_re = (points_config or {}).get("region_re", {})
 
     x_between = region_re.get("x_between")
     x_min = region_re.get("x_min")

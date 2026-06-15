@@ -11,7 +11,7 @@ import numpy as np
 
 from src.config import load_config
 from src.colormap_helpers import (
-    draw_flux_point_boxes,
+    draw_point_boxes,
     expr_velocity,
     scatter_label_points,
 )
@@ -33,7 +33,7 @@ def add_dataset_sampling_plot_config(colormap_config, dataset_config_path):
         Colormap plotting options from the plotting config.
     dataset_config_path : str or pathlib.Path
         Path to the dataset-creation YAML config containing ``vdf_box`` and
-        ``flux_points`` sections.
+        ``points`` sections.
 
     Returns
     -------
@@ -42,11 +42,11 @@ def add_dataset_sampling_plot_config(colormap_config, dataset_config_path):
     """
 
     dataset_config = load_config(dataset_config_path)
-    flux_points_config = dataset_config.get("flux_points", {})
+    points_config = dataset_config.get("points", {})
     box_classes = [
-        flux_points_config[class_key]
+        points_config[class_key]
         for class_key in ("x_class_name", "o_class_name")
-        if class_key in flux_points_config
+        if class_key in points_config
     ]
 
     colormap_config = dict(colormap_config)
@@ -210,7 +210,7 @@ def plot_labeled_colormap(
     )
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
-    draw_flux_point_boxes(
+    draw_point_boxes(
         ax=ax1,
         metadata_rows=metadata_rows,
         box_config=vdf_box_config,

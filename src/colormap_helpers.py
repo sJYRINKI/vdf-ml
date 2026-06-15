@@ -6,7 +6,8 @@ from src.vdf_helpers import R_EARTH
 
 SOURCE_POINT_STYLES = {
     "reconnection": {"color": "blue", "marker": "x", "label": "reconnection"},
-    "other": {"color": "blue", "marker": "o", "label": "o point"},
+    "o_point": {"color": "blue", "marker": "o", "label": "o point"},
+    "other": {"color": "blue", "marker": ".", "label": "other"},
     "lobe": {"color": "gold", "marker": "2", "label": "lobe"},
 }
 
@@ -37,9 +38,9 @@ def expr_velocity(exprmaps, requestvariables=False):
     return rhov / rho[:, :, None]
 
 
-def draw_flux_point_boxes(ax, metadata_rows, box_config, box_classes):
+def draw_point_boxes(ax, metadata_rows, box_config, box_classes):
     """
-    Draw configured x-z boxes around source X/O point coordinates.
+    Draw configured xz boxes around source X/O point coordinates.
 
     Parameters
     ----------
@@ -72,7 +73,7 @@ def draw_flux_point_boxes(ax, metadata_rows, box_config, box_classes):
             2 * half_width_z,
             fill=False,
             edgecolor="red",
-            linewidth=1.2,
+            linewidth=1.0,
             label=label,
         )
         ax.add_patch(rectangle)
@@ -80,7 +81,7 @@ def draw_flux_point_boxes(ax, metadata_rows, box_config, box_classes):
 
 def scatter_label_points(ax, reader, metadata_rows):
     """
-    Scatter source label points and sampled VDF cells on an x-z colormap.
+    Scatter source label points and sampled VDF cells on an xz colormap.
 
     Parameters
     ----------
@@ -91,28 +92,6 @@ def scatter_label_points(ax, reader, metadata_rows):
     metadata_rows : pandas.DataFrame
         Metadata rows for one timestep.
     """
-
-    plotted_source_classes = set()
-    source_rows = metadata_rows.drop_duplicates(["class_name", "x_re", "z_re"])
-
-    for _, row in source_rows.iterrows():
-        class_name = row["class_name"]
-        style = SOURCE_POINT_STYLES.get(
-            class_name,
-            {"color": "black", "marker": ".", "label": class_name},
-        )
-        label = style["label"] if class_name not in plotted_source_classes else None
-
-        ax.scatter(
-            row["x_re"],
-            row["z_re"],
-            label=label,
-            s=28,
-            color=style["color"],
-            marker=style["marker"],
-        )
-
-        plotted_source_classes.add(class_name)
 
     marker_rows = metadata_rows.drop_duplicates(["cid"])
 
@@ -132,3 +111,25 @@ def scatter_label_points(ax, reader, metadata_rows):
             color="red",
             linewidths=0,
         )
+
+    plotted_source_classes = set()
+    source_rows = metadata_rows.drop_duplicates(["class_name", "x_re", "z_re"])
+
+    for _, row in source_rows.iterrows():
+        class_name = row["class_name"]
+        style = SOURCE_POINT_STYLES.get(
+            class_name,
+            {"color": "black", "marker": ".", "label": class_name},
+        )
+        label = style["label"] if class_name not in plotted_source_classes else None
+
+        ax.scatter(
+            row["x_re"],
+            row["z_re"],
+            label=label,
+            s=16,
+            color=style["color"],
+            marker=style["marker"],
+        )
+
+        plotted_source_classes.add(class_name)

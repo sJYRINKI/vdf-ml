@@ -4,7 +4,10 @@ import analysator as pt
 from src.timesteps import create_timestep_path
 from src.vdf_extract import extract_vdf
 from src.vdf_helpers import (
+    R_EARTH,
+    cell_has_vdf,
     get_cellid_with_vdf,
+    get_spatial_index_range,
     get_vdf_cellids_in_box,
 )
 
@@ -12,14 +15,19 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
     """
     Create VDF sample specifications for one timestep.
 
+    Point classes configured under ``points`` are expanded to spatial boxes.
+    The ``other`` class is then filled from all VDF cells in ``points.region_re``
+    that were not already assigned to the X-point or O-point classes.
+
     Parameters
     ----------
     config : dict
-        Dataset configuration containing the VLSV file template.
+        Dataset configuration containing file templates, labels, point classes,
+        and VDF box settings.
     timestep : int
         Timestep to process.
     labeled_coords : iterable of tuple
-        Tuples of ``(class_name, label, coord_re)``
+        Tuples of ``(class_name, label, coord_re)``.
 
     Returns
     -------
@@ -34,14 +42,15 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
     simulation_time = reader.read_parameter("time")
-    flux_point_class_names = get_flux_point_class_names(config)
+    point_class_names = get_point_class_names(config)
     box_config = config["vdf_box"]
+    labeled_coords = list(labeled_coords)
 
     sample_specs = []
     seen_class_cellids = set()
 
     for class_name, label, coord_re in labeled_coords:
-        if class_name in flux_point_class_names:
+        if class_name in point_class_names:
             cellids_by_position = get_vdf_cellids_in_box(
                 reader=reader,
                 coord_re=coord_re,
@@ -73,15 +82,202 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
                 }
             )
 
-    return remove_shared_flux_point_cellids(
+    sample_specs = remove_shared_point_cellids(
         sample_specs=sample_specs,
         config=config,
     )
 
+    sample_specs.extend(
+        create_other_region_sample_specs(
+            config=config,
+            reader=reader,
+            file_location=file_location,
+            simulation_time=simulation_time,
+            existing_sample_specs=sample_specs,
+        )
+    )
 
-def get_flux_point_class_names(config):
+    return sample_specs
+
+
+def create_other_region_sample_specs(
+    config,
+    reader,
+    file_location,
+    simulation_time,
+    existing_sample_specs,
+):
     """
-    Return configured flux-point class names.
+    Create ``other`` samples from VDF cells in the point region.
+
+    The ``other`` class is always derived from ``points.region_re``. Cells
+    already assigned to X/O point boxes are excluded, so the region is filled
+    only by VDF cells that are not reconnection or O-point samples.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration containing ``labels`` and ``points`` sections.
+    reader : analysator.vlsvfile.VlsvReader
+        Reader for the timestep VLSV file.
+    file_location : pathlib.Path
+        Path to the timestep VLSV file.
+    simulation_time : float
+        Simulation time read from the VLSV file.
+    existing_sample_specs : list of dict
+        Sample specifications already created for configured point and static
+        coordinate classes.
+
+    Returns
+    -------
+    list of dict
+        Sample specifications for ``other`` VDF cells in the point region.
+    """
+
+    labels = config["labels"]
+    class_name = "other"
+    label = int(labels[class_name])
+
+    points_config = config.get("points", {})
+    excluded_classes = {
+        points_config.get("x_class_name"),
+        points_config.get("o_class_name"),
+    }
+    excluded_cellids = {
+        int(sample_spec["cid"])
+        for sample_spec in existing_sample_specs
+        if sample_spec["class_name"] in excluded_classes
+    }
+    seen_other_cellids = set()
+    sample_specs = []
+
+    for cid in get_vdf_cellids_in_point_region(reader, config):
+        cid = int(cid)
+        if cid in excluded_cellids or cid in seen_other_cellids:
+            continue
+
+        seen_other_cellids.add(cid)
+        coord_re = np.asarray(reader.get_cell_coordinates(cid), dtype=float) / R_EARTH
+        sample_specs.append(
+            {
+                "file_location": file_location,
+                "simulation_time": simulation_time,
+                "cid": cid,
+                "label": label,
+                "class_name": class_name,
+                "coord_re": coord_re,
+                "neighbor_position": "point_region",
+            }
+        )
+
+    return sample_specs
+
+
+def get_vdf_cellids_in_point_region(reader, config):
+    """
+    Return VDF cell IDs inside ``points.region_re``.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Reader for the timestep VLSV file.
+    config : dict
+        Dataset configuration containing the ``points.region_re`` bounds.
+
+    Returns
+    -------
+    list of int
+        Cell IDs with VDF data inside the configured point region.
+    """
+
+    region_re = config.get("points", {}).get("region_re", {})
+    x_min_re, x_max_re = get_region_x_bounds_re(region_re)
+    z_abs_max_re = float(region_re["z_abs_max"])
+
+    x_min = x_min_re * R_EARTH
+    x_max = x_max_re * R_EARTH
+    y_min = float(reader.read_parameter("ymin"))
+    y_max = float(reader.read_parameter("ymax"))
+    z_min = -z_abs_max_re * R_EARTH
+    z_max = z_abs_max_re * R_EARTH
+
+    x_index_min, x_index_max = get_spatial_index_range(
+        reader=reader,
+        axis_name="x",
+        axis_index=0,
+        min_value=x_min,
+        max_value=x_max,
+    )
+    y_index_min, y_index_max = get_spatial_index_range(
+        reader=reader,
+        axis_name="y",
+        axis_index=1,
+        min_value=y_min,
+        max_value=y_max,
+    )
+    z_index_min, z_index_max = get_spatial_index_range(
+        reader=reader,
+        axis_name="z",
+        axis_index=2,
+        min_value=z_min,
+        max_value=z_max,
+    )
+
+    cellids = []
+    seen_cellids = set()
+
+    for i in range(x_index_min, x_index_max + 1):
+        for j in range(y_index_min, y_index_max + 1):
+            for k in range(z_index_min, z_index_max + 1):
+                try:
+                    cid = int(reader.get_cellid_at_fsgrid_index(i, j, k))
+                except Exception:
+                    continue
+
+                if cid <= 0 or cid in seen_cellids:
+                    continue
+
+                cell_coord = np.asarray(reader.get_cell_coordinates(cid), dtype=float)
+                if not (x_min <= cell_coord[0] <= x_max):
+                    continue
+                if not (y_min <= cell_coord[1] <= y_max):
+                    continue
+                if not (z_min <= cell_coord[2] <= z_max):
+                    continue
+                if not cell_has_vdf(reader, cid):
+                    continue
+
+                seen_cellids.add(cid)
+                cellids.append(cid)
+
+    return cellids
+
+
+def get_region_x_bounds_re(region_re):
+    """
+    Return sorted x bounds in Earth radii from a region config.
+
+    Parameters
+    ----------
+    region_re : dict
+        Region configuration with either ``x_between`` or ``x_min``/``x_max``.
+
+    Returns
+    -------
+    tuple of float
+        Lower and upper x bounds in Earth radii.
+    """
+
+    if region_re.get("x_between") is not None:
+        left_x, right_x = region_re["x_between"]
+        return min(left_x, right_x), max(left_x, right_x)
+
+    return float(region_re["x_min"]), float(region_re["x_max"])
+
+
+def get_point_class_names(config):
+    """
+    Return configured point class names.
 
     Parameters
     ----------
@@ -94,16 +290,16 @@ def get_flux_point_class_names(config):
         X-point and O-point class names.
     """
 
-    flux_points_config = config.get("flux_points", {})
+    points_config = config.get("points", {})
     class_names = {
-        flux_points_config.get("x_class_name"),
-        flux_points_config.get("o_class_name"),
+        points_config.get("x_class_name"),
+        points_config.get("o_class_name"),
     }
 
     return {class_name for class_name in class_names if class_name is not None}
 
 
-def remove_shared_flux_point_cellids(sample_specs, config):
+def remove_shared_point_cellids(sample_specs, config):
     """
     Remove VDF cells shared by configured X-point and O-point classes.
 
@@ -117,12 +313,12 @@ def remove_shared_flux_point_cellids(sample_specs, config):
     Returns
     -------
     list of dict
-        Sample specifications with shared flux-point cells removed.
+        Sample specifications with shared point cells removed.
     """
 
-    flux_points_config = config.get("flux_points", {})
-    x_class_name = flux_points_config.get("x_class_name")
-    o_class_name = flux_points_config.get("o_class_name")
+    points_config = config.get("points", {})
+    x_class_name = points_config.get("x_class_name")
+    o_class_name = points_config.get("o_class_name")
 
     if x_class_name is None or o_class_name is None:
         return sample_specs
@@ -142,13 +338,13 @@ def remove_shared_flux_point_cellids(sample_specs, config):
     if not shared_cellids:
         return sample_specs
 
-    flux_point_classes = {x_class_name, o_class_name}
+    point_classes = {x_class_name, o_class_name}
 
     return [
         sample_spec
         for sample_spec in sample_specs
         if not (
-            sample_spec["class_name"] in flux_point_classes
+            sample_spec["class_name"] in point_classes
             and sample_spec["cid"] in shared_cellids
         )
     ]

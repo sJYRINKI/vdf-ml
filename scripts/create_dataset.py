@@ -1,4 +1,4 @@
-#python scripts/make_dataset.py --config configs/create_dataset.yaml --start-timestep 3408 --n-timesteps 100 --dataset-kind train
+#python scripts/create_dataset.py --config configs/create_dataset.yaml --start-timestep 3408 --n-timesteps 100 --dataset-kind train
 
 import argparse
 import os
@@ -18,7 +18,7 @@ from src.dataset_helpers import (
     process_timestep,
     write_timestep_samples,
 )
-from src.flux_point_labels import (
+from src.point_labels import (
     create_labeled_coords_by_timestep,
     create_labeled_coords_for_timestep,
 )

@@ -6,21 +6,22 @@ output_dirs:
   test: data/test
 
 labels:
-  reconnection: 1
   lobe: 0
-  other: -1
+  other: 1
+  o_point: 2
+  reconnection: 3
 
 creation:
   n_jobs: 16
 
 vdf_box:
-  x_half_width_re: 0.2
+  x_half_width_re: 0.3
   y_half_width_re: 0.0
-  z_half_width_re: 0.1
+  z_half_width_re: 0.2
 
-flux_points:
+points:
   x_class_name: reconnection
-  o_class_name: other
+  o_class_name: o_point
   region_re:
     x_between: [-20.0, -10.0]
     z_abs_max: 1.0
