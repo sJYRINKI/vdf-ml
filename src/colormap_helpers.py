@@ -5,10 +5,27 @@ from src.vdf_helpers import R_EARTH
 
 
 SOURCE_POINT_STYLES = {
-    "reconnection": {"color": "blue", "marker": "x", "label": "reconnection"},
-    "o_point": {"color": "blue", "marker": "o", "label": "o point"},
-    "other": {"color": "blue", "marker": ".", "label": "other"},
-    "lobe": {"color": "gold", "marker": "2", "label": "lobe"},
+    "reconnection": {
+        "color": "blue",
+        "marker": "x",
+        "label": "reconnection",
+        "s": 10,
+    },
+    "o_point": {
+        "edgecolor": "blue",
+        "facecolor": "none",
+        "marker": "o",
+        "label": "o point",
+        "s": 14,
+        "linewidths": 1.0,
+    },
+    "other": {
+        "color": "red",
+        "marker": "s",
+        "label": "other",
+        "s": 10,
+    },
+    "lobe": {"color": "gold", "marker": "2", "label": "lobe", "s": 16},
 }
 
 
@@ -127,8 +144,11 @@ def scatter_label_points(ax, reader, metadata_rows):
             row["x_re"],
             row["z_re"],
             label=label,
-            s=16,
-            color=style["color"],
+            s=style.get("s", 16),
+            color=style.get("color"),
+            edgecolors=style.get("edgecolor"),
+            facecolors=style.get("facecolor"),
+            linewidths=style.get("linewidths"),
             marker=style["marker"],
         )
 
