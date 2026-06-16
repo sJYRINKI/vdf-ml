@@ -89,6 +89,98 @@ def cell_has_vdf(reader, cid, pop="avgs"):
 
     return len(velocity_cells) > 0
 
+def get_vdf_cellid_set(reader, pop="avgs"):
+    """
+    Return all spatial cell IDs that contain VDF blocks.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    pop : str, optional
+        Particle population name.
+
+    Returns
+    -------
+    set of int
+        Cell IDs with velocity-space blocks.
+    """
+
+    try:
+        cellids = reader.read(
+            mesh="SpatialGrid",
+            tag="CELLSWITHBLOCKS",
+            name=pop,
+        )
+    except Exception:
+        cellids = reader.read(
+            mesh="SpatialGrid",
+            tag="CELLSWITHBLOCKS",
+        )
+
+    return {int(cid) for cid in np.atleast_1d(cellids)}
+
+def get_vdf_cells_with_coords_re(reader, pop="avgs"):
+    """
+    Return VDF cell IDs and their coordinates in Earth radii.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    pop : str, optional
+        Particle population name.
+
+    Returns
+    -------
+    cellids : numpy.ndarray
+        Spatial cell IDs with VDF data.
+    coords_re : numpy.ndarray
+        Cell center coordinates in Earth radii with shape ``(n_cells, 3)``.
+    """
+
+    cellids = np.asarray(sorted(get_vdf_cellid_set(reader, pop=pop)), dtype=int)
+    if len(cellids) == 0:
+        return cellids, np.empty((0, 3), dtype=float)
+
+    try:
+        coords = reader.get_cell_coordinates(cellids)
+    except Exception:
+        coords = [reader.get_cell_coordinates(int(cid)) for cid in cellids]
+
+    coords_re = np.asarray(coords, dtype=float) / R_EARTH
+
+    return cellids, coords_re
+
+
+def get_nearest_vdf_cellid(coord_re, vdf_cellids, vdf_coords_re):
+    """
+    Return the VDF cell ID nearest to a coordinate.
+
+    Parameters
+    ----------
+    coord_re : array-like of float
+        Coordinate in Earth radii, given as ``[x, y, z]``.
+    vdf_cellids : numpy.ndarray
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+
+    Returns
+    -------
+    int
+        Nearest VDF cell ID.
+    """
+
+    if len(vdf_cellids) == 0:
+        raise ValueError("No velocity distributions found")
+
+    coord_re = np.asarray(coord_re, dtype=float)
+    distances_squared = np.sum((vdf_coords_re - coord_re) ** 2, axis=1)
+    nearest_index = int(np.argmin(distances_squared))
+
+    return int(vdf_cellids[nearest_index])
+
 def get_spatial_index_range(reader, axis_name, axis_index, min_value, max_value):
     """
     Convert spatial coordinate bounds to clipped fsgrid index bounds.
@@ -127,7 +219,15 @@ def get_spatial_index_range(reader, axis_name, axis_index, min_value, max_value)
     return min(lower_index, upper_index), max(lower_index, upper_index)
 
 
-def get_vdf_cellids_in_box(reader, coord_re, box_config, pop="avgs"):
+def get_vdf_cellids_in_box(
+    reader,
+    coord_re,
+    box_config,
+    pop="avgs",
+    cell_has_vdf_func=None,
+    vdf_cellids=None,
+    vdf_coords_re=None,
+):
     """
     Find all VDF cell IDs inside a spatial box around a coordinate.
 
@@ -141,6 +241,13 @@ def get_vdf_cellids_in_box(reader, coord_re, box_config, pop="avgs"):
         Box half-widths in Earth radii.
     pop : str, optional
         Particle population name.
+    cell_has_vdf_func : callable, optional
+        Function taking a cell ID and returning whether it has VDF data. Kept
+        for compatibility; precomputed VDF cell IDs already satisfy this.
+    vdf_cellids : numpy.ndarray, optional
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray, optional
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
 
     Returns
     -------
@@ -148,8 +255,17 @@ def get_vdf_cellids_in_box(reader, coord_re, box_config, pop="avgs"):
         Mapping from box position name to VDF cell ID.
     """
 
-    center_m = coord_re_to_m(coord_re)
-    half_widths_m = R_EARTH * np.array(
+    if vdf_cellids is None or vdf_coords_re is None:
+        vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(
+            reader=reader,
+            pop=pop,
+        )
+
+    if len(vdf_cellids) == 0:
+        return {}
+
+    center_re = np.asarray(coord_re, dtype=float)
+    half_widths_re = np.array(
         [
             float(box_config["x_half_width_re"]),
             float(box_config["y_half_width_re"]),
@@ -158,60 +274,30 @@ def get_vdf_cellids_in_box(reader, coord_re, box_config, pop="avgs"):
         dtype=float,
     )
 
-    lower_bounds = center_m - half_widths_m
-    upper_bounds = center_m + half_widths_m
-    active_axes = half_widths_m > 0
+    lower_bounds = center_re - half_widths_re
+    upper_bounds = center_re + half_widths_re
+    active_axes = half_widths_re > 0
 
-    x_min, x_max = get_spatial_index_range(
-        reader=reader,
-        axis_name="x",
-        axis_index=0,
-        min_value=lower_bounds[0],
-        max_value=upper_bounds[0],
-    )
-    y_min, y_max = get_spatial_index_range(
-        reader=reader,
-        axis_name="y",
-        axis_index=1,
-        min_value=lower_bounds[1],
-        max_value=upper_bounds[1],
-    )
-    z_min, z_max = get_spatial_index_range(
-        reader=reader,
-        axis_name="z",
-        axis_index=2,
-        min_value=lower_bounds[2],
-        max_value=upper_bounds[2],
-    )
+    if np.any(active_axes):
+        selected = np.all(
+            (vdf_coords_re[:, active_axes] >= lower_bounds[active_axes])
+            & (vdf_coords_re[:, active_axes] <= upper_bounds[active_axes]),
+            axis=1,
+        )
+    else:
+        selected = np.ones(len(vdf_cellids), dtype=bool)
 
-    cellids = {}
-    seen_cellids = set()
+    selected_cellids = vdf_cellids[selected]
+    if cell_has_vdf_func is not None:
+        selected_cellids = np.asarray(
+            [cid for cid in selected_cellids if cell_has_vdf_func(int(cid))],
+            dtype=int,
+        )
 
-    for i in range(x_min, x_max + 1):
-        for j in range(y_min, y_max + 1):
-            for k in range(z_min, z_max + 1):
-                try:
-                    cid = int(reader.get_cellid_at_fsgrid_index(i, j, k))
-                except Exception:
-                    continue
-
-                if cid <= 0 or cid in seen_cellids:
-                    continue
-
-                cell_coord = np.asarray(reader.get_cell_coordinates(cid), dtype=float)
-                if (
-                    np.any(cell_coord[active_axes] < lower_bounds[active_axes])
-                    or np.any(cell_coord[active_axes] > upper_bounds[active_axes])
-                ):
-                    continue
-
-                if not cell_has_vdf(reader, cid, pop=pop):
-                    continue
-
-                seen_cellids.add(cid)
-                cellids[f"box_{len(cellids):04d}"] = cid
-
-    return cellids
+    return {
+        f"box_{index:04d}": int(cid)
+        for index, cid in enumerate(selected_cellids)
+    }
 
 def get_min_value_from_file(file_location, cid):
     """

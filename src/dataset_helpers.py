@@ -1,17 +1,27 @@
+import time
+
 import numpy as np
 import analysator as pt
 
 from src.timesteps import create_timestep_path
-from src.vdf_extract import extract_vdf
+from src.vdf_extract import extract_vdf_from_reader
+from src.point_labels import create_point_labeled_coords, iter_labeled_coords
 from src.vdf_helpers import (
     R_EARTH,
-    cell_has_vdf,
-    get_cellid_with_vdf,
-    get_spatial_index_range,
+    get_nearest_vdf_cellid,
+    get_vdf_cells_with_coords_re,
     get_vdf_cellids_in_box,
 )
 
-def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cellids=None):
+def create_timestep_sample_specs(
+    config,
+    timestep,
+    labeled_coords,
+    rejected_cellids=None,
+    reader=None,
+    vdf_cellids=None,
+    vdf_coords_re=None,
+):
     """
     Create VDF sample specifications for one timestep.
 
@@ -30,6 +40,12 @@ def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cell
         Tuples of ``(class_name, label, coord_re)``.
     rejected_cellids : set of int, optional
         VDF cell IDs rejected earlier in point-label detection.
+    reader : analysator.vlsvfile.VlsvReader, optional
+        Existing reader for the timestep bulk file.
+    vdf_cellids : numpy.ndarray, optional
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray, optional
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
 
     Returns
     -------
@@ -42,12 +58,16 @@ def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cell
         timestep=timestep
     )
 
-    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    if reader is None:
+        reader = pt.vlsvfile.VlsvReader(str(file_location))
+
     simulation_time = reader.read_parameter("time")
     point_class_names = get_point_class_names(config)
     box_config = config["vdf_box"]
     labeled_coords = list(labeled_coords)
     rejected_cellids = {int(cid) for cid in (rejected_cellids or set())}
+    if vdf_cellids is None or vdf_coords_re is None:
+        vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
 
     sample_specs = []
     seen_class_cellids = set()
@@ -58,11 +78,14 @@ def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cell
                 reader=reader,
                 coord_re=coord_re,
                 box_config=box_config,
+                vdf_cellids=vdf_cellids,
+                vdf_coords_re=vdf_coords_re,
             )
         else:
-            cid = get_cellid_with_vdf(
-                reader=reader,
+            cid = get_nearest_vdf_cellid(
                 coord_re=coord_re,
+                vdf_cellids=vdf_cellids,
+                vdf_coords_re=vdf_coords_re,
             )
             cellids_by_position = {"closest": cid}
 
@@ -82,6 +105,7 @@ def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cell
                     "class_name": class_name,
                     "coord_re": coord_re,
                     "neighbor_position": neighbor_position,
+                    "timestep": int(timestep),
                 }
             )
 
@@ -99,7 +123,10 @@ def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cell
             file_location=file_location,
             simulation_time=simulation_time,
             existing_sample_specs=sample_specs,
+            timestep=timestep,
             rejected_cellids=rejected_cellids,
+            vdf_cellids=vdf_cellids,
+            vdf_coords_re=vdf_coords_re,
         )
     )
 
@@ -109,13 +136,85 @@ def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cell
     )
 
 
+def create_timestep_sample_specs_for_timestep(config, timestep):
+    """
+    Create sample specs for one timestep using one shared VLSV reader.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration.
+    timestep : int
+        Timestep to process.
+
+    Returns
+    -------
+    tuple
+        Pair of ``(timestep, sample_specs)``.
+    """
+
+    file_location = create_timestep_path(
+        path_template=config["file_template_bulk"],
+        timestep=timestep,
+    )
+    planning_start = time.perf_counter()
+
+    reader_start = time.perf_counter()
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    reader_elapsed = time.perf_counter() - reader_start
+
+    vdf_cells_start = time.perf_counter()
+    vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
+    vdf_cells_elapsed = time.perf_counter() - vdf_cells_start
+
+    point_start = time.perf_counter()
+    labeled_coords = list(iter_labeled_coords(config))
+    point_labeled_coords, rejected_cellids = create_point_labeled_coords(
+        config=config,
+        timestep=timestep,
+        reader=reader,
+    )
+    labeled_coords.extend(point_labeled_coords)
+    point_elapsed = time.perf_counter() - point_start
+
+    specs_start = time.perf_counter()
+    sample_specs = create_timestep_sample_specs(
+        config=config,
+        timestep=timestep,
+        labeled_coords=labeled_coords,
+        rejected_cellids=rejected_cellids,
+        reader=reader,
+        vdf_cellids=vdf_cellids,
+        vdf_coords_re=vdf_coords_re,
+    )
+
+    specs_elapsed = time.perf_counter() - specs_start
+    planning_elapsed = time.perf_counter() - planning_start
+
+    print(
+        f"Timestep {int(timestep)} planning: "
+        f"reader={reader_elapsed:.2f}s, "
+        f"vdf_cells={vdf_cells_elapsed:.2f}s, "
+        f"points={point_elapsed:.2f}s, "
+        f"samples={specs_elapsed:.2f}s, "
+        f"total={planning_elapsed:.2f}s, "
+        f"n={len(sample_specs)}"
+    )
+
+    return int(timestep), sample_specs
+
+
 def create_other_region_sample_specs(
     config,
     reader,
     file_location,
     simulation_time,
     existing_sample_specs,
+    timestep,
     rejected_cellids=None,
+    cell_has_vdf_func=None,
+    vdf_cellids=None,
+    vdf_coords_re=None,
 ):
     """
     Create ``other`` samples from VDF cells in the point region.
@@ -137,9 +236,17 @@ def create_other_region_sample_specs(
     existing_sample_specs : list of dict
         Sample specifications already created for configured point and static
         coordinate classes.
+    timestep : int
+        Timestep to process.
     rejected_cellids : set of int, optional
         Cell IDs rejected because they had conflicting class labels before the
         ``other`` region samples were created.
+    cell_has_vdf_func : callable, optional
+        Function taking a cell ID and returning whether it has VDF data.
+    vdf_cellids : numpy.ndarray, optional
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray, optional
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
 
     Returns
     -------
@@ -158,14 +265,28 @@ def create_other_region_sample_specs(
     excluded_cellids.update(int(cid) for cid in (rejected_cellids or set()))
     seen_other_cellids = set()
     sample_specs = []
+    coord_by_cellid = {}
+    if vdf_cellids is not None and vdf_coords_re is not None:
+        coord_by_cellid = {
+            int(cid): np.asarray(coord_re, dtype=float)
+            for cid, coord_re in zip(vdf_cellids, vdf_coords_re)
+        }
 
-    for cid in get_vdf_cellids_in_point_region(reader, config):
+    for cid in get_vdf_cellids_in_point_region(
+        reader=reader,
+        config=config,
+        cell_has_vdf_func=cell_has_vdf_func,
+        vdf_cellids=vdf_cellids,
+        vdf_coords_re=vdf_coords_re,
+    ):
         cid = int(cid)
         if cid in excluded_cellids or cid in seen_other_cellids:
             continue
 
         seen_other_cellids.add(cid)
-        coord_re = np.asarray(reader.get_cell_coordinates(cid), dtype=float) / R_EARTH
+        coord_re = coord_by_cellid.get(cid)
+        if coord_re is None:
+            coord_re = np.asarray(reader.get_cell_coordinates(cid), dtype=float) / R_EARTH
         sample_specs.append(
             {
                 "file_location": file_location,
@@ -175,13 +296,20 @@ def create_other_region_sample_specs(
                 "class_name": class_name,
                 "coord_re": coord_re,
                 "neighbor_position": "point_region",
+                "timestep": int(timestep),
             }
         )
 
     return sample_specs
 
 
-def get_vdf_cellids_in_point_region(reader, config):
+def get_vdf_cellids_in_point_region(
+    reader,
+    config,
+    cell_has_vdf_func=None,
+    vdf_cellids=None,
+    vdf_coords_re=None,
+):
     """
     Return VDF cell IDs inside ``points.region_re``.
 
@@ -191,6 +319,12 @@ def get_vdf_cellids_in_point_region(reader, config):
         Reader for the timestep VLSV file.
     config : dict
         Dataset configuration containing the ``points.region_re`` bounds.
+    cell_has_vdf_func : callable, optional
+        Function taking a cell ID and returning whether it has VDF data.
+    vdf_cellids : numpy.ndarray, optional
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray, optional
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
 
     Returns
     -------
@@ -198,67 +332,37 @@ def get_vdf_cellids_in_point_region(reader, config):
         Cell IDs with VDF data inside the configured point region.
     """
 
+    if vdf_cellids is None or vdf_coords_re is None:
+        vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
+
+    if len(vdf_cellids) == 0:
+        return []
+
     region_re = config.get("points", {}).get("region_re", {})
     x_min_re, x_max_re = get_region_x_bounds_re(region_re)
     z_abs_max_re = float(region_re["z_abs_max"])
 
-    x_min = x_min_re * R_EARTH
-    x_max = x_max_re * R_EARTH
-    y_min = float(reader.read_parameter("ymin"))
-    y_max = float(reader.read_parameter("ymax"))
-    z_min = -z_abs_max_re * R_EARTH
-    z_max = z_abs_max_re * R_EARTH
+    y_min_re = float(reader.read_parameter("ymin")) / R_EARTH
+    y_max_re = float(reader.read_parameter("ymax")) / R_EARTH
 
-    x_index_min, x_index_max = get_spatial_index_range(
-        reader=reader,
-        axis_name="x",
-        axis_index=0,
-        min_value=x_min,
-        max_value=x_max,
-    )
-    y_index_min, y_index_max = get_spatial_index_range(
-        reader=reader,
-        axis_name="y",
-        axis_index=1,
-        min_value=y_min,
-        max_value=y_max,
-    )
-    z_index_min, z_index_max = get_spatial_index_range(
-        reader=reader,
-        axis_name="z",
-        axis_index=2,
-        min_value=z_min,
-        max_value=z_max,
+    selected = (
+        (vdf_coords_re[:, 0] >= x_min_re)
+        & (vdf_coords_re[:, 0] <= x_max_re)
+        & (vdf_coords_re[:, 1] >= y_min_re)
+        & (vdf_coords_re[:, 1] <= y_max_re)
+        & (vdf_coords_re[:, 2] >= -z_abs_max_re)
+        & (vdf_coords_re[:, 2] <= z_abs_max_re)
     )
 
-    cellids = []
-    seen_cellids = set()
+    selected_cellids = vdf_cellids[selected]
+    if cell_has_vdf_func is not None:
+        selected_cellids = [
+            int(cid)
+            for cid in selected_cellids
+            if cell_has_vdf_func(int(cid))
+        ]
 
-    for i in range(x_index_min, x_index_max + 1):
-        for j in range(y_index_min, y_index_max + 1):
-            for k in range(z_index_min, z_index_max + 1):
-                try:
-                    cid = int(reader.get_cellid_at_fsgrid_index(i, j, k))
-                except Exception:
-                    continue
-
-                if cid <= 0 or cid in seen_cellids:
-                    continue
-
-                cell_coord = np.asarray(reader.get_cell_coordinates(cid), dtype=float)
-                if not (x_min <= cell_coord[0] <= x_max):
-                    continue
-                if not (y_min <= cell_coord[1] <= y_max):
-                    continue
-                if not (z_min <= cell_coord[2] <= z_max):
-                    continue
-                if not cell_has_vdf(reader, cid):
-                    continue
-
-                seen_cellids.add(cid)
-                cellids.append(cid)
-
-    return cellids
+    return [int(cid) for cid in selected_cellids]
 
 
 def get_region_x_bounds_re(region_re):
@@ -369,6 +473,9 @@ def count_timestep_samples(config, timestep, labeled_coords, rejected_cellids=No
     """
     Count VDF samples for one timestep after neighborhood expansion.
 
+    Prefer creating sample specs once and reusing them for extraction in new
+    code paths. This helper is kept for compatibility with direct callers.
+
     Parameters
     ----------
     config : dict
@@ -396,9 +503,73 @@ def count_timestep_samples(config, timestep, labeled_coords, rejected_cellids=No
     )
 
 
+def process_timestep_sample_specs(sample_specs):
+    """
+    Extract labeled VDF samples from precomputed timestep sample specs.
+
+    Parameters
+    ----------
+    sample_specs : list of dict
+        Sample specifications for one timestep.
+
+    Returns
+    -------
+    list of dict
+        Sample dictionaries.
+    """
+
+    if not sample_specs:
+        return []
+
+    file_location = sample_specs[0]["file_location"]
+    timestep = int(sample_specs[0].get("timestep", 0))
+    extraction_start = time.perf_counter()
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+
+    print(f"Timestep {timestep}: extracting {len(sample_specs)} samples")
+
+    samples = []
+
+    for sample_spec in sample_specs:
+        coord_re = sample_spec["coord_re"]
+        cid = int(sample_spec["cid"])
+
+        vdf = extract_vdf_from_reader(
+            reader=reader,
+            cid=cid,
+        ).astype(np.float32, copy=False)
+
+        samples.append(
+            {
+                "vdf": vdf,
+                "label": sample_spec["label"],
+                "metadata": {
+                    "timestep": int(sample_spec["timestep"]),
+                    "simulation_time": sample_spec["simulation_time"],
+                    "cid": cid,
+                    "label": sample_spec["label"],
+                    "class_name": sample_spec["class_name"],
+                    "neighbor_position": sample_spec["neighbor_position"],
+                    "x_re": float(coord_re[0]),
+                    "y_re": float(coord_re[1]),
+                    "z_re": float(coord_re[2]),
+                    "file_location": str(file_location),
+                },
+            }
+        )
+
+    extraction_elapsed = time.perf_counter() - extraction_start
+    print(f"Timestep {timestep} extraction: {extraction_elapsed:.2f} s")
+
+    return samples
+
+
 def process_timestep(config, timestep, labeled_coords, rejected_cellids=None):
     """
     Extract labeled VDF samples for one timestep.
+
+    This compatibility wrapper creates the timestep sample specs and then
+    extracts them with a single shared VLSV reader.
 
     Parameters
     ----------
@@ -424,53 +595,7 @@ def process_timestep(config, timestep, labeled_coords, rejected_cellids=None):
         rejected_cellids=rejected_cellids,
     )
 
-    print(f"Timestep: {timestep}")
-
-    samples = []
-
-    for sample_spec in sample_specs:
-        coord_re = sample_spec["coord_re"]
-        cid = sample_spec["cid"]
-        file_location = sample_spec["file_location"]
-
-        print(
-            f"Class: {sample_spec['class_name']}, "
-            f"label: {sample_spec['label']}, "
-            f"position: {sample_spec['neighbor_position']}"
-        )
-        print(f"Coordinate RE: {coord_re}")
-        print(f"Cell ID: {cid}")
-
-        vdf = extract_vdf(
-            file_location=file_location,
-            cid=int(cid)
-        ).astype(np.float32, copy=False)
-
-        samples.append(
-            {
-                "vdf": vdf,
-                "label": sample_spec["label"],
-                "metadata": {
-                    "timestep": int(timestep),
-                    "simulation_time": sample_spec["simulation_time"],
-                    "cid": int(cid),
-                    "label": sample_spec["label"],
-                    "class_name": sample_spec["class_name"],
-                    "neighbor_position": sample_spec["neighbor_position"],
-                    "x_re": float(coord_re[0]),
-                    "y_re": float(coord_re[1]),
-                    "z_re": float(coord_re[2]),
-                    "file_location": str(file_location),
-                },
-            }
-        )
-
-        print(f"VDF shape: {vdf.shape}")
-        print(f"VDF dtype: {vdf.dtype}")
-        print(f"VDF min: {vdf.min()}")
-        print(f"VDF max: {vdf.max()}")
-
-    return samples
+    return process_timestep_sample_specs(sample_specs)
 
 
 def write_timestep_samples(X, y, metadata, timestep_samples, sample_index):
@@ -497,8 +622,6 @@ def write_timestep_samples(X, y, metadata, timestep_samples, sample_index):
     """
 
     for sample in timestep_samples:
-        print(f"Sample index: {sample_index}")
-
         X[sample_index] = sample["vdf"]
         y[sample_index] = sample["label"]
 

@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 import numpy as np
 from joblib import Parallel, delayed
@@ -13,14 +14,10 @@ sys.path.append(str(PROJECT_ROOT))
 from src.config import load_config
 from src.timesteps import create_timestep_list
 from src.dataset_helpers import (
-    count_timestep_samples,
+    create_timestep_sample_specs_for_timestep,
     iter_chunks,
-    process_timestep,
+    process_timestep_sample_specs,
     write_timestep_samples,
-)
-from src.point_labels import (
-    create_label_data_by_timestep,
-    create_labeled_coords_for_timestep,
 )
 from src.dataset_io import (
     create_dataset_output_dir,
@@ -29,6 +26,22 @@ from src.dataset_io import (
 )
 
 def main(config_path, start_timestep, n_timesteps, dataset_kind):
+    """
+    Create and save a labeled VDF dataset.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to dataset creation YAML config.
+    start_timestep : int
+        First timestep to include.
+    n_timesteps : int
+        Number of consecutive timesteps to process.
+    dataset_kind : {"train", "test"}
+        Output dataset split name.
+    """
+
+    total_start = time.perf_counter()
     config = load_config(config_path)
 
     timesteps = create_timestep_list(
@@ -58,47 +71,39 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     else:
         worker_count = max(1, n_jobs)
 
-    if n_jobs == 1:
-        label_data_by_timestep = create_label_data_by_timestep(
-            config=config,
-            timesteps=timesteps,
-        )
-    else:
-        label_results = Parallel(n_jobs=n_jobs)(
-            delayed(create_labeled_coords_for_timestep)(
-                config=config,
-                timestep=timestep,
-            )
-            for timestep in timesteps
-        )
-        label_data_by_timestep = dict(label_results)
+    planning_start = time.perf_counter()
 
     if n_jobs == 1:
-        n_samples = sum(
-            count_timestep_samples(
+        sample_specs_by_timestep = dict(
+            create_timestep_sample_specs_for_timestep(
                 config=config,
                 timestep=timestep,
-                labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
-                rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
             )
             for timestep in timesteps
         )
     else:
-        sample_count_results = Parallel(n_jobs=n_jobs)(
-            delayed(count_timestep_samples)(
+        sample_spec_results = Parallel(n_jobs=n_jobs)(
+            delayed(create_timestep_sample_specs_for_timestep)(
                 config=config,
                 timestep=timestep,
-                labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
-                rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
             )
             for timestep in timesteps
         )
-        n_samples = sum(sample_count_results)
+        sample_specs_by_timestep = dict(sample_spec_results)
 
-    print(n_samples)
+    planning_elapsed = time.perf_counter() - planning_start
+    n_samples = sum(
+        len(sample_specs)
+        for sample_specs in sample_specs_by_timestep.values()
+    )
+
+    print(f"Samples: {n_samples}")
+    print(f"Timing planning: {planning_elapsed:.2f} s")
 
     if n_samples == 0:
         raise ValueError("No samples were found for the requested timesteps")
+
+    extraction_start = time.perf_counter()
 
     metadata = []
     sample_index = 0
@@ -107,11 +112,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     first_sample_timestep_index = None
 
     for timestep_index, timestep in enumerate(timesteps):
-        first_samples = process_timestep(
-            config=config,
-            timestep=timestep,
-            labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
-            rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
+        first_samples = process_timestep_sample_specs(
+            sample_specs_by_timestep[timestep]
         )
 
         if first_samples:
@@ -137,11 +139,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
 
     if n_jobs == 1:
         for timestep in remaining_timesteps:
-            timestep_samples = process_timestep(
-                config=config,
-                timestep=timestep,
-                labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
-                rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
+            timestep_samples = process_timestep_sample_specs(
+                sample_specs_by_timestep[timestep]
             )
             sample_index = write_timestep_samples(
                 X=X,
@@ -153,11 +152,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     else:
         for timestep_chunk in iter_chunks(remaining_timesteps, worker_count):
             chunk_results = Parallel(n_jobs=n_jobs)(
-                delayed(process_timestep)(
-                    config=config,
-                    timestep=timestep,
-                    labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
-                    rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
+                delayed(process_timestep_sample_specs)(
+                    sample_specs_by_timestep[timestep]
                 )
                 for timestep in timestep_chunk
             )
@@ -171,6 +167,9 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
                     sample_index=sample_index,
                 )
 
+    extraction_elapsed = time.perf_counter() - extraction_start
+    save_start = time.perf_counter()
+
     X.flush()
     y.flush()
 
@@ -179,9 +178,15 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         metadata=metadata,
     )
 
+    save_elapsed = time.perf_counter() - save_start
+    total_elapsed = time.perf_counter() - total_start
+
     print(f"X shape: {X.shape}")
     print(f"y shape: {y.shape}")
-    print(f"y: {y}")
+    print(f"Samples written: {sample_index}")
+    print(f"Timing extraction/write: {extraction_elapsed:.2f} s")
+    print(f"Timing save/flush: {save_elapsed:.2f} s")
+    print(f"Timing total: {total_elapsed:.2f} s")
 
     print(f"Saved X: {outdir / 'X.npy'}")
     print(f"Saved y: {outdir / 'y.npy'}")

@@ -124,7 +124,7 @@ def iter_point_labeled_coords(config, timestep):
     yield from point_labeled_coords
 
 
-def create_point_labeled_coords(config, timestep):
+def create_point_labeled_coords(config, timestep, reader=None):
     """
     Create point labeled coordinates and rejected point cell IDs.
 
@@ -134,6 +134,8 @@ def create_point_labeled_coords(config, timestep):
         Dataset config dictionary.
     timestep : int
         Timestep to process.
+    reader : analysator.vlsvfile.VlsvReader, optional
+        Existing reader for the timestep bulk file.
 
     Returns
     -------
@@ -149,17 +151,17 @@ def create_point_labeled_coords(config, timestep):
     x_class_name = points_config["x_class_name"]
     o_class_name = points_config["o_class_name"]
 
-    bulk_file_location = create_timestep_path(
-        path_template=config["file_template_bulk"],
-        timestep=timestep,
-    )
-
     flux_file_location = create_timestep_path(
         path_template=config["file_template_flux"],
         timestep=timestep,
     )
 
-    reader = pt.vlsvfile.VlsvReader(str(bulk_file_location))
+    if reader is None:
+        bulk_file_location = create_timestep_path(
+            path_template=config["file_template_bulk"],
+            timestep=timestep,
+        )
+        reader = pt.vlsvfile.VlsvReader(str(bulk_file_location))
 
     x_point_coords_re, o_point_coords_re = find_point_coords_re(
         reader=reader,

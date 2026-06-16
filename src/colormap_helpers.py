@@ -1,7 +1,7 @@
 from matplotlib.patches import Rectangle
 import numpy as np
 
-from src.vdf_helpers import R_EARTH
+from src.vdf_helpers import R_EARTH, get_vdf_cellid_set
 
 
 SOURCE_POINT_STYLES = {
@@ -25,7 +25,7 @@ SOURCE_POINT_STYLES = {
         "label": "other",
         "s": 10,
     },
-    "lobe": {"color": "gold", "marker": "2", "label": "lobe", "s": 16},
+    "lobe": {"color": "blue", "marker": "2", "label": "lobe", "s": 16},
 }
 
 
@@ -96,6 +96,61 @@ def draw_point_boxes(ax, metadata_rows, box_config, box_classes):
         ax.add_patch(rectangle)
 
 
+def scatter_all_vdf_cells(ax, reader, boxre=None):
+    """
+    Scatter all VDF-containing spatial cells on an xz colormap.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes where points are drawn.
+    reader : analysator.vlsvfile.VlsvReader
+        Reader for the timestep VLSV file.
+    boxre : list of float, optional
+        Plot box in Earth radii: ``[xmin, xmax, zmin, zmax]``. If provided,
+        only VDF cells inside the visible xz range are drawn.
+    """
+
+    cellids = sorted(get_vdf_cellid_set(reader))
+    if not cellids:
+        return
+
+    try:
+        coords_re = np.asarray(
+            reader.get_cell_coordinates(cellids),
+            dtype=float,
+        ) / R_EARTH
+    except Exception:
+        coords_re = np.asarray(
+            [reader.get_cell_coordinates(int(cid)) for cid in cellids],
+            dtype=float,
+        ) / R_EARTH
+
+    if boxre is not None:
+        x_min, x_max, z_min, z_max = [float(value) for value in boxre]
+        visible = (
+            (coords_re[:, 0] >= x_min)
+            & (coords_re[:, 0] <= x_max)
+            & (coords_re[:, 2] >= z_min)
+            & (coords_re[:, 2] <= z_max)
+        )
+        coords_re = coords_re[visible]
+
+    if len(coords_re) == 0:
+        return
+
+    ax.scatter(
+        coords_re[:, 0],
+        coords_re[:, 2],
+        label="VDF cell",
+        marker=".",
+        s=8,
+        color="gold",
+        linewidths=0,
+        zorder=3,
+    )
+
+
 def scatter_label_points(ax, reader, metadata_rows):
     """
     Scatter source label points and sampled VDF cells on an xz colormap.
@@ -113,7 +168,7 @@ def scatter_label_points(ax, reader, metadata_rows):
     marker_rows = metadata_rows.drop_duplicates(["cid"])
 
     for cell_index, (_, row) in enumerate(marker_rows.iterrows()):
-        label = "cell" if cell_index == 0 else None
+        label = "Used VDF cell" if cell_index == 0 else None
         cell_coord_re = np.asarray(
             reader.get_cell_coordinates(int(row["cid"])),
             dtype=float,
@@ -127,6 +182,7 @@ def scatter_label_points(ax, reader, metadata_rows):
             s=18,
             color="red",
             linewidths=0,
+            zorder=5,
         )
 
     plotted_source_classes = set()
@@ -150,6 +206,7 @@ def scatter_label_points(ax, reader, metadata_rows):
             facecolors=style.get("facecolor"),
             linewidths=style.get("linewidths"),
             marker=style["marker"],
+            zorder=6,
         )
 
         plotted_source_classes.add(class_name)

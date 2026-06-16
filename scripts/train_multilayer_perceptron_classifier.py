@@ -39,8 +39,17 @@ def main(config_path, dataset_id, model_id):
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    labels_config = config["labels"]
     features_config = config["features"]
     model_config = config["model"]
+
+    class_names_by_label = {
+        int(label): class_name
+        for class_name, label in labels_config.items()
+    }
+
+    class_labels = np.asarray(sorted(class_names_by_label), dtype=int)
+    class_names = [class_names_by_label[label] for label in class_labels]
 
     downsample_factor = int(features_config.get("downsample_factor", 8))
     batch_size = int(features_config.get("batch_size", 64))
@@ -70,8 +79,12 @@ def main(config_path, dataset_id, model_id):
         metadata=metadata
     )
 
-    y_train = np.asarray(y[train_indices])
-    y_test = np.asarray(y[test_indices])
+    y_train = np.asarray(y[train_indices], dtype=int)
+    y_test = np.asarray(y[test_indices], dtype=int)
+
+    print("Configured classes:")
+    for label, class_name in zip(class_labels, class_names):
+        print(f"  {label}: {class_name}")
     print("Creating train features")
     X_train_features = create_features_in_batches(
         X=X,
@@ -129,7 +142,15 @@ def main(config_path, dataset_id, model_id):
     print("\n")
     print(f"Test accuracy: {test_accuracy}")
     print("\n")
-    print(classification_report(y_test, y_test_pred))
+    print(
+        classification_report(
+            y_test,
+            y_test_pred,
+            labels=class_labels,
+            target_names=class_names,
+            zero_division=0,
+        )
+    )
 
     train_predictions = create_predictions_dataframe(
         metadata=metadata,
@@ -151,6 +172,10 @@ def main(config_path, dataset_id, model_id):
         [train_predictions, test_predictions],
         ignore_index=True,
     )
+    predictions["true_class_name"] = predictions["true_label"].map(class_names_by_label)
+    predictions["predicted_class_name"] = predictions["predicted_label"].map(
+        class_names_by_label
+    )
 
     model_path = output_dir / "multilayer_perceptron_classifier.joblib"
     preprocessing_path = output_dir / "preprocessing.npz"
@@ -167,6 +192,8 @@ def main(config_path, dataset_id, model_id):
         log_eps=log_eps,
         batch_size=batch_size,
         n_jobs=n_jobs,
+        class_labels=class_labels,
+        class_names=np.asarray(class_names),
     )
 
     predictions.to_csv(predictions_path, index=False)
@@ -185,6 +212,9 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Train samples: {len(train_indices)}\n")
         f.write(f"Test samples: {len(test_indices)}\n")
         f.write(f"Feature extraction jobs: {n_jobs}\n")
+        f.write("Configured classes:\n")
+        for label, class_name in zip(class_labels, class_names):
+            f.write(f"  {label}: {class_name}\n")
         f.write(f"Train timesteps: {train_timesteps[0]} ... {train_timesteps[-1]}\n")
         f.write(f"Test timesteps: {test_timesteps[0]} ... {test_timesteps[-1]}\n")
         f.write(f"Hidden layer sizes: {hidden_layer_sizes}\n")
@@ -196,6 +226,7 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Max iterations: {max_iter}\n")
         f.write(f"Early stopping: {early_stopping}\n")
         f.write(f"Validation fraction: {validation_fraction}\n")
+        f.write(f"Classifier classes: {list(fitted_classifier.classes_)}\n")
         f.write(f"Iterations: {fitted_classifier.n_iter_}\n")
         f.write(f"Final loss: {fitted_classifier.loss_}\n")
         f.write(f"Train accuracy: {train_accuracy}\n")
@@ -207,10 +238,18 @@ def main(config_path, dataset_id, model_id):
         f.write(f"Variance proxy: {variance_proxy}\n\n")
         f.write("Test classification report\n")
         f.write("=" * 70 + "\n")
-        f.write(classification_report(y_test, y_test_pred, zero_division=0))
+        f.write(
+            classification_report(
+                y_test,
+                y_test_pred,
+                labels=class_labels,
+                target_names=class_names,
+                zero_division=0,
+            )
+        )
         f.write("\n\nTest confusion matrix\n")
         f.write("=" * 70 + "\n")
-        f.write(str(confusion_matrix(y_test, y_test_pred)))
+        f.write(str(confusion_matrix(y_test, y_test_pred, labels=class_labels)))
         f.write("\n")
 
     print(model_path)

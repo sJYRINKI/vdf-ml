@@ -13,6 +13,7 @@ from src.config import load_config
 from src.colormap_helpers import (
     draw_point_boxes,
     expr_velocity,
+    scatter_all_vdf_cells,
     scatter_label_points,
 )
 from src.vdf_helpers import get_vdf_plot_parameters_from_file
@@ -210,6 +211,11 @@ def plot_labeled_colormap(
     )
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
+    scatter_all_vdf_cells(
+        ax=ax1,
+        reader=reader,
+        boxre=boxre,
+    )
     draw_point_boxes(
         ax=ax1,
         metadata_rows=metadata_rows,
