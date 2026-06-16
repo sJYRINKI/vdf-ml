@@ -19,7 +19,7 @@ from src.dataset_helpers import (
     write_timestep_samples,
 )
 from src.point_labels import (
-    create_labeled_coords_by_timestep,
+    create_label_data_by_timestep,
     create_labeled_coords_for_timestep,
 )
 from src.dataset_io import (
@@ -59,7 +59,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         worker_count = max(1, n_jobs)
 
     if n_jobs == 1:
-        labeled_coords_by_timestep = create_labeled_coords_by_timestep(
+        label_data_by_timestep = create_label_data_by_timestep(
             config=config,
             timesteps=timesteps,
         )
@@ -71,14 +71,15 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             )
             for timestep in timesteps
         )
-        labeled_coords_by_timestep = dict(label_results)
+        label_data_by_timestep = dict(label_results)
 
     if n_jobs == 1:
         n_samples = sum(
             count_timestep_samples(
                 config=config,
                 timestep=timestep,
-                labeled_coords=labeled_coords_by_timestep[timestep],
+                labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
+                rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
             )
             for timestep in timesteps
         )
@@ -87,7 +88,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             delayed(count_timestep_samples)(
                 config=config,
                 timestep=timestep,
-                labeled_coords=labeled_coords_by_timestep[timestep],
+                labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
+                rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
             )
             for timestep in timesteps
         )
@@ -108,7 +110,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         first_samples = process_timestep(
             config=config,
             timestep=timestep,
-            labeled_coords=labeled_coords_by_timestep[timestep],
+            labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
+            rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
         )
 
         if first_samples:
@@ -137,7 +140,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             timestep_samples = process_timestep(
                 config=config,
                 timestep=timestep,
-                labeled_coords=labeled_coords_by_timestep[timestep],
+                labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
+                rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
             )
             sample_index = write_timestep_samples(
                 X=X,
@@ -152,7 +156,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
                 delayed(process_timestep)(
                     config=config,
                     timestep=timestep,
-                    labeled_coords=labeled_coords_by_timestep[timestep],
+                    labeled_coords=label_data_by_timestep[timestep]["labeled_coords"],
+                    rejected_cellids=label_data_by_timestep[timestep]["rejected_cellids"],
                 )
                 for timestep in timestep_chunk
             )

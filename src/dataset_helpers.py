@@ -11,7 +11,7 @@ from src.vdf_helpers import (
     get_vdf_cellids_in_box,
 )
 
-def create_timestep_sample_specs(config, timestep, labeled_coords):
+def create_timestep_sample_specs(config, timestep, labeled_coords, rejected_cellids=None):
     """
     Create VDF sample specifications for one timestep.
 
@@ -28,6 +28,8 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
         Timestep to process.
     labeled_coords : iterable of tuple
         Tuples of ``(class_name, label, coord_re)``.
+    rejected_cellids : set of int, optional
+        VDF cell IDs rejected earlier in point-label detection.
 
     Returns
     -------
@@ -45,6 +47,7 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
     point_class_names = get_point_class_names(config)
     box_config = config["vdf_box"]
     labeled_coords = list(labeled_coords)
+    rejected_cellids = {int(cid) for cid in (rejected_cellids or set())}
 
     sample_specs = []
     seen_class_cellids = set()
@@ -82,9 +85,11 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
                 }
             )
 
-    sample_specs = remove_shared_point_cellids(
+    conflicting_cellids = find_conflicting_cellids(sample_specs)
+    rejected_cellids.update(conflicting_cellids)
+    sample_specs = remove_conflicting_cellids(
         sample_specs=sample_specs,
-        config=config,
+        conflicting_cellids=rejected_cellids,
     )
 
     sample_specs.extend(
@@ -94,10 +99,14 @@ def create_timestep_sample_specs(config, timestep, labeled_coords):
             file_location=file_location,
             simulation_time=simulation_time,
             existing_sample_specs=sample_specs,
+            rejected_cellids=rejected_cellids,
         )
     )
 
-    return sample_specs
+    return remove_conflicting_cellids(
+        sample_specs=sample_specs,
+        conflicting_cellids=find_conflicting_cellids(sample_specs),
+    )
 
 
 def create_other_region_sample_specs(
@@ -106,6 +115,7 @@ def create_other_region_sample_specs(
     file_location,
     simulation_time,
     existing_sample_specs,
+    rejected_cellids=None,
 ):
     """
     Create ``other`` samples from VDF cells in the point region.
@@ -127,6 +137,9 @@ def create_other_region_sample_specs(
     existing_sample_specs : list of dict
         Sample specifications already created for configured point and static
         coordinate classes.
+    rejected_cellids : set of int, optional
+        Cell IDs rejected because they had conflicting class labels before the
+        ``other`` region samples were created.
 
     Returns
     -------
@@ -138,16 +151,11 @@ def create_other_region_sample_specs(
     class_name = "other"
     label = int(labels[class_name])
 
-    points_config = config.get("points", {})
-    excluded_classes = {
-        points_config.get("x_class_name"),
-        points_config.get("o_class_name"),
-    }
     excluded_cellids = {
         int(sample_spec["cid"])
         for sample_spec in existing_sample_specs
-        if sample_spec["class_name"] in excluded_classes
     }
+    excluded_cellids.update(int(cid) for cid in (rejected_cellids or set()))
     seen_other_cellids = set()
     sample_specs = []
 
@@ -299,58 +307,65 @@ def get_point_class_names(config):
     return {class_name for class_name in class_names if class_name is not None}
 
 
-def remove_shared_point_cellids(sample_specs, config):
+def find_conflicting_cellids(sample_specs):
     """
-    Remove VDF cells shared by configured X-point and O-point classes.
+    Find VDF cell IDs assigned to more than one class.
 
     Parameters
     ----------
     sample_specs : list of dict
         Sample specification dictionaries.
-    config : dict
-        Dataset configuration.
+
+    Returns
+    -------
+    set of int
+        Cell IDs that have conflicting class labels.
+    """
+
+    class_names_by_cellid = {}
+
+    for sample_spec in sample_specs:
+        cid = int(sample_spec["cid"])
+        class_name = sample_spec["class_name"]
+        class_names_by_cellid.setdefault(cid, set()).add(class_name)
+
+    return {
+        cid
+        for cid, class_names in class_names_by_cellid.items()
+        if len(class_names) > 1
+    }
+
+
+def remove_conflicting_cellids(sample_specs, conflicting_cellids):
+    """
+    Remove samples whose VDF cell ID has conflicting class labels.
+
+    Parameters
+    ----------
+    sample_specs : list of dict
+        Sample specification dictionaries.
+    conflicting_cellids : set of int
+        Cell IDs that should be rejected from every class.
 
     Returns
     -------
     list of dict
-        Sample specifications with shared point cells removed.
+        Sample specifications without conflicting cell IDs.
     """
 
-    points_config = config.get("points", {})
-    x_class_name = points_config.get("x_class_name")
-    o_class_name = points_config.get("o_class_name")
-
-    if x_class_name is None or o_class_name is None:
+    if not conflicting_cellids:
         return sample_specs
 
-    x_cellids = {
-        sample_spec["cid"]
-        for sample_spec in sample_specs
-        if sample_spec["class_name"] == x_class_name
-    }
-    o_cellids = {
-        sample_spec["cid"]
-        for sample_spec in sample_specs
-        if sample_spec["class_name"] == o_class_name
-    }
-    shared_cellids = x_cellids & o_cellids
-
-    if not shared_cellids:
-        return sample_specs
-
-    point_classes = {x_class_name, o_class_name}
+    conflicting_cellids = {int(cid) for cid in conflicting_cellids}
 
     return [
         sample_spec
         for sample_spec in sample_specs
-        if not (
-            sample_spec["class_name"] in point_classes
-            and sample_spec["cid"] in shared_cellids
-        )
+        if int(sample_spec["cid"]) not in conflicting_cellids
     ]
 
 
-def count_timestep_samples(config, timestep, labeled_coords):
+def count_timestep_samples(config, timestep, labeled_coords, rejected_cellids=None):
     """
     Count VDF samples for one timestep after neighborhood expansion.
 
@@ -361,7 +376,9 @@ def count_timestep_samples(config, timestep, labeled_coords):
     timestep : int
         Timestep to process.
     labeled_coords : iterable of tuple
-        Tuples of ``(class_name, label, coord_re)``
+        Tuples of ``(class_name, label, coord_re)``.
+    rejected_cellids : set of int, optional
+        VDF cell IDs rejected earlier in point-label detection.
 
     Returns
     -------
@@ -374,11 +391,12 @@ def count_timestep_samples(config, timestep, labeled_coords):
             config=config,
             timestep=timestep,
             labeled_coords=labeled_coords,
+            rejected_cellids=rejected_cellids,
         )
     )
 
 
-def process_timestep(config, timestep, labeled_coords):
+def process_timestep(config, timestep, labeled_coords, rejected_cellids=None):
     """
     Extract labeled VDF samples for one timestep.
 
@@ -389,7 +407,9 @@ def process_timestep(config, timestep, labeled_coords):
     timestep : int
         Timestep to process.
     labeled_coords : iterable of tuple
-        Tuples of ``(class_name, label, coord_re)``
+        Tuples of ``(class_name, label, coord_re)``.
+    rejected_cellids : set of int, optional
+        VDF cell IDs rejected earlier in point-label detection.
 
     Returns
     -------
@@ -401,6 +421,7 @@ def process_timestep(config, timestep, labeled_coords):
         config=config,
         timestep=timestep,
         labeled_coords=labeled_coords,
+        rejected_cellids=rejected_cellids,
     )
 
     print(f"Timestep: {timestep}")

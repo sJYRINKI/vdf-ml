@@ -15,7 +15,7 @@ creation:
   n_jobs: 16
 
 vdf_box:
-  x_half_width_re: 0.3
+  x_half_width_re: 0.4
   y_half_width_re: 0.0
   z_half_width_re: 0.2
 

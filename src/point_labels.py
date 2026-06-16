@@ -14,7 +14,7 @@ from src.timesteps import create_timestep_path
 
 def create_labeled_coords_for_timestep(config, timestep):
     """
-    Create labeled coordinates for one timestep.
+    Create labeled coordinate data for one timestep.
 
     Parameters
     ----------
@@ -26,22 +26,25 @@ def create_labeled_coords_for_timestep(config, timestep):
     Returns
     -------
     tuple
-        Pair of ``(timestep, labeled_coords)``.
+        Pair of ``(timestep, label_data)``. ``label_data`` contains
+        ``labeled_coords`` and point-conflict ``rejected_cellids``.
     """
 
     timestep_labeled_coords = list(iter_labeled_coords(config))
-    timestep_labeled_coords.extend(
-        iter_point_labeled_coords(
-            config=config,
-            timestep=timestep,
-        )
+    point_labeled_coords, rejected_cellids = create_point_labeled_coords(
+        config=config,
+        timestep=timestep,
     )
+    timestep_labeled_coords.extend(point_labeled_coords)
 
-    return int(timestep), timestep_labeled_coords
+    return int(timestep), {
+        "labeled_coords": timestep_labeled_coords,
+        "rejected_cellids": rejected_cellids,
+    }
 
-def create_labeled_coords_by_timestep(config, timesteps):
+def create_label_data_by_timestep(config, timesteps):
     """
-    Create labeled coordinates for each timestep.
+    Create labeled coordinate data for each timestep.
 
     Parameters
     ----------
@@ -53,7 +56,7 @@ def create_labeled_coords_by_timestep(config, timesteps):
     Returns
     -------
     dict
-        Mapping from timestep to labeled coordinates.
+        Mapping from timestep to labeled coordinate data.
     """
 
     return dict(
@@ -113,8 +116,34 @@ def iter_point_labeled_coords(config, timestep):
         Coordinate in Earth radii, given as ``[x, y, z]``.
     """
 
-    points_config = config.get("points")
+    point_labeled_coords, _ = create_point_labeled_coords(
+        config=config,
+        timestep=timestep,
+    )
 
+    yield from point_labeled_coords
+
+
+def create_point_labeled_coords(config, timestep):
+    """
+    Create point labeled coordinates and rejected point cell IDs.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset config dictionary.
+    timestep : int
+        Timestep to process.
+
+    Returns
+    -------
+    point_labeled_coords : list of tuple
+        Tuples of ``(class_name, label, coord_re)`` for accepted X/O points.
+    rejected_cellids : set of int
+        VDF cell IDs rejected because X and O points mapped to the same cell.
+    """
+
+    points_config = config.get("points")
     labels = config["labels"]
 
     x_class_name = points_config["x_class_name"]
@@ -138,17 +167,21 @@ def iter_point_labeled_coords(config, timestep):
         points_config=points_config,
     )
 
-    x_point_coords_re, o_point_coords_re = remove_shared_cellid_points(
+    x_point_coords_re, o_point_coords_re, rejected_cellids = remove_shared_cellid_points(
         reader=reader,
         x_point_coords_re=x_point_coords_re,
         o_point_coords_re=o_point_coords_re,
     )
 
+    point_labeled_coords = []
+
     for coord_re in x_point_coords_re:
-        yield x_class_name, int(labels[x_class_name]), coord_re
+        point_labeled_coords.append((x_class_name, int(labels[x_class_name]), coord_re))
 
     for coord_re in o_point_coords_re:
-        yield o_class_name, int(labels[o_class_name]), coord_re
+        point_labeled_coords.append((o_class_name, int(labels[o_class_name]), coord_re))
+
+    return point_labeled_coords, rejected_cellids
 
 def remove_shared_cellid_points(reader, x_point_coords_re, o_point_coords_re):
     """
@@ -175,6 +208,8 @@ def remove_shared_cellid_points(reader, x_point_coords_re, o_point_coords_re):
         One X-point coordinate per non-conflicting VDF cell ID.
     filtered_o_point_coords_re : list of list of float
         One O-point coordinate per non-conflicting VDF cell ID.
+    shared_cellids : set of int
+        VDF cell IDs rejected because both point classes mapped to them.
     """
 
     x_points_by_cellid = group_coords_by_cellid(reader, x_point_coords_re)
@@ -194,7 +229,7 @@ def remove_shared_cellid_points(reader, x_point_coords_re, o_point_coords_re):
         if cellid not in shared_cellids
     ]
 
-    return filtered_x_point_coords_re, filtered_o_point_coords_re
+    return filtered_x_point_coords_re, filtered_o_point_coords_re, shared_cellids
 
 def group_coords_by_cellid(reader, coords_re):
     """
