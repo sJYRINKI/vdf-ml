@@ -330,6 +330,8 @@ def find_point_coords_re(reader, flux_file_location, points_config=None):
     # DEFINE the type of the gradient(flux)=0 ##
     x_point_coords_re=[]
     o_point_coords_re=[]
+    x_point_fluxes=[]
+    o_point_fluxes=[]
     flux_function=flux_function.T
 
     for k in range(len(x_coords)):
@@ -375,14 +377,23 @@ def find_point_coords_re(reader, flux_file_location, points_config=None):
             if not is_in_point_region(coord_re, points_config):
                 continue
 
+            i_i = int(coords[0]/dx)
+            i_f = coords[0]/dx - i_i
+            j_i = int(coords[1]/dx)
+            j_f = coords[1]
+            interpolated_flux = (1.-j_f) * ((1. - i_f) * flux_function[i,j] + i_f * flux_function[i+1,j]) + j_f* ((1. - i_f) * flux_function[i,j+1] + i_f * flux_function[i+1,j+1])
+
             if DetHess < 0:
-                x_point_coords_re.append(coord_re)           
+                x_point_coords_re.append(coord_re)
+                x_point_fluxes.append(interpolated_flux)          
 
             ## NOTE if you want the o-points to be local maxima use deltaPsi_xx < 0, if you want them to be local minima use  deltaPsi_xx > 0                  
             #if DetHess > 0 and deltaPsi_xx > 0:
             #   minima_location.append(coords)
             if DetHess > 0 and deltaPsi_xx < 0:
                 o_point_coords_re.append(coord_re)
+                o_point_fluxes.append(interpolated_flux) 
+                
 
     return x_point_coords_re, o_point_coords_re
 

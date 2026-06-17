@@ -16,14 +16,42 @@ from src.timesteps import create_timestep_list
 from src.dataset_helpers import (
     create_timestep_sample_specs_for_timestep,
     iter_chunks,
+    print_memory_usage,
     process_timestep_sample_specs,
     write_timestep_samples,
 )
 from src.dataset_io import (
     create_dataset_output_dir,
     create_memmap_dataset,
+    flush_and_release_memmaps,
     save_metadata,
 )
+
+def get_worker_count(n_jobs, config_name):
+    """
+    Return number of workers used for chunk sizing.
+
+    Parameters
+    ----------
+    n_jobs : int
+        Joblib worker count from config. Negative values use all CPUs.
+    config_name : str
+        Name of the config value, used in error messages.
+
+    Returns
+    -------
+    int
+        Positive worker count.
+    """
+
+    if n_jobs == 0:
+        raise ValueError(f"{config_name} must be non-zero")
+
+    if n_jobs < 0:
+        return os.cpu_count() or 1
+
+    return max(1, n_jobs)
+
 
 def main(config_path, start_timestep, n_timesteps, dataset_kind):
     """
@@ -62,18 +90,36 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     print(f"Output directory: {outdir}")
 
     creation_config = config.get("creation", {})
-    n_jobs = int(creation_config.get("n_jobs", 1))
-    if n_jobs == 0:
-        raise ValueError("creation.n_jobs must be non-zero")
+    default_n_jobs = int(creation_config.get("n_jobs", 1))
+    planning_n_jobs = int(
+        creation_config.get("planning_n_jobs", default_n_jobs)
+    )
+    extraction_n_jobs = int(
+        creation_config.get("extraction_n_jobs", 1)
+    )
 
-    if n_jobs < 0:
-        worker_count = os.cpu_count() or 1
-    else:
-        worker_count = max(1, n_jobs)
+    planning_worker_count = get_worker_count(
+        planning_n_jobs,
+        "creation.planning_n_jobs",
+    )
+    extraction_worker_count = get_worker_count(
+        extraction_n_jobs,
+        "creation.extraction_n_jobs",
+    )
+
+    print(
+        f"Planning jobs: {planning_n_jobs} "
+        f"({planning_worker_count} workers)"
+    )
+    print(
+        f"Extraction jobs: {extraction_n_jobs} "
+        f"({extraction_worker_count} workers)"
+    )
+    print_memory_usage("before planning")
 
     planning_start = time.perf_counter()
 
-    if n_jobs == 1:
+    if planning_n_jobs == 1:
         sample_specs_by_timestep = dict(
             create_timestep_sample_specs_for_timestep(
                 config=config,
@@ -82,7 +128,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             for timestep in timesteps
         )
     else:
-        sample_spec_results = Parallel(n_jobs=n_jobs)(
+        sample_spec_results = Parallel(n_jobs=planning_n_jobs)(
             delayed(create_timestep_sample_specs_for_timestep)(
                 config=config,
                 timestep=timestep,
@@ -99,6 +145,7 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
 
     print(f"Samples: {n_samples}")
     print(f"Timing planning: {planning_elapsed:.2f} s")
+    print_memory_usage("after planning")
 
     if n_samples == 0:
         raise ValueError("No samples were found for the requested timesteps")
@@ -111,6 +158,8 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
     first_samples = []
     first_sample_timestep_index = None
 
+    print_memory_usage("before first extraction")
+
     for timestep_index, timestep in enumerate(timesteps):
         first_samples = process_timestep_sample_specs(
             sample_specs_by_timestep[timestep]
@@ -120,12 +169,16 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
             first_sample_timestep_index = timestep_index
             break
 
+    print_memory_usage("after first extraction")
+
     X, y = create_memmap_dataset(
         outdir=outdir,
         n_samples=n_samples,
         sample_shape=first_samples[0]["vdf"].shape,
         dtype=np.float32,
     )
+
+    print_memory_usage("after memmap creation")
 
     sample_index = write_timestep_samples(
         X=X,
@@ -135,9 +188,14 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         sample_index=sample_index,
     )
 
+    print_memory_usage("after first write")
+    flush_and_release_memmaps(X, y)
+    del first_samples
+    print_memory_usage("after first memmap release")
+
     remaining_timesteps = timesteps[first_sample_timestep_index + 1:]
 
-    if n_jobs == 1:
+    if extraction_n_jobs == 1:
         for timestep in remaining_timesteps:
             timestep_samples = process_timestep_sample_specs(
                 sample_specs_by_timestep[timestep]
@@ -149,13 +207,27 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
                 timestep_samples=timestep_samples,
                 sample_index=sample_index,
             )
+            flush_and_release_memmaps(X, y)
+            del timestep_samples
+            print_memory_usage(f"after timestep {int(timestep)} memmap release")
     else:
-        for timestep_chunk in iter_chunks(remaining_timesteps, worker_count):
-            chunk_results = Parallel(n_jobs=n_jobs)(
+        for timestep_chunk in iter_chunks(
+            remaining_timesteps,
+            extraction_worker_count,
+        ):
+            chunk_start = int(timestep_chunk[0])
+            chunk_end = int(timestep_chunk[-1])
+            print_memory_usage(
+                f"before extraction chunk {chunk_start}-{chunk_end}"
+            )
+            chunk_results = Parallel(n_jobs=extraction_n_jobs)(
                 delayed(process_timestep_sample_specs)(
                     sample_specs_by_timestep[timestep]
                 )
                 for timestep in timestep_chunk
+            )
+            print_memory_usage(
+                f"after extraction chunk {chunk_start}-{chunk_end}"
             )
 
             for timestep_samples in chunk_results:
@@ -167,11 +239,24 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
                     sample_index=sample_index,
                 )
 
+            print_memory_usage(
+                f"after writing chunk {chunk_start}-{chunk_end}"
+            )
+            flush_and_release_memmaps(X, y)
+            del chunk_results
+            del timestep_samples
+            print_memory_usage(
+                f"after memmap release chunk {chunk_start}-{chunk_end}"
+            )
+
     extraction_elapsed = time.perf_counter() - extraction_start
     save_start = time.perf_counter()
 
-    X.flush()
-    y.flush()
+    print_memory_usage("before flush")
+
+    flush_and_release_memmaps(X, y)
+
+    print_memory_usage("after flush and memmap release")
 
     save_metadata(
         outdir=outdir,

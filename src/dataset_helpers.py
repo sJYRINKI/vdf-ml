@@ -13,6 +13,38 @@ from src.vdf_helpers import (
     get_vdf_cellids_in_box,
 )
 
+def get_memory_usage_mb():
+    """
+    Return current process resident memory usage.
+
+    Returns
+    -------
+    float
+        Resident set size in megabytes.
+    """
+
+    with open("/proc/self/status", "r") as status_file:
+        for line in status_file:
+            if line.startswith("VmRSS:"):
+                value_kb = float(line.split()[1])
+                return value_kb / 1024.0
+
+    return 0.0
+
+
+def print_memory_usage(label):
+    """
+    Print current process resident memory usage.
+
+    Parameters
+    ----------
+    label : str
+        Text describing where memory is measured.
+    """
+
+    print(f"Memory {label}: {get_memory_usage_mb():.1f} MB")
+
+
 def create_timestep_sample_specs(
     config,
     timestep,
@@ -524,7 +556,10 @@ def process_timestep_sample_specs(sample_specs):
     file_location = sample_specs[0]["file_location"]
     timestep = int(sample_specs[0].get("timestep", 0))
     extraction_start = time.perf_counter()
+
+    print_memory_usage(f"timestep {timestep} before reader")
     reader = pt.vlsvfile.VlsvReader(str(file_location))
+    print_memory_usage(f"timestep {timestep} after reader")
 
     print(f"Timestep {timestep}: extracting {len(sample_specs)} samples")
 
@@ -534,10 +569,12 @@ def process_timestep_sample_specs(sample_specs):
         coord_re = sample_spec["coord_re"]
         cid = int(sample_spec["cid"])
 
+        print_memory_usage(f"timestep {timestep} before VDF cid {cid}")
         vdf = extract_vdf_from_reader(
             reader=reader,
             cid=cid,
         ).astype(np.float32, copy=False)
+        print_memory_usage(f"timestep {timestep} after VDF cid {cid}")
 
         samples.append(
             {
@@ -559,6 +596,7 @@ def process_timestep_sample_specs(sample_specs):
         )
 
     extraction_elapsed = time.perf_counter() - extraction_start
+    print_memory_usage(f"timestep {timestep} extraction complete")
     print(f"Timestep {timestep} extraction: {extraction_elapsed:.2f} s")
 
     return samples

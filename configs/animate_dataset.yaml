@@ -6,3 +6,9 @@ animation:
   output_file_template: "{class_name}_xz.mp4"
   ignore_dirs:
     - sample_plots
+    - colormaps
+
+colormap_animation:
+  frames_dir: colormaps
+  frame_pattern: colormap_%04d.png
+  output_file: colormaps.mp4

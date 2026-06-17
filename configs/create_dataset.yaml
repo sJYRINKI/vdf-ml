@@ -12,7 +12,8 @@ labels:
   reconnection: 3
 
 creation:
-  n_jobs: 16
+  planning_n_jobs: 16
+  extraction_n_jobs: 8
 
 vdf_box:
   x_half_width_re: 0.4

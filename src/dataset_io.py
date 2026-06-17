@@ -1,4 +1,5 @@
 from pathlib import Path
+import mmap
 import numpy as np
 import pandas as pd
 
@@ -67,6 +68,53 @@ def create_memmap_dataset(outdir,n_samples, sample_shape, dtype=np.float32):
     )
 
     return X, y
+
+def release_memmap_pages(array):
+    """
+    Ask the operating system to drop cached pages for a memmap.
+
+    Parameters
+    ----------
+    array : numpy.memmap
+        Memory-mapped array whose resident pages should be released.
+
+    Returns
+    -------
+    bool
+        Whether page release was requested successfully.
+    """
+
+    mmap_object = getattr(array, "_mmap", None)
+    madvise = getattr(mmap_object, "madvise", None)
+    dontneed = getattr(mmap, "MADV_DONTNEED", None)
+
+    if madvise is None or dontneed is None:
+        return False
+
+    try:
+        madvise(dontneed)
+    except (OSError, ValueError):
+        return False
+
+    return True
+
+
+def flush_and_release_memmaps(*arrays):
+    """
+    Flush memmap arrays and request release of their resident pages.
+
+    Parameters
+    ----------
+    *arrays : numpy.memmap
+        Memory-mapped arrays to flush and release.
+    """
+
+    for array in arrays:
+        array.flush()
+
+    for array in arrays:
+        release_memmap_pages(array)
+
 
 def save_metadata(outdir, metadata):
     """

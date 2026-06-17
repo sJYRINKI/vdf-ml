@@ -58,6 +58,27 @@ def main(config_path, timestep):
 
         print(f"Saved animation to: {output_path}")
 
+    colormap_config = config.get("colormap_animation", {})
+    colormap_frames_dir = frames_dir / colormap_config.get(
+        "frames_dir",
+        "colormaps",
+    )
+    colormap_output_path = output_dir / colormap_config.get(
+        "output_file",
+        "colormaps.mp4",
+    )
+
+    create_animation(
+        frames_dir=colormap_frames_dir,
+        frame_pattern=colormap_config.get(
+            "frame_pattern",
+            "colormap_%04d.png",
+        ),
+        output_path=colormap_output_path,
+    )
+
+    print(f"Saved colormap animation to: {colormap_output_path}")
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
         description="Create an animation from saved VDF frames."
