@@ -12,13 +12,8 @@ labels:
   reconnection: 3
 
 creation:
-  planning_n_jobs: 16
+  planning_n_jobs: 8
   extraction_n_jobs: 8
-
-vdf_box:
-  x_half_width_re: 0.4
-  y_half_width_re: 0.0
-  z_half_width_re: 0.2
 
 points:
   x_class_name: reconnection
@@ -26,6 +21,15 @@ points:
   region_re:
     x_between: [-20.0, -10.0]
     z_abs_max: 1.0
+  x_selection:
+    density_variable: rho
+    half_width_di:
+      eigenvector_0: 3.0
+      eigenvector_1: 3.0
+    y_half_width_re: 0.0
+  o_selection:
+    core_fraction: 0.8
+    y_half_width_re: 0.0
 
 class_coords_re:
   lobe:

@@ -3,6 +3,7 @@ import mmap
 import numpy as np
 import pandas as pd
 
+
 def create_dataset_output_dir(output_dir, start_timestep, n_timestep):
     """
     Create the output directory for dataset.
@@ -26,6 +27,7 @@ def create_dataset_output_dir(output_dir, start_timestep, n_timestep):
     outdir.mkdir(parents=True, exist_ok=True)
 
     return outdir
+
 
 def create_memmap_dataset(outdir,n_samples, sample_shape, dtype=np.float32):
     """
@@ -68,6 +70,7 @@ def create_memmap_dataset(outdir,n_samples, sample_shape, dtype=np.float32):
     )
 
     return X, y
+
 
 def release_memmap_pages(array):
     """
@@ -135,6 +138,7 @@ def save_metadata(outdir, metadata):
         index=False
     )
 
+
 def save_dataset(outdir, X, y, metadata):
     """
     Save VDF data, labels, and metadata.
@@ -158,6 +162,7 @@ def save_dataset(outdir, X, y, metadata):
     np.save(outdir / "y.npy", np.asanyarray(y, dtype=np.int64))
 
     save_metadata(outdir, metadata)
+
 
 def load_dataset(dataset_dir, mmap=True):
     """

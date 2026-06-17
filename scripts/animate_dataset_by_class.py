@@ -3,8 +3,8 @@ import argparse
 import sys
 from pathlib import Path
 
-PRPJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(PRPJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.timesteps import create_timestep_path

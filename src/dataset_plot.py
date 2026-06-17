@@ -11,35 +11,39 @@ import numpy as np
 
 from src.config import load_config
 from src.colormap_helpers import (
+    draw_o_point_search_areas,
     draw_point_boxes,
+    draw_x_point_search_areas,
     expr_velocity,
     scatter_all_vdf_cells,
     scatter_label_points,
 )
 from src.vdf_helpers import get_vdf_plot_parameters_from_file
 
+
 def add_dataset_sampling_plot_config(colormap_config, dataset_config_path):
     """
     Add dataset sampling settings needed for colormap overlays.
 
     The plotting config keeps visual options such as color scale and plot bounds,
-    while the dataset-creation config owns the VDF box size and the class names
-    used for X-point and O-point samples. This helper copies those sampling
-    settings into a colormap config dictionary so plotted boxes match the boxes
-    used when the dataset was created.
+    while the dataset-creation config owns the point class names and, for old
+    datasets, may also contain the VDF box size used for X-point and O-point
+    samples. This helper copies those sampling settings into a colormap config
+    dictionary when they are available.
 
     Parameters
     ----------
     colormap_config : dict
         Colormap plotting options from the plotting config.
     dataset_config_path : str or pathlib.Path
-        Path to the dataset-creation YAML config containing ``vdf_box`` and
-        ``points`` sections.
+        Path to the dataset-creation YAML config containing ``points`` and
+        optionally ``vdf_box`` sections.
 
     Returns
     -------
     dict
-        Copy of ``colormap_config`` with ``vdf_box`` and ``box_classes`` added.
+        Copy of ``colormap_config`` with ``box_classes`` and optional
+        ``vdf_box`` added.
     """
 
     dataset_config = load_config(dataset_config_path)
@@ -51,10 +55,253 @@ def add_dataset_sampling_plot_config(colormap_config, dataset_config_path):
     ]
 
     colormap_config = dict(colormap_config)
-    colormap_config["vdf_box"] = dataset_config["vdf_box"]
+    if "vdf_box" in dataset_config:
+        colormap_config["vdf_box"] = dataset_config["vdf_box"]
     colormap_config["box_classes"] = box_classes
+    colormap_config["file_template_flux"] = dataset_config.get("file_template_flux")
+    colormap_config["x_selection"] = points_config.get("x_selection")
+    colormap_config["o_core_fraction"] = (
+        points_config.get("o_selection", {}).get("core_fraction")
+    )
 
     return colormap_config
+
+
+def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
+    """
+    Create plot jobs for one labeled colormap per timestep.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        Dataset metadata containing timestep, class, coordinate, and file columns.
+    output_dir : pathlib.Path
+        Base plot output directory for the dataset.
+    colormap_config : dict
+        Colormap plotting options. This may include ``boxre``, ``vmin``,
+        ``vmax``, ``vdf_box``, and ``box_classes``.
+
+    Returns
+    -------
+    list of dict
+        Keyword argument dictionaries for ``plot_labeled_colormap``.
+    """
+
+    colormap_jobs = []
+
+    for frame_index, (_, timestep_metadata) in enumerate(metadata.groupby("timestep")):
+        colormap_output_path = output_dir / "colormaps" / f"colormap_{frame_index:04d}.png"
+
+        colormap_jobs.append(
+            {
+                "metadata_rows": timestep_metadata,
+                "output_path": colormap_output_path,
+                "boxre": colormap_config.get("boxre", [-40, -1, -6, 6]),
+                "vmin": float(colormap_config.get("vmin", -1.5e6)),
+                "vmax": float(colormap_config.get("vmax", 1.5e6)),
+                "vdf_box_config": colormap_config.get("vdf_box"),
+                "box_classes": colormap_config.get("box_classes", []),
+                "x_selection_config": colormap_config.get("x_selection"),
+                "flux_file_template": colormap_config.get("file_template_flux"),
+                "o_core_fraction": colormap_config.get("o_core_fraction"),
+            }
+        )
+
+    return colormap_jobs
+
+
+def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
+    """
+    Create plot jobs for all saved VDF samples.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF sample array.
+    y : numpy.ndarray
+        Integer labels for VDF samples.
+    metadata : pandas.DataFrame
+        Dataset metadata with one row per sample.
+    output_dir : pathlib.Path
+        Base plot output directory for the dataset.
+    vdflim : float
+        Velocity axis limit in m/s for VDF plots.
+
+    Returns
+    -------
+    list of dict
+        Keyword argument dictionaries for ``plot_vdf_xz_slice``.
+    """
+
+    class_frame_counts = {}
+    plot_parameter_cache = {}
+    vdf_jobs = []
+
+    for sample_index in range(X.shape[0]):
+        metadata_row = metadata.iloc[sample_index]
+        class_name = metadata_row["class_name"]
+        file_location = metadata_row["file_location"]
+        cid = int(metadata_row["cid"])
+
+        if class_name not in class_frame_counts:
+            class_frame_counts[class_name] = 0
+
+        class_frame_index = class_frame_counts[class_name]
+        vdf_shape = tuple(X[sample_index].shape)
+        cache_key = (file_location, cid, vdf_shape)
+
+        if cache_key not in plot_parameter_cache:
+            plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
+                file_location=file_location,
+                cid=cid,
+                vdf_shape=vdf_shape,
+            )
+
+        extent, dv, threshold = plot_parameter_cache[cache_key]
+
+        class_output_dir = output_dir / class_name
+        output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
+
+        vdf_jobs.append(
+            {
+                "vdf": X[sample_index],
+                "y_label": y[sample_index],
+                "metadata_row": metadata_row,
+                "extent": extent,
+                "output_path": output_path,
+                "dv": dv,
+                "threshold": threshold,
+                "vdflim": vdflim,
+            }
+        )
+
+        class_frame_counts[class_name] += 1
+
+    return vdf_jobs
+
+
+def run_plot_jobs(plot_function, plot_jobs, n_jobs):
+    """
+    Run plotting jobs serially or in parallel.
+
+    Parameters
+    ----------
+    plot_function : callable
+        Plotting function called with each job dictionary as keyword arguments.
+    plot_jobs : list of dict
+        Plot job dictionaries. Each dictionary is expanded into keyword
+        arguments for ``plot_function``.
+    n_jobs : int
+        Number of parallel workers. Use 1 for serial plotting.
+    """
+
+    if n_jobs == 1:
+        for plot_job in plot_jobs:
+            plot_function(**plot_job)
+        return
+
+    Parallel(n_jobs=n_jobs)(
+        delayed(plot_function)(**plot_job)
+        for plot_job in plot_jobs
+    )
+
+
+def plot_labeled_colormap(
+        metadata_rows,
+        output_path,
+        boxre,
+        vmin,
+        vmax,
+        vdf_box_config=None,
+        box_classes=None,
+        x_selection_config=None,
+        flux_file_template=None,
+        o_core_fraction=None,
+):
+    """
+    Plot and save a spatial colormap with saved label points overlaid.
+
+    Parameters
+    ----------
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    output_path : str
+        Output PNG path.
+    boxre : list of float
+        Plot box in Earth radii: ``[xmin, xmax, zmin, zmax]``.
+    vmin : float
+        Minimum color scale value for the selected velocity component.
+    vmax : float
+        Maximum color scale value for the selected velocity component.
+    vdf_box_config : dict, optional
+        VDF sampling box config from dataset creation. Expected keys are
+        ``x_half_width_re`` and ``z_half_width_re``. The boxes are drawn around
+        the source X/O point coordinates stored in metadata.
+    box_classes : iterable of str, optional
+        Class names whose source coordinates should get boxes, normally the
+        configured X-point and O-point classes.
+    x_selection_config : dict, optional
+        X-point selection config used to redraw Hessian-aligned search boxes.
+    flux_file_template : str, optional
+        Flux file template used to redraw O-point island search contours.
+    o_core_fraction : float, optional
+        Fraction from O-point flux to boundary flux used for old metadata that
+        does not contain ``search_flux``.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_location = metadata_rows.iloc[0]["file_location"]
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    pt.plot.plot_colormap(
+        filename=file_location,
+        axes=ax1,
+        boxre=boxre,
+        expression=expr_velocity,
+        operator="x",
+        vmin=vmin,
+        vmax=vmax,
+        streamlines="B",
+        streamlinecolor="black",
+    )
+
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    scatter_all_vdf_cells(
+        ax=ax1,
+        reader=reader,
+        boxre=boxre,
+    )
+    draw_point_boxes(
+        ax=ax1,
+        metadata_rows=metadata_rows,
+        box_config=vdf_box_config,
+        box_classes=box_classes,
+    )
+    draw_x_point_search_areas(
+        ax=ax1,
+        metadata_rows=metadata_rows,
+        x_selection_config=x_selection_config,
+    )
+    draw_o_point_search_areas(
+        ax=ax1,
+        reader=reader,
+        metadata_rows=metadata_rows,
+        flux_file_template=flux_file_template,
+        o_core_fraction=o_core_fraction,
+    )
+    scatter_label_points(
+        ax=ax1,
+        reader=reader,
+        metadata_rows=metadata_rows,
+    )
+    ax1.legend()
+
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
 
 def plot_vdf_xz_slice(
         vdf,
@@ -156,211 +403,3 @@ def plot_vdf_xz_slice(
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
-
-
-def plot_labeled_colormap(
-        metadata_rows,
-        output_path,
-        boxre,
-        vmin,
-        vmax,
-        vdf_box_config=None,
-        box_classes=None,
-):
-    """
-    Plot and save a spatial colormap with saved label points overlaid.
-
-    Parameters
-    ----------
-    metadata_rows : pandas.DataFrame
-        Metadata rows for one timestep.
-    output_path : str
-        Output PNG path.
-    boxre : list of float
-        Plot box in Earth radii: ``[xmin, xmax, zmin, zmax]``.
-    vmin : float
-        Minimum color scale value for the selected velocity component.
-    vmax : float
-        Maximum color scale value for the selected velocity component.
-    vdf_box_config : dict, optional
-        VDF sampling box config from dataset creation. Expected keys are
-        ``x_half_width_re`` and ``z_half_width_re``. The boxes are drawn around
-        the source X/O point coordinates stored in metadata.
-    box_classes : iterable of str, optional
-        Class names whose source coordinates should get boxes, normally the
-        configured X-point and O-point classes.
-    """
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    file_location = metadata_rows.iloc[0]["file_location"]
-
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-
-    pt.plot.plot_colormap(
-        filename=file_location,
-        axes=ax1,
-        boxre=boxre,
-        expression=expr_velocity,
-        operator="x",
-        vmin=vmin,
-        vmax=vmax,
-        streamlines="B",
-        streamlinecolor="black",
-    )
-
-    reader = pt.vlsvfile.VlsvReader(str(file_location))
-    scatter_all_vdf_cells(
-        ax=ax1,
-        reader=reader,
-        boxre=boxre,
-    )
-    draw_point_boxes(
-        ax=ax1,
-        metadata_rows=metadata_rows,
-        box_config=vdf_box_config,
-        box_classes=box_classes,
-    )
-    scatter_label_points(
-        ax=ax1,
-        reader=reader,
-        metadata_rows=metadata_rows,
-    )
-    ax1.legend()
-
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-def run_plot_jobs(plot_function, plot_jobs, n_jobs):
-    """
-    Run plotting jobs serially or in parallel.
-
-    Parameters
-    ----------
-    plot_function : callable
-        Plotting function called with each job dictionary as keyword arguments.
-    plot_jobs : list of dict
-        Plot job dictionaries. Each dictionary is expanded into keyword
-        arguments for ``plot_function``.
-    n_jobs : int
-        Number of parallel workers. Use 1 for serial plotting.
-    """
-
-    if n_jobs == 1:
-        for plot_job in plot_jobs:
-            plot_function(**plot_job)
-        return
-
-    Parallel(n_jobs=n_jobs)(
-        delayed(plot_function)(**plot_job)
-        for plot_job in plot_jobs
-    )
-
-def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
-    """
-    Create plot jobs for one labeled colormap per timestep.
-
-    Parameters
-    ----------
-    metadata : pandas.DataFrame
-        Dataset metadata containing timestep, class, coordinate, and file columns.
-    output_dir : pathlib.Path
-        Base plot output directory for the dataset.
-    colormap_config : dict
-        Colormap plotting options. This may include ``boxre``, ``vmin``,
-        ``vmax``, ``vdf_box``, and ``box_classes``.
-
-    Returns
-    -------
-    list of dict
-        Keyword argument dictionaries for ``plot_labeled_colormap``.
-    """
-
-    colormap_jobs = []
-
-    for frame_index, (_, timestep_metadata) in enumerate(metadata.groupby("timestep")):
-        colormap_output_path = output_dir / "colormaps" / f"colormap_{frame_index:04d}.png"
-
-        colormap_jobs.append(
-            {
-                "metadata_rows": timestep_metadata,
-                "output_path": colormap_output_path,
-                "boxre": colormap_config.get("boxre", [-40, -1, -6, 6]),
-                "vmin": float(colormap_config.get("vmin", -1.5e6)),
-                "vmax": float(colormap_config.get("vmax", 1.5e6)),
-                "vdf_box_config": colormap_config.get("vdf_box"),
-                "box_classes": colormap_config.get("box_classes", []),
-            }
-        )
-
-    return colormap_jobs
-
-def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
-    """
-    Create plot jobs for all saved VDF samples.
-
-    Parameters
-    ----------
-    X : numpy.ndarray
-        VDF sample array.
-    y : numpy.ndarray
-        Integer labels for VDF samples.
-    metadata : pandas.DataFrame
-        Dataset metadata with one row per sample.
-    output_dir : pathlib.Path
-        Base plot output directory for the dataset.
-    vdflim : float
-        Velocity axis limit in m/s for VDF plots.
-
-    Returns
-    -------
-    list of dict
-        Keyword argument dictionaries for ``plot_vdf_xz_slice``.
-    """
-
-    class_frame_counts = {}
-    plot_parameter_cache = {}
-    vdf_jobs = []
-
-    for sample_index in range(X.shape[0]):
-        metadata_row = metadata.iloc[sample_index]
-        class_name = metadata_row["class_name"]
-        file_location = metadata_row["file_location"]
-        cid = int(metadata_row["cid"])
-
-        if class_name not in class_frame_counts:
-            class_frame_counts[class_name] = 0
-
-        class_frame_index = class_frame_counts[class_name]
-        vdf_shape = tuple(X[sample_index].shape)
-        cache_key = (file_location, cid, vdf_shape)
-
-        if cache_key not in plot_parameter_cache:
-            plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
-                file_location=file_location,
-                cid=cid,
-                vdf_shape=vdf_shape,
-            )
-
-        extent, dv, threshold = plot_parameter_cache[cache_key]
-
-        class_output_dir = output_dir / class_name
-        output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
-
-        vdf_jobs.append(
-            {
-                "vdf": X[sample_index],
-                "y_label": y[sample_index],
-                "metadata_row": metadata_row,
-                "extent": extent,
-                "output_path": output_path,
-                "dv": dv,
-                "threshold": threshold,
-                "vdflim": vdflim,
-            }
-        )
-
-        class_frame_counts[class_name] += 1
-
-    return vdf_jobs

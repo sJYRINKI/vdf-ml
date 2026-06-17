@@ -3,120 +3,44 @@
 import argparse
 import sys
 from pathlib import Path
-import analysator as pt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
-from src.dataset_plot import plot_vdf_xz_slice
+from src.coordinate_prediction import predict_coordinate
 from src.model_io import load_multilayer_perceptron_classifier_model
-from src.features import create_features
-from src.timesteps import create_path
-from src.vdf_extract import extract_vdf
-from src.vdf_helpers import get_vdf_plot_parameters_from_file, get_cellid_with_vdf
-from src.vdf_helpers import create_coordinate_name
 
 
 def main(config_path, timestep, model_id, coord_re):
+    """
+    Predict one VDF from coordinates.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to coordinate prediction config.
+    timestep : int
+        VLSV timestep to read.
+    model_id : str
+        Trained model identifier.
+    coord_re : array-like of float
+        Coordinate in Earth radii, given as ``[x, y, z]``.
+    """
+
     config = load_config(config_path)
-
-    file_location = create_path(
-        path_template=config["file_template"],
-        timestep=int(timestep)
-    )
-
-    model_dir = create_path(
-        path_template=config["model_dir"],
+    result = predict_coordinate(
+        config=config,
+        timestep=timestep,
         model_id=model_id,
-        timestep=int(timestep)
-    )
-
-    output_dir = create_path(
-        path_template=config["output_dir"],
-        model_id=model_id,
-        timestep=int(timestep)
-    )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    labels = config.get("labels")
-
-    label_to_class = {
-        int(label): class_name
-        for class_name, label in labels.items()
-    }
-
-    plot_config = config["plot"]
-
-    vdflim = float(plot_config.get("vdflim", 2000000.0))
-
-    reader = pt.vlsvfile.VlsvReader(file_location)
-
-    cid = get_cellid_with_vdf(
-        reader=reader,
         coord_re=coord_re,
+        load_model=load_multilayer_perceptron_classifier_model,
     )
 
-    vdf = extract_vdf(
-        file_location=file_location,
-        cid=cid,
-    )
-
-    model, preprocessing = load_multilayer_perceptron_classifier_model(model_dir)
-
-    downsample_factor = int(preprocessing["downsample_factor"])
-    log_eps = float(preprocessing["log_eps"])
-
-    features = create_features(
-        X=vdf[None, ...],
-        downsample_factor=downsample_factor,
-        log_eps=log_eps,
-    )
-
-    predicted_label = int(model.predict(features)[0])
-    class_probabilities = model.predict_proba(features)[0]
-    predicted_class_index = list(model.classes_).index(predicted_label)
-    predicted_probability = float(class_probabilities[predicted_class_index])
-
-    predicted_class_name = label_to_class[predicted_label]
-
-    extent, dv, threshold = get_vdf_plot_parameters_from_file(
-        file_location=file_location,
-        cid=cid,
-        vdf_shape=vdf.shape,
-    )
-
-    metadata_row = {
-        "timestep": int(timestep),
-        "cid": int(cid),
-        "x_re": float(coord_re[0]),
-        "y_re": float(coord_re[1]),
-        "z_re": float(coord_re[2]),
-        "file_location": str(file_location),
-    }
-
-    coord_name = create_coordinate_name(coord_re)
-
-    output_plot_path = output_dir / f"prediction_{coord_name}_xz.png"
-
-    plot_vdf_xz_slice(
-            vdf=vdf,
-            y_label=None,
-            metadata_row=metadata_row,
-            extent=extent,
-            output_path=output_plot_path,
-            dv=dv,
-            threshold=threshold,
-            vdflim=vdflim,
-            predicted_class_name=predicted_class_name,
-            decision_score=predicted_probability,
-        )
-
-    print(f"Saved plot: {output_plot_path}")
-    print(f"Predicted class: {predicted_class_name}")
-    print(f"Predicted probability: {predicted_probability}")
-    print(model.classes_)
+    print(f"Saved plot: {result['output_plot_path']}")
+    print(f"Predicted class: {result['predicted_class_name']}")
+    print(f"{result['score_name']}: {result['prediction_score']}")
+    print(result["model_classes"])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import numpy as np
 
 from src.batches import iter_array_batches
 
+
 def print_dataset_info(X, y, metadata):
     """
     Print info about a loaded VDF dataset.
@@ -33,9 +34,10 @@ def print_dataset_info(X, y, metadata):
 
     print("\n")
 
-def print_vdf_statisctics(X, batch_size=64):
+
+def print_vdf_statistics(X, batch_size=64):
     """
-    Print statistics fo VDF samples.
+    Print statistics for VDF samples.
 
     Parameters
     ----------
@@ -70,3 +72,18 @@ def print_vdf_statisctics(X, batch_size=64):
     print(f"max: {global_max}")
     print(f"mean: {mean}")
     print(f"std: {std}")
+
+
+def print_vdf_statisctics(X, batch_size=64):
+    """
+    Print statistics for VDF samples.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples.
+    batch_size : int
+        Size of batches to process.
+    """
+
+    print_vdf_statistics(X, batch_size=batch_size)

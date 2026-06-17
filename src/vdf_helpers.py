@@ -3,6 +3,7 @@ import analysator as pt
 
 R_EARTH = 6.371e6
 
+
 def coord_re_to_m(coord_re):
     """
     Convert coordinates from Earth radii to meters.
@@ -18,6 +19,7 @@ def coord_re_to_m(coord_re):
         Coordinate in meters.
     """
     return np.array(coord_re, dtype=float) *R_EARTH
+
 
 def create_coordinate_name(coord_re):
     """
@@ -38,6 +40,7 @@ def create_coordinate_name(coord_re):
         .replace(".", "p")
         .replace("-", "m")
     )
+
 
 def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
     """
@@ -62,6 +65,7 @@ def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
     cid = reader.get_cellid_with_vdf(coord_m, pop=pop)
 
     return int(cid)
+
 
 def cell_has_vdf(reader, cid, pop="avgs"):
     """
@@ -88,6 +92,7 @@ def cell_has_vdf(reader, cid, pop="avgs"):
         return False
 
     return len(velocity_cells) > 0
+
 
 def get_vdf_cellid_set(reader, pop="avgs"):
     """
@@ -119,6 +124,7 @@ def get_vdf_cellid_set(reader, pop="avgs"):
         )
 
     return {int(cid) for cid in np.atleast_1d(cellids)}
+
 
 def get_vdf_cells_with_coords_re(reader, pop="avgs"):
     """
@@ -180,6 +186,7 @@ def get_nearest_vdf_cellid(coord_re, vdf_cellids, vdf_coords_re):
     nearest_index = int(np.argmin(distances_squared))
 
     return int(vdf_cellids[nearest_index])
+
 
 def get_spatial_index_range(reader, axis_name, axis_index, min_value, max_value):
     """
@@ -299,6 +306,7 @@ def get_vdf_cellids_in_box(
         for index, cid in enumerate(selected_cellids)
     }
 
+
 def get_min_value_from_file(file_location, cid):
     """
     Read the VDF minimum value.
@@ -317,6 +325,7 @@ def get_min_value_from_file(file_location, cid):
     """
     reader = pt.vlsvfile.VlsvReader(str(file_location))
     return float(reader.read_variable("MinValue", int(cid)))
+
 
 def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
     """
@@ -351,6 +360,7 @@ def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
     vmax = extent[axis_index + 3]
 
     return float((vmax - vmin) / vdf_shape[axis_index])
+
 
 def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs"):
     """
@@ -395,6 +405,7 @@ def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs")
     )
 
     return extent, dv, threshold
+
 
 def create_xz_slice(vdf):
     """

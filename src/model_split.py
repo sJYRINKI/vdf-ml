@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def split_by_timestep(metadata, train_fraction=0.7):
     """
     Split samples into train and test by timestep.
@@ -23,14 +24,11 @@ def split_by_timestep(metadata, train_fraction=0.7):
         sample test timesteps.
     """
     timesteps = np.array(sorted(metadata["timestep"].unique()))
+    if len(timesteps) < 2:
+        raise ValueError("Need at least two timesteps for a train/test split")
 
     n_train = int(np.floor(len(timesteps) * train_fraction))
-
-    if n_train < 1:
-        n_train = 1
-
-    if n_train >= len(timesteps):
-        n_train = len(timesteps) -1
+    n_train = max(1, min(n_train, len(timesteps) - 1))
 
     train_timesteps = timesteps[:n_train]
     test_timesteps = timesteps[n_train:]

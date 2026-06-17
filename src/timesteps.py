@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 def create_timestep_list(start_timestep, n_timesteps):
     """
     Create a list of timesteps.
@@ -17,6 +18,7 @@ def create_timestep_list(start_timestep, n_timesteps):
         Timesteps starting from ``start_timestep``
     """
     return list(range(start_timestep, start_timestep + n_timesteps))
+
 
 def create_path(path_template, **values):
     """
@@ -36,6 +38,7 @@ def create_path(path_template, **values):
     """
 
     return Path(path_template.format(**values))
+
 
 def create_timestep_path(path_template, timestep):
     """

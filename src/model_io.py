@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import joblib
 import numpy as np
 
@@ -11,7 +12,7 @@ def load_perceptron_model(model_dir):
     ----------
     model_dir : str
         Directory containing the model and preprocessing files.
-    
+
     Returns
     -------
     model : sklearn.linear_model.Perceptron
@@ -19,15 +20,9 @@ def load_perceptron_model(model_dir):
     preprocessing : numpy.lib.npyio.NpzFile
         Saved preprocessing values.
     """
-    model_dir = Path(model_dir)
 
-    model_path = model_dir / "perceptron.joblib"
-    preprocessing_path = model_dir / "preprocessing.npz"
+    return load_model(model_dir, "perceptron.joblib")
 
-    model = joblib.load(model_path)
-    preprocessing = np.load(preprocessing_path)
-
-    return model, preprocessing
 
 def load_logistic_regression_model(model_dir):
     """
@@ -45,15 +40,9 @@ def load_logistic_regression_model(model_dir):
     preprocessing : numpy.lib.npyio.NpzFile
         Saved preprocessing values.
     """
-    model_dir = Path(model_dir)
 
-    model_path = model_dir / "logistic_regression.joblib"
-    preprocessing_path = model_dir / "preprocessing.npz"
+    return load_model(model_dir, "logistic_regression.joblib")
 
-    model = joblib.load(model_path)
-    preprocessing = np.load(preprocessing_path)
-
-    return model, preprocessing
 
 def load_multilayer_perceptron_classifier_model(model_dir):
     """
@@ -71,9 +60,31 @@ def load_multilayer_perceptron_classifier_model(model_dir):
     preprocessing : numpy.lib.npyio.NpzFile
         Saved preprocessing values.
     """
-    model_dir = Path(model_dir)
 
-    model_path = model_dir / "multilayer_perceptron_classifier.joblib"
+    return load_model(model_dir, "multilayer_perceptron_classifier.joblib")
+
+
+def load_model(model_dir, model_filename):
+    """
+    Load a trained model and preprocessing values from a model directory.
+
+    Parameters
+    ----------
+    model_dir : str
+        Directory containing the model and preprocessing files.
+    model_filename : str
+        Filename of the saved model joblib file.
+
+    Returns
+    -------
+    model : object
+        Trained model or model pipeline.
+    preprocessing : numpy.lib.npyio.NpzFile
+        Saved preprocessing values.
+    """
+
+    model_dir = Path(model_dir)
+    model_path = model_dir / model_filename
     preprocessing_path = model_dir / "preprocessing.npz"
 
     model = joblib.load(model_path)

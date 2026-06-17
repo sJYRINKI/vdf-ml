@@ -1,6 +1,9 @@
-from matplotlib.patches import Rectangle
+import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon, Rectangle
 import numpy as np
 
+from src.point_topology import find_smallest_closed_contour, read_smoothed_flux_grid
+from src.timesteps import create_timestep_path
 from src.vdf_helpers import R_EARTH, get_vdf_cellid_set
 
 
@@ -53,47 +56,6 @@ def expr_velocity(exprmaps, requestvariables=False):
     rhov = exprmaps["rho_v"][:, :, :]
 
     return rhov / rho[:, :, None]
-
-
-def draw_point_boxes(ax, metadata_rows, box_config, box_classes):
-    """
-    Draw configured xz boxes around source X/O point coordinates.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes where boxes are drawn.
-    metadata_rows : pandas.DataFrame
-        Metadata rows for one timestep.
-    box_config : dict
-        Box half-widths in Earth radii.
-    box_classes : iterable of str
-        Classes whose source coordinates should get boxes.
-    """
-
-    if not box_config or not box_classes:
-        return
-
-    half_width_x = float(box_config["x_half_width_re"])
-    half_width_z = float(box_config["z_half_width_re"])
-    box_classes = set(box_classes)
-    box_rows = metadata_rows[
-        metadata_rows["class_name"].isin(box_classes)
-    ].drop_duplicates(["class_name", "x_re", "z_re"])
-
-    for box_index, (_, row) in enumerate(box_rows.iterrows()):
-        label = "box" if box_index == 0 else None
-
-        rectangle = Rectangle(
-            (row["x_re"] - half_width_x, row["z_re"] - half_width_z),
-            2 * half_width_x,
-            2 * half_width_z,
-            fill=False,
-            edgecolor="red",
-            linewidth=1.0,
-            label=label,
-        )
-        ax.add_patch(rectangle)
 
 
 def scatter_all_vdf_cells(ax, reader, boxre=None):
@@ -149,6 +111,271 @@ def scatter_all_vdf_cells(ax, reader, boxre=None):
         linewidths=0,
         zorder=3,
     )
+
+
+def draw_point_boxes(ax, metadata_rows, box_config, box_classes):
+    """
+    Draw configured xz boxes around source X/O point coordinates.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes where boxes are drawn.
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    box_config : dict
+        Box half-widths in Earth radii.
+    box_classes : iterable of str
+        Classes whose source coordinates should get boxes.
+    """
+
+    if not box_config or not box_classes:
+        return
+
+    half_width_x = float(box_config["x_half_width_re"])
+    half_width_z = float(box_config["z_half_width_re"])
+    box_classes = set(box_classes)
+    box_rows = metadata_rows[
+        metadata_rows["class_name"].isin(box_classes)
+    ].drop_duplicates(["class_name", "x_re", "z_re"])
+
+    for box_index, (_, row) in enumerate(box_rows.iterrows()):
+        label = "box" if box_index == 0 else None
+
+        rectangle = Rectangle(
+            (row["x_re"] - half_width_x, row["z_re"] - half_width_z),
+            2 * half_width_x,
+            2 * half_width_z,
+            fill=False,
+            edgecolor="red",
+            linewidth=1.0,
+            label=label,
+        )
+        ax.add_patch(rectangle)
+
+
+def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
+    """
+    Draw Hessian-aligned X-point search boxes used for VDF-cell selection.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes where X-point search areas are drawn.
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    x_selection_config : dict, optional
+        X-point selection config containing ``half_width_di``.
+    """
+
+    required_columns = {
+        "point_kind",
+        "source_point_x_re",
+        "source_point_z_re",
+        "di_re",
+        "hessian_e0_x",
+        "hessian_e0_z",
+        "hessian_e1_x",
+        "hessian_e1_z",
+    }
+    if not x_selection_config or not required_columns.issubset(metadata_rows.columns):
+        return
+
+    half_width_di = x_selection_config.get("half_width_di", {})
+    if not half_width_di:
+        return
+
+    half_width_0_di = float(half_width_di["eigenvector_0"])
+    half_width_1_di = float(half_width_di["eigenvector_1"])
+
+    x_point_rows = metadata_rows[metadata_rows["point_kind"] == "x"]
+    if x_point_rows.empty:
+        return
+
+    box_rows = x_point_rows.drop_duplicates(
+        [
+            "source_point_x_re",
+            "source_point_z_re",
+            "di_re",
+            "hessian_e0_x",
+            "hessian_e0_z",
+            "hessian_e1_x",
+            "hessian_e1_z",
+        ]
+    )
+
+    for box_index, (_, row) in enumerate(box_rows.iterrows()):
+        values = np.asarray(
+            [
+                row["source_point_x_re"],
+                row["source_point_z_re"],
+                row["di_re"],
+                row["hessian_e0_x"],
+                row["hessian_e0_z"],
+                row["hessian_e1_x"],
+                row["hessian_e1_z"],
+            ],
+            dtype=float,
+        )
+        if np.any(np.isnan(values)):
+            continue
+
+        center = values[:2]
+        di_re = values[2]
+        e0 = values[3:5]
+        e1 = values[5:7]
+        half_width_0_re = half_width_0_di * di_re
+        half_width_1_re = half_width_1_di * di_re
+
+        vertices = np.asarray(
+            [
+                center + half_width_0_re * e0 + half_width_1_re * e1,
+                center - half_width_0_re * e0 + half_width_1_re * e1,
+                center - half_width_0_re * e0 - half_width_1_re * e1,
+                center + half_width_0_re * e0 - half_width_1_re * e1,
+            ],
+            dtype=float,
+        )
+
+        label = "X search area" if box_index == 0 else None
+        polygon = Polygon(
+            vertices,
+            closed=True,
+            facecolor="tab:orange",
+            edgecolor="tab:orange",
+            alpha=0.18,
+            linewidth=1.5,
+            label=label,
+            zorder=2.1,
+        )
+        ax.add_patch(polygon)
+
+
+def draw_o_point_search_areas(
+    ax,
+    reader,
+    metadata_rows,
+    flux_file_template,
+    o_core_fraction=None,
+):
+    """
+    Draw closed O-point flux contours used for VDF-cell selection.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes where island areas are drawn.
+    reader : analysator.vlsvfile.VlsvReader
+        Reader for the timestep VLSV file.
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    flux_file_template : str
+        Flux file template from dataset creation config.
+    o_core_fraction : float, optional
+        Fraction from O-point flux to boundary flux used when metadata does not
+        contain ``search_flux``.
+    """
+
+    required_columns = {
+        "point_kind",
+        "source_point_x_re",
+        "source_point_z_re",
+        "source_point_flux",
+        "boundary_flux",
+        "timestep",
+    }
+    if not flux_file_template or not required_columns.issubset(metadata_rows.columns):
+        return
+
+    o_point_rows = metadata_rows[metadata_rows["point_kind"] == "o"]
+    if o_point_rows.empty:
+        return
+
+    contour_key_columns = ["source_point_x_re", "source_point_z_re", "boundary_flux"]
+    if "search_flux" in o_point_rows.columns:
+        contour_key_columns.append("search_flux")
+    contour_rows = o_point_rows.drop_duplicates(contour_key_columns)
+
+    timestep = int(contour_rows.iloc[0]["timestep"])
+    flux_file_location = create_timestep_path(
+        path_template=flux_file_template,
+        timestep=timestep,
+    )
+    x_array_m, z_array_m, flux_function_zx = read_smoothed_flux_grid(
+        reader=reader,
+        flux_file_location=flux_file_location,
+    )
+    x_array_re = x_array_m / R_EARTH
+    z_array_re = z_array_m / R_EARTH
+
+    for contour_index, (_, row) in enumerate(contour_rows.iterrows()):
+        search_flux = get_o_point_search_flux(
+            row=row,
+            o_core_fraction=o_core_fraction,
+        )
+        contour = find_smallest_closed_contour(
+            x_array=x_array_re,
+            z_array=z_array_re,
+            flux_function_zx=flux_function_zx,
+            contour_flux=search_flux,
+            point_xz=(
+                float(row["source_point_x_re"]),
+                float(row["source_point_z_re"]),
+            ),
+        )
+        if contour is None:
+            continue
+
+        _, vertices_re = contour
+
+        label = "O search area" if contour_index == 0 else None
+        polygon = Polygon(
+            vertices_re,
+            closed=True,
+            facecolor="tab:cyan",
+            edgecolor="tab:cyan",
+            alpha=0.18,
+            linewidth=1.5,
+            label=label,
+            zorder=2,
+        )
+        ax.add_patch(polygon)
+
+
+def get_o_point_search_flux(row, o_core_fraction=None):
+    """
+    Return O-point contour flux from metadata or configured core fraction.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        O-point metadata row.
+    o_core_fraction : float, optional
+        Fraction from O-point flux to boundary flux.
+
+    Returns
+    -------
+    float
+        Flux level used for drawing the O-point search area.
+    """
+
+    if "search_flux" in row:
+        try:
+            search_flux = float(row["search_flux"])
+        except (TypeError, ValueError):
+            search_flux = float("nan")
+
+        if not np.isnan(search_flux):
+            return search_flux
+
+    if o_core_fraction is None:
+        o_core_fraction = 1.0
+
+    o_core_fraction = min(1.0, max(0.0, float(o_core_fraction)))
+    source_flux = float(row["source_point_flux"])
+    boundary_flux = float(row["boundary_flux"])
+
+    return source_flux + o_core_fraction * (boundary_flux - source_flux)
 
 
 def scatter_label_points(ax, reader, metadata_rows):

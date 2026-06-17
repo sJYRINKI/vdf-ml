@@ -4,17 +4,17 @@ import argparse
 import sys
 from pathlib import Path
 
-PRPJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(PRPJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(PROJECT_ROOT))
 
 from src.dataset_io import load_dataset
-from src.dataset_inspect import print_dataset_info, print_vdf_statisctics
+from src.dataset_inspect import print_dataset_info, print_vdf_statistics
 
 def main(dataset_dir, batch_size):
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
 
     print_dataset_info(X, y, metadata)
-    print_vdf_statisctics(X, batch_size=batch_size)
+    print_vdf_statistics(X, batch_size=batch_size)
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
