@@ -14,7 +14,7 @@ from src.dataset_io import load_dataset
 from src.dataset_plot import (
     add_dataset_sampling_plot_config,
     create_colormap_plot_jobs,
-    create_vdf_plot_jobs,
+    iter_vdf_plot_jobs,
     plot_labeled_colormap,
     plot_vdf_sample_from_dataset,
     run_plot_jobs,
@@ -58,7 +58,8 @@ def main(config_path, timestep):
         n_jobs=n_jobs,
     )
 
-    vdf_jobs = create_vdf_plot_jobs(
+    n_vdf_plots = int(X.shape[0])
+    vdf_jobs = iter_vdf_plot_jobs(
         X=X,
         y=y,
         metadata=metadata,
@@ -74,7 +75,7 @@ def main(config_path, timestep):
     print(f"Dataset directory: {dataset_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Saved {len(colormap_jobs)} colormap plots")
-    print(f"Saved {len(vdf_jobs)} VDF plots")
+    print(f"Saved {n_vdf_plots} VDF plots")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(

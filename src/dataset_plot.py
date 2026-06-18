@@ -113,9 +113,9 @@ def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
     return colormap_jobs
 
 
-def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
+def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
     """
-    Create lightweight plot jobs for all saved VDF samples.
+    Yield lightweight plot jobs for saved VDF samples.
 
     Parameters
     ----------
@@ -130,16 +130,15 @@ def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
     vdflim : float
         Velocity axis limit in m/s for VDF plots.
 
-    Returns
-    -------
-    list of dict
-        Keyword argument dictionaries for ``plot_vdf_sample_from_dataset``.
+    Yields
+    ------
+    dict
+        Keyword argument dictionary for ``plot_vdf_sample_from_dataset``.
     """
 
     X_path = get_memmap_path(X, "X")
     class_frame_counts = {}
     plot_parameter_cache = {}
-    vdf_jobs = []
     vdf_shape = tuple(X.shape[1:])
 
     for sample_index in range(X.shape[0]):
@@ -166,23 +165,19 @@ def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
         class_output_dir = output_dir / class_name
         output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
 
-        vdf_jobs.append(
-            {
-                "X_path": X_path,
-                "sample_index": int(sample_index),
-                "y_label": int(y[sample_index]),
-                "metadata_row": metadata_row,
-                "extent": extent,
-                "output_path": output_path,
-                "dv": dv,
-                "threshold": threshold,
-                "vdflim": vdflim,
-            }
-        )
+        yield {
+            "X_path": X_path,
+            "sample_index": int(sample_index),
+            "y_label": int(y[sample_index]),
+            "metadata_row": metadata_row,
+            "extent": extent,
+            "output_path": output_path,
+            "dv": dv,
+            "threshold": threshold,
+            "vdflim": vdflim,
+        }
 
         class_frame_counts[class_name] += 1
-
-    return vdf_jobs
 
 
 def run_plot_jobs(plot_function, plot_jobs, n_jobs):
@@ -193,7 +188,7 @@ def run_plot_jobs(plot_function, plot_jobs, n_jobs):
     ----------
     plot_function : callable
         Plotting function called with each job dictionary as keyword arguments.
-    plot_jobs : list of dict
+    plot_jobs : iterable of dict
         Plot job dictionaries. Each dictionary is expanded into keyword
         arguments for ``plot_function``.
     n_jobs : int
