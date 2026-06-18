@@ -82,10 +82,13 @@ def create_dataset(config, start_timestep, n_timesteps, dataset_kind):
         f"({extraction_worker_count} workers)"
     )
 
-    sample_counts_by_timestep, planning_elapsed = plan_dataset_sample_counts(
+    sample_specs_by_timestep, planning_elapsed = plan_dataset_sample_specs(
         config=config,
         timesteps=timesteps,
         planning_n_jobs=planning_n_jobs,
+    )
+    sample_counts_by_timestep = count_sample_specs_by_timestep(
+        sample_specs_by_timestep
     )
     n_samples = count_sample_counts(sample_counts_by_timestep)
 
@@ -104,10 +107,7 @@ def create_dataset(config, start_timestep, n_timesteps, dataset_kind):
         sample_counts_by_timestep=sample_counts_by_timestep,
         timesteps=timesteps,
     )
-    _, first_sample_specs = create_timestep_sample_specs_for_timestep(
-        config=config,
-        timestep=first_timestep,
-    )
+    first_sample_specs = sample_specs_by_timestep[first_timestep]
     first_sample, first_sample_iter = extract_first_sample_from_specs(
         first_sample_specs
     )
@@ -134,12 +134,13 @@ def create_dataset(config, start_timestep, n_timesteps, dataset_kind):
         timestep_samples=first_sample_iter,
         sample_index=sample_index,
     )
+    sample_specs_by_timestep.pop(first_timestep, None)
     flush_and_release_memmaps(X, y)
     print_memory_usage("after first timestep memmap release")
 
     remaining_timesteps = timesteps[first_timestep_index + 1:]
     sample_index = write_remaining_timesteps(
-        config=config,
+        sample_specs_by_timestep=sample_specs_by_timestep,
         X=X,
         y=y,
         metadata=metadata,
@@ -207,9 +208,9 @@ def get_worker_count(n_jobs, config_name):
     return max(1, n_jobs)
 
 
-def plan_dataset_sample_counts(config, timesteps, planning_n_jobs):
+def plan_dataset_sample_specs(config, timesteps, planning_n_jobs):
     """
-    Count sample specs for all requested timesteps.
+    Create sample specs for all requested timesteps.
 
     Parameters
     ----------
@@ -222,8 +223,8 @@ def plan_dataset_sample_counts(config, timesteps, planning_n_jobs):
 
     Returns
     -------
-    sample_counts_by_timestep : dict
-        Mapping from timestep to number of samples.
+    sample_specs_by_timestep : dict
+        Mapping from timestep to sample specification dictionaries.
     elapsed : float
         Planning wall-clock time in seconds.
     """
@@ -232,48 +233,44 @@ def plan_dataset_sample_counts(config, timesteps, planning_n_jobs):
     planning_start = time.perf_counter()
 
     if planning_n_jobs == 1:
-        sample_count_results = [
-            count_timestep_sample_specs_for_timestep(
+        sample_spec_results = [
+            create_timestep_sample_specs_for_timestep(
                 config=config,
                 timestep=timestep,
             )
             for timestep in timesteps
         ]
     else:
-        sample_count_results = Parallel(n_jobs=planning_n_jobs)(
-            delayed(count_timestep_sample_specs_for_timestep)(
+        sample_spec_results = Parallel(n_jobs=planning_n_jobs)(
+            delayed(create_timestep_sample_specs_for_timestep)(
                 config=config,
                 timestep=timestep,
             )
             for timestep in timesteps
         )
 
-    return dict(sample_count_results), time.perf_counter() - planning_start
+    return dict(sample_spec_results), time.perf_counter() - planning_start
 
 
-def count_timestep_sample_specs_for_timestep(config, timestep):
+def count_sample_specs_by_timestep(sample_specs_by_timestep):
     """
-    Count sample specs for one timestep without retaining them.
+    Count sample specs for each planned timestep.
 
     Parameters
     ----------
-    config : dict
-        Dataset creation config.
-    timestep : int
-        Timestep to count.
+    sample_specs_by_timestep : dict
+        Mapping from timestep to sample specification dictionaries.
 
     Returns
     -------
-    tuple
-        Pair of ``(timestep, n_samples)``.
+    dict
+        Mapping from timestep to number of samples.
     """
 
-    timestep, sample_specs = create_timestep_sample_specs_for_timestep(
-        config=config,
-        timestep=timestep,
-    )
-
-    return int(timestep), len(sample_specs)
+    return {
+        int(timestep): len(sample_specs)
+        for timestep, sample_specs in sample_specs_by_timestep.items()
+    }
 
 
 def count_sample_counts(sample_counts_by_timestep):
@@ -351,7 +348,7 @@ def extract_first_sample_from_specs(sample_specs):
 
 
 def write_remaining_timesteps(
-    config,
+    sample_specs_by_timestep,
     X,
     y,
     metadata,
@@ -365,8 +362,8 @@ def write_remaining_timesteps(
 
     Parameters
     ----------
-    config : dict
-        Dataset creation config.
+    sample_specs_by_timestep : dict
+        Mapping from timestep to planned sample specifications.
     X : numpy.ndarray
         Output array for VDF samples.
     y : numpy.ndarray
@@ -390,7 +387,7 @@ def write_remaining_timesteps(
 
     if extraction_n_jobs == 1:
         return write_timesteps_serial(
-            config=config,
+            sample_specs_by_timestep=sample_specs_by_timestep,
             X=X,
             y=y,
             metadata=metadata,
@@ -399,7 +396,7 @@ def write_remaining_timesteps(
         )
 
     return write_timesteps_parallel(
-        config=config,
+        sample_specs_by_timestep=sample_specs_by_timestep,
         X=X,
         y=y,
         metadata=metadata,
@@ -411,7 +408,7 @@ def write_remaining_timesteps(
 
 
 def write_timesteps_serial(
-    config,
+    sample_specs_by_timestep,
     X,
     y,
     metadata,
@@ -423,8 +420,8 @@ def write_timesteps_serial(
 
     Parameters
     ----------
-    config : dict
-        Dataset creation config.
+    sample_specs_by_timestep : dict
+        Mapping from timestep to planned sample specifications.
     X : numpy.ndarray
         Output array for VDF samples.
     y : numpy.ndarray
@@ -443,10 +440,7 @@ def write_timesteps_serial(
     """
 
     for timestep in timesteps:
-        _, sample_specs = create_timestep_sample_specs_for_timestep(
-            config=config,
-            timestep=timestep,
-        )
+        sample_specs = sample_specs_by_timestep.pop(int(timestep))
         sample_index = write_timestep_samples(
             X=X,
             y=y,
@@ -461,7 +455,7 @@ def write_timesteps_serial(
 
 
 def write_timesteps_parallel(
-    config,
+    sample_specs_by_timestep,
     X,
     y,
     metadata,
@@ -475,8 +469,8 @@ def write_timesteps_parallel(
 
     Parameters
     ----------
-    config : dict
-        Dataset creation config.
+    sample_specs_by_timestep : dict
+        Mapping from timestep to planned sample specifications.
     X : numpy.ndarray
         Output array for VDF samples.
     y : numpy.ndarray
@@ -504,8 +498,12 @@ def write_timesteps_parallel(
         print_memory_usage(
             f"before extraction chunk {chunk_start}-{chunk_end}"
         )
+        chunk_specs_by_timestep = {
+            int(timestep): sample_specs_by_timestep.pop(int(timestep))
+            for timestep in timestep_chunk
+        }
         chunk_results = extract_timestep_chunk_parallel(
-            config=config,
+            sample_specs_by_timestep=chunk_specs_by_timestep,
             timestep_chunk=timestep_chunk,
             extraction_n_jobs=extraction_n_jobs,
         )
@@ -531,16 +529,14 @@ def write_timesteps_parallel(
     return sample_index
 
 
-def extract_timestep_samples(config, timestep):
+def extract_timestep_samples(sample_specs):
     """
-    Create sample specs for one timestep and extract its samples.
+    Extract samples from planned timestep sample specs.
 
     Parameters
     ----------
-    config : dict
-        Dataset creation config.
-    timestep : int
-        Timestep to extract.
+    sample_specs : list of dict
+        Sample specifications for one timestep.
 
     Returns
     -------
@@ -548,16 +544,11 @@ def extract_timestep_samples(config, timestep):
         Extracted sample dictionaries.
     """
 
-    _, sample_specs = create_timestep_sample_specs_for_timestep(
-        config=config,
-        timestep=timestep,
-    )
-
     return process_timestep_sample_specs(sample_specs)
 
 
 def extract_timestep_chunk_parallel(
-    config,
+    sample_specs_by_timestep,
     timestep_chunk,
     extraction_n_jobs,
 ):
@@ -566,8 +557,8 @@ def extract_timestep_chunk_parallel(
 
     Parameters
     ----------
-    config : dict
-        Dataset creation config.
+    sample_specs_by_timestep : dict
+        Mapping from timestep to planned sample specifications.
     timestep_chunk : list of int
         Timesteps in the chunk.
     extraction_n_jobs : int
@@ -583,8 +574,7 @@ def extract_timestep_chunk_parallel(
 
     return parallel(
         delayed(extract_timestep_samples)(
-            config=config,
-            timestep=timestep,
+            sample_specs=sample_specs_by_timestep[int(timestep)],
         )
         for timestep in timestep_chunk
     )
