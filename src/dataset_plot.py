@@ -452,9 +452,27 @@ def plot_vdf_xz_slice(
 
     mid = vdf_swapped.shape[1] // 2
 
-    vdf_plot = vdf_swapped[:, mid, :] * dv
-    vdf_plot = np.where(vdf_plot < threshold * dv, 0, vdf_plot)
+    vdf_plot_raw = vdf_swapped[:, mid, :] * dv
+    vdf_plot = np.where(vdf_plot_raw < threshold * dv, 0, vdf_plot_raw)
     vdf_plot = np.ma.masked_less_equal(vdf_plot, 0)
+
+    if vdf_plot.count() == 0:
+        print(
+            "Using unthresholded VDF plot: "
+            f"timestep={metadata_row.get('timestep', 'unknown')}, "
+            f"cid={metadata_row.get('cid', 'unknown')}, "
+            f"class={metadata_row.get('class_name', 'unknown')}"
+        )
+        vdf_plot = np.ma.masked_less_equal(vdf_plot_raw, 0)
+
+    if vdf_plot.count() == 0:
+        print(
+            "Skipping empty VDF plot: "
+            f"timestep={metadata_row.get('timestep', 'unknown')}, "
+            f"cid={metadata_row.get('cid', 'unknown')}, "
+            f"class={metadata_row.get('class_name', 'unknown')}"
+        )
+        return
 
     fig, ax1 = plt.subplots(figsize=(7, 6))
 
