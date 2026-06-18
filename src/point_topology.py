@@ -631,21 +631,26 @@ def add_o_point_island_contours(
     o_selection_config = (points_config or {}).get("o_selection", {})
     core_fraction = float(o_selection_config.get("core_fraction", 0.4))
 
-    for o_point_record in o_point_records:
-        contour_data = find_island_boundary_contour(
-            o_point_record=o_point_record,
-            x_point_records=x_point_records,
-            flux_function_zx=flux_function_zx,
-            x_array=x_array,
-            z_array=z_array,
-            core_fraction=core_fraction,
-        )
-        if contour_data is None:
-            o_point_record["contour_vertices_re"] = None
-            o_point_record["associated_x_point"] = None
-            continue
+    fig, ax = plt.subplots()
+    try:
+        for o_point_record in o_point_records:
+            contour_data = find_island_boundary_contour(
+                o_point_record=o_point_record,
+                x_point_records=x_point_records,
+                flux_function_zx=flux_function_zx,
+                x_array=x_array,
+                z_array=z_array,
+                core_fraction=core_fraction,
+                contour_ax=ax,
+            )
+            if contour_data is None:
+                o_point_record["contour_vertices_re"] = None
+                o_point_record["associated_x_point"] = None
+                continue
 
-        o_point_record.update(contour_data)
+            o_point_record.update(contour_data)
+    finally:
+        plt.close(fig)
 
 
 def find_island_boundary_contour(
@@ -655,6 +660,7 @@ def find_island_boundary_contour(
     x_array,
     z_array,
     core_fraction,
+    contour_ax=None,
 ):
     """
     Find the smallest closed X-flux contour enclosing an O point.
@@ -674,6 +680,8 @@ def find_island_boundary_contour(
     core_fraction : float
         Fraction from O-point flux toward boundary X-point flux used for the
         actual O-core search contour.
+    contour_ax : matplotlib.axes.Axes, optional
+        Reusable Matplotlib axes used for contour extraction.
 
     Returns
     -------
@@ -702,6 +710,7 @@ def find_island_boundary_contour(
             flux_function_zx=flux_function_zx,
             contour_flux=boundary_flux,
             point_xz=o_point_xz_m,
+            contour_ax=contour_ax,
         )
         if boundary_contour is None:
             continue
@@ -714,6 +723,7 @@ def find_island_boundary_contour(
             flux_function_zx=flux_function_zx,
             contour_flux=search_flux,
             point_xz=o_point_xz_m,
+            contour_ax=contour_ax,
         )
         if search_contour is None:
             continue
@@ -768,6 +778,7 @@ def find_smallest_closed_contour(
     flux_function_zx,
     contour_flux,
     point_xz,
+    contour_ax=None,
 ):
     """
     Find the smallest closed contour at one flux level enclosing a point.
@@ -784,6 +795,9 @@ def find_smallest_closed_contour(
         Flux level to contour.
     point_xz : tuple of float
         Point coordinate in the same units as ``x_array`` and ``z_array``.
+    contour_ax : matplotlib.axes.Axes, optional
+        Reusable Matplotlib axes used for contour extraction. If omitted, a
+        temporary figure and axes are created for this contour.
 
     Returns
     -------
@@ -791,28 +805,40 @@ def find_smallest_closed_contour(
         Pair of ``(area, vertices)`` for the smallest enclosing contour.
     """
 
-    fig, ax = plt.subplots()
-    contour = ax.contour(x_array, z_array, flux_function_zx, [contour_flux])
-    contour_paths = get_contour_paths(contour)
-    plt.close(fig)
+    fig = None
+    if contour_ax is None:
+        fig, contour_ax = plt.subplots()
 
-    candidates = []
-    for contour_path in contour_paths:
-        vertices = np.asarray(contour_path.vertices, dtype=float)
-        if len(vertices) < 3:
-            continue
+    try:
+        contour = contour_ax.contour(
+            x_array,
+            z_array,
+            flux_function_zx,
+            [contour_flux],
+        )
+        contour_paths = get_contour_paths(contour)
 
-        if not np.allclose(vertices[0], vertices[-1]):
-            continue
+        candidates = []
+        for contour_path in contour_paths:
+            vertices = np.asarray(contour_path.vertices, dtype=float)
+            if len(vertices) < 3:
+                continue
 
-        if not MplPath(vertices).contains_point(point_xz):
-            continue
+            if not np.allclose(vertices[0], vertices[-1]):
+                continue
 
-        area = polygon_area(vertices)
-        if area <= 0:
-            continue
+            if not MplPath(vertices).contains_point(point_xz):
+                continue
 
-        candidates.append((area, vertices))
+            area = polygon_area(vertices)
+            if area <= 0:
+                continue
+
+            candidates.append((area, vertices))
+    finally:
+        contour_ax.cla()
+        if fig is not None:
+            plt.close(fig)
 
     if not candidates:
         return None
