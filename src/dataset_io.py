@@ -139,31 +139,6 @@ def save_metadata(outdir, metadata):
     )
 
 
-def save_dataset(outdir, X, y, metadata):
-    """
-    Save VDF data, labels, and metadata.
-
-    Parameters
-    ----------
-    outdir : str
-        output directory for the dataset.
-    X : numpy.ndarray
-        VDF samples.
-    y : numpy.ndarray
-        Integer labels.
-    metadata : list of dict
-        Metadata rows, one dictionary per sample.
-    """
-
-    outdir = Path(outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    np.save(outdir / "X.npy", np.asanyarray(X, dtype=np.float32))
-    np.save(outdir / "y.npy", np.asanyarray(y, dtype=np.int64))
-
-    save_metadata(outdir, metadata)
-
-
 def load_dataset(dataset_dir, mmap=True):
     """
     Load saved VDF dataset.
