@@ -24,11 +24,11 @@ points:
   x_selection:
     density_variable: rho
     half_width_di:
-      eigenvector_0: 2.0
-      eigenvector_1: 2.0
+      eigenvector_0: 2.5
+      eigenvector_1: 2.5
     y_half_width_re: 0.0
   o_selection:
-    core_fraction: 0.8
+    core_fraction: 1.0
     y_half_width_re: 0.0
 
 class_coords_re:

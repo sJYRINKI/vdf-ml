@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import tempfile
 import time
 
 import numpy as np
@@ -9,13 +11,13 @@ from src.dataset_sampling import (
     iter_chunks,
     iter_timestep_sample_specs,
     print_memory_usage,
-    process_timestep_sample_specs,
     write_timestep_samples,
 )
 from src.dataset_io import (
     create_dataset_output_dir,
     create_memmap_dataset,
     flush_and_release_memmaps,
+    release_memmap_pages,
     save_metadata,
 )
 from src.timesteps import create_timestep_list
@@ -492,65 +494,184 @@ def write_timesteps_parallel(
         Next sample index after writing.
     """
 
-    for timestep_chunk in iter_chunks(timesteps, extraction_worker_count):
-        chunk_start = int(timestep_chunk[0])
-        chunk_end = int(timestep_chunk[-1])
-        print_memory_usage(
-            f"before extraction chunk {chunk_start}-{chunk_end}"
-        )
-        chunk_specs_by_timestep = {
-            int(timestep): sample_specs_by_timestep.pop(int(timestep))
-            for timestep in timestep_chunk
-        }
-        chunk_results = extract_timestep_chunk_parallel(
-            sample_specs_by_timestep=chunk_specs_by_timestep,
-            timestep_chunk=timestep_chunk,
-            extraction_n_jobs=extraction_n_jobs,
-        )
-        print_memory_usage(
-            f"after extraction chunk {chunk_start}-{chunk_end}"
-        )
+    with tempfile.TemporaryDirectory(
+        prefix="extraction_",
+        dir=Path(X.filename).parent,
+    ) as temp_dir:
+        temp_dir = Path(temp_dir)
 
-        for timestep_samples in chunk_results:
-            sample_index = write_timestep_samples(
-                X=X,
-                y=y,
-                metadata=metadata,
-                timestep_samples=timestep_samples,
-                sample_index=sample_index,
+        for timestep_chunk in iter_chunks(timesteps, extraction_worker_count):
+            chunk_start = int(timestep_chunk[0])
+            chunk_end = int(timestep_chunk[-1])
+            print_memory_usage(
+                f"before extraction chunk {chunk_start}-{chunk_end}"
+            )
+            chunk_specs_by_timestep = {
+                int(timestep): sample_specs_by_timestep.pop(int(timestep))
+                for timestep in timestep_chunk
+            }
+            chunk_results = extract_timestep_chunk_parallel(
+                sample_specs_by_timestep=chunk_specs_by_timestep,
+                timestep_chunk=timestep_chunk,
+                extraction_n_jobs=extraction_n_jobs,
+                temp_dir=temp_dir,
+                sample_shape=X.shape[1:],
+                dtype=X.dtype,
+            )
+            print_memory_usage(
+                f"after extraction chunk {chunk_start}-{chunk_end}"
             )
 
-        print_memory_usage(f"after writing chunk {chunk_start}-{chunk_end}")
-        flush_and_release_memmaps(X, y)
-        print_memory_usage(
-            f"after memmap release chunk {chunk_start}-{chunk_end}"
-        )
+            for extracted_timestep in chunk_results:
+                sample_index = write_extracted_timestep(
+                    X=X,
+                    y=y,
+                    metadata=metadata,
+                    extracted_timestep=extracted_timestep,
+                    sample_index=sample_index,
+                )
+
+            print_memory_usage(f"after writing chunk {chunk_start}-{chunk_end}")
+            flush_and_release_memmaps(X, y)
+            print_memory_usage(
+                f"after memmap release chunk {chunk_start}-{chunk_end}"
+            )
 
     return sample_index
 
 
-def extract_timestep_samples(sample_specs):
+def extract_timestep_samples_to_temp(sample_specs, temp_dir, sample_shape, dtype):
     """
-    Extract samples from planned timestep sample specs.
+    Extract planned timestep samples into temporary memmap files.
 
     Parameters
     ----------
     sample_specs : list of dict
         Sample specifications for one timestep.
+    temp_dir : pathlib.Path
+        Directory for temporary extraction arrays.
+    sample_shape : tuple of int
+        Shape of one VDF sample.
+    dtype : data-type
+        VDF array dtype.
 
     Returns
     -------
-    list of dict
-        Extracted sample dictionaries.
+    dict
+        Descriptor containing temporary array paths and metadata rows.
     """
 
-    return process_timestep_sample_specs(sample_specs)
+    if not sample_specs:
+        return {
+            "n_samples": 0,
+            "metadata": [],
+            "X_path": None,
+            "y_path": None,
+        }
+
+    timestep = int(sample_specs[0]["timestep"])
+    temp_dir = Path(temp_dir)
+    X_path = temp_dir / f"timestep_{timestep}_X.npy"
+    y_path = temp_dir / f"timestep_{timestep}_y.npy"
+
+    X_temp = np.lib.format.open_memmap(
+        X_path,
+        mode="w+",
+        dtype=dtype,
+        shape=(len(sample_specs), *sample_shape),
+    )
+    y_temp = np.lib.format.open_memmap(
+        y_path,
+        mode="w+",
+        dtype=np.int64,
+        shape=(len(sample_specs),),
+    )
+
+    metadata = []
+    sample_index = write_timestep_samples(
+        X=X_temp,
+        y=y_temp,
+        metadata=metadata,
+        timestep_samples=iter_timestep_sample_specs(sample_specs),
+        sample_index=0,
+    )
+
+    if sample_index != len(sample_specs):
+        raise RuntimeError(
+            f"Expected to extract {len(sample_specs)} samples for timestep "
+            f"{timestep}, extracted {sample_index}"
+        )
+
+    flush_and_release_memmaps(X_temp, y_temp)
+
+    return {
+        "n_samples": sample_index,
+        "metadata": metadata,
+        "X_path": str(X_path),
+        "y_path": str(y_path),
+    }
+
+
+def write_extracted_timestep(X, y, metadata, extracted_timestep, sample_index):
+    """
+    Copy one extracted temporary timestep into the final dataset arrays.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Final output array for VDF samples.
+    y : numpy.ndarray
+        Final output array for integer labels.
+    metadata : list of dict
+        Metadata rows accumulated for the final dataset.
+    extracted_timestep : dict
+        Descriptor returned by ``extract_timestep_samples_to_temp``.
+    sample_index : int
+        Index where writing should start.
+
+    Returns
+    -------
+    int
+        Next sample index after writing this timestep.
+    """
+
+    n_samples = int(extracted_timestep["n_samples"])
+    if n_samples == 0:
+        return sample_index
+
+    timestep_metadata = extracted_timestep["metadata"]
+    if len(timestep_metadata) != n_samples:
+        raise RuntimeError(
+            f"Expected {n_samples} metadata rows, got {len(timestep_metadata)}"
+        )
+
+    X_temp = np.load(extracted_timestep["X_path"], mmap_mode="r")
+    y_temp = np.load(extracted_timestep["y_path"], mmap_mode="r")
+    write_end = sample_index + n_samples
+
+    X[sample_index:write_end] = X_temp[:n_samples]
+    y[sample_index:write_end] = y_temp[:n_samples]
+
+    for metadata_row in timestep_metadata:
+        output_row = dict(metadata_row)
+        output_row["sample_index"] = sample_index + int(
+            metadata_row["sample_index"]
+        )
+        metadata.append(output_row)
+
+    release_memmap_pages(X_temp)
+    release_memmap_pages(y_temp)
+
+    return write_end
 
 
 def extract_timestep_chunk_parallel(
     sample_specs_by_timestep,
     timestep_chunk,
     extraction_n_jobs,
+    temp_dir,
+    sample_shape,
+    dtype,
 ):
     """
     Extract a timestep chunk with joblib.
@@ -563,18 +684,27 @@ def extract_timestep_chunk_parallel(
         Timesteps in the chunk.
     extraction_n_jobs : int
         Number of extraction workers.
+    temp_dir : pathlib.Path
+        Directory for temporary extraction arrays.
+    sample_shape : tuple of int
+        Shape of one VDF sample.
+    dtype : data-type
+        VDF array dtype.
 
     Returns
     -------
     iterable
-        Extracted sample lists in timestep order.
+        Extracted timestep descriptors in timestep order.
     """
 
     parallel = create_extraction_parallel(extraction_n_jobs)
 
     return parallel(
-        delayed(extract_timestep_samples)(
+        delayed(extract_timestep_samples_to_temp)(
             sample_specs=sample_specs_by_timestep[int(timestep)],
+            temp_dir=temp_dir,
+            sample_shape=sample_shape,
+            dtype=dtype,
         )
         for timestep in timestep_chunk
     )
