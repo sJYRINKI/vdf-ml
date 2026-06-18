@@ -72,18 +72,3 @@ def print_vdf_statistics(X, batch_size=64):
     print(f"max: {global_max}")
     print(f"mean: {mean}")
     print(f"std: {std}")
-
-
-def print_vdf_statisctics(X, batch_size=64):
-    """
-    Print statistics for VDF samples.
-
-    Parameters
-    ----------
-    X : numpy.ndarray
-        VDF samples.
-    batch_size : int
-        Size of batches to process.
-    """
-
-    print_vdf_statistics(X, batch_size=batch_size)
