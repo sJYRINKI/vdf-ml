@@ -31,8 +31,9 @@ def create_features_in_batches(X, indices, downsample_factor, batch_size, n_jobs
     write_start = 0
 
     for batch_indices in iter_index_batches(indices, batch_size):
+        X_batch = get_array_batch(X, batch_indices)
         features_batch = create_features(
-            X[batch_indices],
+            X_batch,
             downsample_factor=downsample_factor,
             log_eps=log_eps,
             n_jobs=n_jobs,
@@ -81,8 +82,9 @@ def predict_in_batches(model_pipeline, X, indices, downsample_factor, batch_size
     y_pred_batches = []
 
     for batch_indices in iter_index_batches(indices, batch_size):
+        X_batch = get_array_batch(X, batch_indices)
         features_batch = create_features(
-            X[batch_indices],
+            X_batch,
             downsample_factor=downsample_factor,
             n_jobs=n_jobs,
         )
@@ -116,7 +118,7 @@ def iter_array_batches(X, indices=None, batch_size=64):
         indices = np.arange(X.shape[0])
 
     for batch_indices in iter_index_batches(indices, batch_size):
-        yield batch_indices, X[batch_indices]
+        yield batch_indices, get_array_batch(X, batch_indices)
 
 
 def iter_index_batches(indices, batch_size):
@@ -139,3 +141,62 @@ def iter_index_batches(indices, batch_size):
 
     for start in range(0, len(indices), int(batch_size)):
         yield indices[start:start + int(batch_size)]
+
+def get_array_batch(X, batch_indices):
+    """
+    Return an array batch, using a slice when indices are contiguous.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Dataset array.
+    batch_indices : numpy.ndarray
+        Sample indices in this batch.
+
+    Returns
+    -------
+    numpy.ndarray
+        Batch selected from ``X``. Contiguous increasing indices are returned as
+        a slice view, which avoids copying memory-mapped arrays.
+    """
+
+    batch_slice = create_contiguous_slice(batch_indices)
+    if batch_slice is not None:
+        return X[batch_slice]
+
+    return X[batch_indices]
+
+
+def create_contiguous_slice(indices):
+    """
+    Create a slice for increasing contiguous indices.
+
+    Parameters
+    ----------
+    indices : numpy.ndarray
+        Sample indices.
+
+    Returns
+    -------
+    slice or None
+        Slice matching the indices, or ``None`` when fancy indexing is needed
+        to preserve order.
+    """
+
+    indices = np.asarray(indices)
+    if len(indices) == 0:
+        return slice(0, 0)
+
+    if not np.issubdtype(indices.dtype, np.integer):
+        return None
+
+    start = int(indices[0])
+    stop = start + len(indices)
+
+    if start < 0 or int(indices[-1]) != stop - 1:
+        return None
+
+    if np.all(indices == np.arange(start, stop)):
+        return slice(start, stop)
+
+    return None
