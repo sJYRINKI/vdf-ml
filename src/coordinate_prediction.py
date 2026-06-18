@@ -147,7 +147,8 @@ def get_prediction_score(model, features, predicted_label):
         Predicted-class probability or decision score.
     """
 
-    class_index = list(model.classes_).index(predicted_label)
+    classes = list(model.classes_)
+    class_index = classes.index(predicted_label)
 
     if hasattr(model, "predict_proba"):
         class_probabilities = model.predict_proba(features)[0]
@@ -155,7 +156,11 @@ def get_prediction_score(model, features, predicted_label):
 
     if hasattr(model, "decision_function"):
         decision_scores = np.asarray(model.decision_function(features))
-        if decision_scores.ndim == 0:
+        if len(classes) == 2 and decision_scores.size == 1:
+            score = np.ravel(decision_scores)[0]
+            if predicted_label == classes[0]:
+                score = -score
+        elif decision_scores.ndim == 0:
             score = decision_scores
         elif decision_scores.ndim == 1:
             score = decision_scores[0 if len(decision_scores) == 1 else class_index]

@@ -55,7 +55,15 @@ def create_features_in_batches(X, indices, downsample_factor, batch_size, n_jobs
     return features
 
 
-def predict_in_batches(model_pipeline, X, indices, downsample_factor, batch_size, n_jobs=1):
+def predict_in_batches(
+    model_pipeline,
+    X,
+    indices,
+    downsample_factor,
+    batch_size,
+    n_jobs=1,
+    log_eps=1e-30,
+):
     """
     Predict labels in batches.
 
@@ -73,6 +81,8 @@ def predict_in_batches(model_pipeline, X, indices, downsample_factor, batch_size
         Number of samples per batch.
     n_jobs : int, optional
         Number of parallel workers used for feature extraction.
+    log_eps : float, optional
+        Small value added before log scaling.
 
     Returns
     -------
@@ -87,6 +97,7 @@ def predict_in_batches(model_pipeline, X, indices, downsample_factor, batch_size
             X_batch,
             downsample_factor=downsample_factor,
             n_jobs=n_jobs,
+            log_eps=log_eps,
         )
 
         y_pred_batch = model_pipeline.predict(features_batch)

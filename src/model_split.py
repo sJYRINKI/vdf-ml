@@ -36,7 +36,7 @@ def split_by_timestep(metadata, train_fraction=0.7):
     train_mask = metadata["timestep"].isin(train_timesteps)
     test_mask = metadata["timestep"].isin(test_timesteps)
 
-    train_indices = metadata.index[train_mask].to_numpy()
-    test_indices = metadata.index[test_mask].to_numpy()
+    train_indices = np.flatnonzero(train_mask.to_numpy())
+    test_indices = np.flatnonzero(test_mask.to_numpy())
 
     return train_indices, test_indices, train_timesteps, test_timesteps
