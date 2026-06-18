@@ -297,7 +297,7 @@ def plot_labeled_colormap(
         reader=reader,
         metadata_rows=metadata_rows,
     )
-    ax1.legend()
+    ax1.legend(loc=2)
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
