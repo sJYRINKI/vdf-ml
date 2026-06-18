@@ -11,6 +11,7 @@ import numpy as np
 
 from src.config import load_config
 from src.colormap_helpers import (
+    draw_manual_point_search_boxes,
     draw_o_point_search_areas,
     draw_point_boxes,
     draw_x_point_search_areas,
@@ -279,6 +280,10 @@ def plot_labeled_colormap(
         metadata_rows=metadata_rows,
         box_config=vdf_box_config,
         box_classes=box_classes,
+    )
+    draw_manual_point_search_boxes(
+        ax=ax1,
+        metadata_rows=metadata_rows,
     )
     draw_x_point_search_areas(
         ax=ax1,

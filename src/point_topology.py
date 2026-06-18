@@ -6,6 +6,7 @@ from matplotlib.path import Path as MplPath
 from scipy.signal import convolve2d
 from shapely import geometry
 
+from src.point_selection import get_point_selection_method
 from src.vdf_helpers import R_EARTH
 
 PROTON_MASS = 1.67262192369e-27
@@ -62,9 +63,11 @@ def find_point_records(reader, flux_file_location, points_config=None):
     Returns
     -------
     x_point_records : list of dict
-        X-point records with coordinates, flux, Hessian axes, and ``d_i``.
+        X-point records with coordinates, flux, Hessian axes, and optional
+        ``d_i`` metadata.
     o_point_records : list of dict
-        O-point records with coordinates, flux, and island boundary contours.
+        O-point records with coordinates, flux, and optional island boundary
+        contours.
     """
 
     x_array, z_array, flux_function_zx = read_smoothed_flux_grid(
@@ -102,6 +105,14 @@ def find_point_records(reader, flux_file_location, points_config=None):
     x_point_records = []
     o_point_records = []
     flux_function_xz = flux_function_zx.T
+    x_selection_method = get_point_selection_method(
+        config=points_config,
+        point_kind="x",
+    )
+    o_selection_method = get_point_selection_method(
+        config=points_config,
+        point_kind="o",
+    )
 
     for k in range(len(x_coords)):
         coords = [x_coords[k], 0, z_coords[k]]
@@ -150,17 +161,18 @@ def find_point_records(reader, flux_file_location, points_config=None):
                 eigvals=eigvals,
                 eigvecs=eigvecs,
             )
-            add_ion_inertial_length(
-                reader=reader,
-                point_record=point_record,
-                points_config=points_config,
-            )
-            if point_record.get("di_m") is None:
-                logging.warning(
-                    "Skipping X point at %s because local d_i could not be computed",
-                    coord_re,
+            if x_selection_method == "physical":
+                add_ion_inertial_length(
+                    reader=reader,
+                    point_record=point_record,
+                    points_config=points_config,
                 )
-                continue
+                if point_record.get("di_m") is None:
+                    logging.warning(
+                        "Skipping X point at %s because local d_i could not be computed",
+                        coord_re,
+                    )
+                    continue
             x_point_records.append(point_record)
 
         if det_hessian > 0 and hessian[0, 0] < 0:
@@ -177,20 +189,21 @@ def find_point_records(reader, flux_file_location, points_config=None):
                 )
             )
 
-    add_o_point_island_contours(
-        o_point_records=o_point_records,
-        x_point_records=x_point_records,
-        flux_function_zx=flux_function_zx,
-        x_array=x_array,
-        z_array=z_array,
-        points_config=points_config,
-    )
+    if o_selection_method == "physical":
+        add_o_point_island_contours(
+            o_point_records=o_point_records,
+            x_point_records=x_point_records,
+            flux_function_zx=flux_function_zx,
+            x_array=x_array,
+            z_array=z_array,
+            points_config=points_config,
+        )
 
-    o_point_records = [
-        point_record
-        for point_record in o_point_records
-        if point_record.get("contour_vertices_re") is not None
-    ]
+        o_point_records = [
+            point_record
+            for point_record in o_point_records
+            if point_record.get("contour_vertices_re") is not None
+        ]
 
     return x_point_records, o_point_records
 

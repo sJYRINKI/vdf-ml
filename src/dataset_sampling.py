@@ -100,9 +100,9 @@ def create_timestep_sample_specs(
     Create VDF sample specifications for one timestep.
 
     Point classes configured under ``points`` are expanded using magnetic
-    topology. X points use Hessian-aligned boxes scaled by local ion inertial
-    length, and O points use the closed island contour built from X-point flux.
-    The ``other`` class is then filled from all VDF cells in ``points.region_re``
+    topology. Each detected X/O point can use either the physical selection
+    method or a fixed manual search box from the point-selection config. The
+    ``other`` class is then filled from all VDF cells in ``points.region_re``
     that were not already assigned to the X-point or O-point classes.
 
     Parameters
@@ -157,7 +157,10 @@ def create_timestep_sample_specs(
                 vdf_cellids=vdf_cellids,
                 vdf_coords_re=vdf_coords_re,
             )
-            sample_metadata = create_point_sample_metadata(labeled_coord)
+            sample_metadata = create_point_sample_metadata(
+                config=config,
+                point_record=labeled_coord,
+            )
         else:
             cid = get_nearest_vdf_cellid(
                 coord_re=coord_re,

@@ -154,6 +154,81 @@ def draw_point_boxes(ax, metadata_rows, box_config, box_classes):
         ax.add_patch(rectangle)
 
 
+def draw_manual_point_search_boxes(ax, metadata_rows):
+    """
+    Draw manual fixed search boxes from point-selection metadata.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes where boxes are drawn.
+    metadata_rows : pandas.DataFrame
+        Metadata rows for one timestep.
+    """
+
+    required_columns = {
+        "selection_method",
+        "point_kind",
+        "source_point_x_re",
+        "source_point_z_re",
+        "selection_box_x_half_width_re",
+        "selection_box_z_half_width_re",
+    }
+    if not required_columns.issubset(metadata_rows.columns):
+        return
+
+    box_rows = metadata_rows[
+        metadata_rows["selection_method"] == "manual"
+    ].drop_duplicates(
+        [
+            "point_kind",
+            "source_point_x_re",
+            "source_point_z_re",
+            "selection_box_x_half_width_re",
+            "selection_box_z_half_width_re",
+        ]
+    )
+    if box_rows.empty:
+        return
+
+    plotted_labels = set()
+    colors = {"x": "tab:orange", "o": "tab:cyan"}
+
+    for _, row in box_rows.iterrows():
+        values = np.asarray(
+            [
+                row["source_point_x_re"],
+                row["source_point_z_re"],
+                row["selection_box_x_half_width_re"],
+                row["selection_box_z_half_width_re"],
+            ],
+            dtype=float,
+        )
+        if np.any(np.isnan(values)):
+            continue
+
+        point_kind = row["point_kind"]
+        label = None
+        if point_kind not in plotted_labels:
+            label = f"manual {point_kind.upper()} search box"
+            plotted_labels.add(point_kind)
+
+        center_x_re, center_z_re, half_width_x_re, half_width_z_re = values
+        color = colors.get(point_kind, "tab:red")
+        rectangle = Rectangle(
+            (center_x_re - half_width_x_re, center_z_re - half_width_z_re),
+            2.0 * half_width_x_re,
+            2.0 * half_width_z_re,
+            facecolor=color,
+            edgecolor=color,
+            alpha=0.18,
+            linewidth=1.5,
+            label=label,
+            zorder=2.2,
+        )
+        ax.add_patch(rectangle)
+
+
 def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
     """
     Draw Hessian-aligned X-point search boxes used for VDF-cell selection.
@@ -189,6 +264,10 @@ def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
     half_width_1_di = float(half_width_di["eigenvector_1"])
 
     x_point_rows = metadata_rows[metadata_rows["point_kind"] == "x"]
+    if "selection_method" in x_point_rows.columns:
+        x_point_rows = x_point_rows[
+            x_point_rows["selection_method"].fillna("physical") == "physical"
+        ]
     if x_point_rows.empty:
         return
 
@@ -288,6 +367,10 @@ def draw_o_point_search_areas(
         return
 
     o_point_rows = metadata_rows[metadata_rows["point_kind"] == "o"]
+    if "selection_method" in o_point_rows.columns:
+        o_point_rows = o_point_rows[
+            o_point_rows["selection_method"].fillna("physical") == "physical"
+        ]
     if o_point_rows.empty:
         return
 

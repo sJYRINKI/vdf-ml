@@ -70,6 +70,18 @@ def get_point_cellids_by_position(config, point_record, vdf_cellids, vdf_coords_
     """
 
     point_kind = point_record["point_kind"]
+    selection_method = get_point_selection_method(
+        config=config,
+        point_kind=point_kind,
+    )
+
+    if selection_method == "manual":
+        return get_vdf_cellids_in_manual(
+            config=config,
+            point_record=point_record,
+            vdf_cellids=vdf_cellids,
+            vdf_coords_re=vdf_coords_re,
+        )
 
     if point_kind == "x":
         return get_vdf_cellids_in_hessian_di_box(
@@ -88,6 +100,163 @@ def get_point_cellids_by_position(config, point_record, vdf_cellids, vdf_coords_
         )
 
     raise ValueError(f"Unknown point kind: {point_kind}")
+
+
+def get_point_selection_method(config, point_kind):
+    """
+    Return the configured selection method for one point kind.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration or ``points`` configuration.
+    point_kind : {"x", "o"}
+        Point kind whose selection method is read.
+
+    Returns
+    -------
+    str
+        Selection method, either ``"physical"`` or ``"manual"``.
+    """
+
+    selection_config = get_point_selection_config(
+        config=config,
+        point_kind=point_kind,
+    )
+    selection_method = selection_config.get("method", "physical")
+    valid_methods = {"physical", "manual"}
+
+    if selection_method not in valid_methods:
+        raise ValueError(
+            f"Unsupported {point_kind}-point selection method: "
+            f"{selection_method}. Expected one of {sorted(valid_methods)}."
+        )
+
+    return selection_method
+
+
+def get_point_selection_config(config, point_kind):
+    """
+    Return the point-selection config for one point kind.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration or ``points`` configuration.
+    point_kind : {"x", "o"}
+        Point kind whose selection config is read.
+
+    Returns
+    -------
+    dict
+        Selection configuration for the point kind.
+    """
+
+    points_config = (config or {}).get("points", config or {})
+
+    if point_kind == "x":
+        return points_config.get("x_selection", {})
+
+    if point_kind == "o":
+        return points_config.get("o_selection", {})
+
+    raise ValueError(f"Unknown point kind: {point_kind}")
+
+
+def get_manual_config_re(config, point_kind):
+    """
+    Return manual point-box half-widths in Earth radii.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration or ``points`` configuration.
+    point_kind : {"x", "o"}
+        Point kind whose manual box is read.
+
+    Returns
+    -------
+    dict
+        Manual box half-widths with keys ``x_half_width_re``,
+        ``y_half_width_re``, and ``z_half_width_re``.
+    """
+
+    selection_config = get_point_selection_config(
+        config=config,
+        point_kind=point_kind,
+    )
+    box_config = selection_config.get("manual_re", {})
+    required_keys = ("x_half_width_re", "z_half_width_re")
+    missing_keys = [
+        key
+        for key in required_keys
+        if key not in box_config
+    ]
+
+    if missing_keys:
+        raise ValueError(
+            f"points.{point_kind}_selection.manual_re is missing "
+            f"required keys: {missing_keys}"
+        )
+
+    return {
+        "x_half_width_re": float(box_config["x_half_width_re"]),
+        "y_half_width_re": float(
+            box_config.get(
+                "y_half_width_re",
+                selection_config.get("y_half_width_re", 0.0),
+            )
+        ),
+        "z_half_width_re": float(box_config["z_half_width_re"]),
+    }
+
+
+def get_vdf_cellids_in_manual(config, point_record, vdf_cellids, vdf_coords_re):
+    """
+    Select VDF cells inside a fixed axis-aligned box around a point.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration.
+    point_record : dict
+        X-point or O-point record.
+    vdf_cellids : numpy.ndarray
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+
+    Returns
+    -------
+    dict
+        Mapping from manual position name to VDF cell ID.
+    """
+
+    if len(vdf_cellids) == 0:
+        return {}
+
+    point_kind = point_record["point_kind"]
+    box_config = get_manual_config_re(
+        config=config,
+        point_kind=point_kind,
+    )
+    half_widths_re = np.asarray(
+        [
+            box_config["x_half_width_re"],
+            box_config["y_half_width_re"],
+            box_config["z_half_width_re"],
+        ],
+        dtype=float,
+    )
+    center_re = np.asarray(point_record["coord_re"], dtype=float)
+    offsets_re = vdf_coords_re - center_re
+
+    selected = np.all(np.abs(offsets_re) <= half_widths_re, axis=1)
+
+    return {
+        f"{point_kind}_box_{index:04d}": int(cid)
+        for index, cid in enumerate(vdf_cellids[selected])
+    }
 
 
 def get_vdf_cellids_in_hessian_di_box(config, point_record, vdf_cellids, vdf_coords_re):
@@ -114,7 +283,10 @@ def get_vdf_cellids_in_hessian_di_box(config, point_record, vdf_cellids, vdf_coo
     if len(vdf_cellids) == 0:
         return {}
 
-    x_selection = config.get("points", {}).get("x_selection", {})
+    x_selection = get_point_selection_config(
+        config=config,
+        point_kind="x",
+    )
     half_width_di = x_selection.get("half_width_di", {})
     half_widths_m = np.asarray(
         [
@@ -171,7 +343,10 @@ def get_vdf_cellids_in_flux_contour(config, point_record, vdf_cellids, vdf_coord
     if contour_vertices_re is None:
         return {}
 
-    o_selection = config.get("points", {}).get("o_selection", {})
+    o_selection = get_point_selection_config(
+        config=config,
+        point_kind="o",
+    )
     y_half_width_re = float(o_selection.get("y_half_width_re", 0.0))
     center_re = np.asarray(point_record["coord_re"], dtype=float)
     offsets_re = vdf_coords_re - center_re
@@ -188,12 +363,14 @@ def get_vdf_cellids_in_flux_contour(config, point_record, vdf_cellids, vdf_coord
     }
 
 
-def create_point_sample_metadata(point_record):
+def create_point_sample_metadata(config, point_record):
     """
     Create metadata fields for a point-selected sample.
 
     Parameters
     ----------
+    config : dict
+        Dataset configuration.
     point_record : dict
         Detected X/O point record.
 
@@ -203,21 +380,40 @@ def create_point_sample_metadata(point_record):
         Metadata fields describing the source point and selection method.
     """
 
+    point_kind = point_record["point_kind"]
     coord_re = point_record["coord_re"]
+    selection_method = get_point_selection_method(
+        config=config,
+        point_kind=point_kind,
+    )
     metadata = {
-        "point_kind": point_record["point_kind"],
+        "point_kind": point_kind,
+        "selection_method": selection_method,
         "source_point_x_re": float(coord_re[0]),
         "source_point_y_re": float(coord_re[1]),
         "source_point_z_re": float(coord_re[2]),
         "source_point_flux": float(point_record["flux"]),
     }
 
-    if point_record["point_kind"] == "x":
+    if selection_method == "manual":
+        box_config = get_manual_config_re(
+            config=config,
+            point_kind=point_kind,
+        )
+        metadata.update(
+            {
+                "selection_box_x_half_width_re": box_config["x_half_width_re"],
+                "selection_box_y_half_width_re": box_config["y_half_width_re"],
+                "selection_box_z_half_width_re": box_config["z_half_width_re"],
+            }
+        )
+
+    if point_kind == "x":
         eigvecs = np.asarray(point_record["eigvecs"], dtype=float)
         metadata.update(
             {
-                "rho": float(point_record["rho"]),
-                "di_re": float(point_record["di_re"]),
+                "rho": optional_float(point_record.get("rho")),
+                "di_re": optional_float(point_record.get("di_re")),
                 "hessian_e0_x": float(eigvecs[0, 0]),
                 "hessian_e0_z": float(eigvecs[1, 0]),
                 "hessian_e1_x": float(eigvecs[0, 1]),
@@ -225,15 +421,34 @@ def create_point_sample_metadata(point_record):
             }
         )
 
-    if point_record["point_kind"] == "o":
+    if point_kind == "o":
         metadata.update(
             {
-                "boundary_flux": float(point_record["boundary_flux"]),
-                "search_flux": float(point_record["search_flux"]),
-                "core_fraction": float(point_record["core_fraction"]),
+                "boundary_flux": optional_float(point_record.get("boundary_flux")),
+                "search_flux": optional_float(point_record.get("search_flux")),
+                "core_fraction": optional_float(point_record.get("core_fraction")),
             }
         )
 
     return metadata
 
 
+def optional_float(value):
+    """
+    Return a float value or ``nan`` for missing optional metadata.
+
+    Parameters
+    ----------
+    value : object
+        Value to convert.
+
+    Returns
+    -------
+    float
+        Converted value, or ``nan`` when the value is missing.
+    """
+
+    if value is None:
+        return float("nan")
+
+    return float(value)
