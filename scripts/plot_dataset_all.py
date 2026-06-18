@@ -16,7 +16,7 @@ from src.dataset_plot import (
     create_colormap_plot_jobs,
     create_vdf_plot_jobs,
     plot_labeled_colormap,
-    plot_vdf_xz_slice,
+    plot_vdf_sample_from_dataset,
     run_plot_jobs,
 )
 from src.timesteps import create_timestep_path
@@ -66,7 +66,7 @@ def main(config_path, timestep):
         vdflim=vdflim,
     )
     run_plot_jobs(
-        plot_function=plot_vdf_xz_slice,
+        plot_function=plot_vdf_sample_from_dataset,
         plot_jobs=vdf_jobs,
         n_jobs=n_jobs,
     )

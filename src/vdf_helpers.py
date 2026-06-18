@@ -399,10 +399,7 @@ def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs")
         vdf_shape=vdf_shape,
     )
 
-    threshold = get_min_value_from_file(
-        file_location=file_location,
-        cid=cid
-    )
+    threshold = float(reader.read_variable("MinValue", int(cid)))
 
     return extent, dv, threshold
 

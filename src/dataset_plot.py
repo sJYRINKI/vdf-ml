@@ -21,6 +21,9 @@ from src.colormap_helpers import (
 from src.vdf_helpers import get_vdf_plot_parameters_from_file
 
 
+_MEMMAP_CACHE = {}
+
+
 def add_dataset_sampling_plot_config(colormap_config, dataset_config_path):
     """
     Add dataset sampling settings needed for colormap overlays.
@@ -112,12 +115,12 @@ def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
 
 def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
     """
-    Create plot jobs for all saved VDF samples.
+    Create lightweight plot jobs for all saved VDF samples.
 
     Parameters
     ----------
     X : numpy.ndarray
-        VDF sample array.
+        Memory-mapped VDF sample array.
     y : numpy.ndarray
         Integer labels for VDF samples.
     metadata : pandas.DataFrame
@@ -130,15 +133,17 @@ def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
     Returns
     -------
     list of dict
-        Keyword argument dictionaries for ``plot_vdf_xz_slice``.
+        Keyword argument dictionaries for ``plot_vdf_sample_from_dataset``.
     """
 
+    X_path = get_memmap_path(X, "X")
     class_frame_counts = {}
     plot_parameter_cache = {}
     vdf_jobs = []
+    vdf_shape = tuple(X.shape[1:])
 
     for sample_index in range(X.shape[0]):
-        metadata_row = metadata.iloc[sample_index]
+        metadata_row = metadata.iloc[sample_index].to_dict()
         class_name = metadata_row["class_name"]
         file_location = metadata_row["file_location"]
         cid = int(metadata_row["cid"])
@@ -147,7 +152,6 @@ def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
             class_frame_counts[class_name] = 0
 
         class_frame_index = class_frame_counts[class_name]
-        vdf_shape = tuple(X[sample_index].shape)
         cache_key = (file_location, cid, vdf_shape)
 
         if cache_key not in plot_parameter_cache:
@@ -164,8 +168,9 @@ def create_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
 
         vdf_jobs.append(
             {
-                "vdf": X[sample_index],
-                "y_label": y[sample_index],
+                "X_path": X_path,
+                "sample_index": int(sample_index),
+                "y_label": int(y[sample_index]),
                 "metadata_row": metadata_row,
                 "extent": extent,
                 "output_path": output_path,
@@ -301,6 +306,103 @@ def plot_labeled_colormap(
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def get_memmap_path(array, array_name):
+    """
+    Return the backing filename for a memory-mapped array.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        Array expected to be backed by a ``.npy`` memmap.
+    array_name : str
+        Human-readable array name used in error messages.
+
+    Returns
+    -------
+    str
+        Memmap backing filename.
+    """
+
+    filename = getattr(array, "filename", None)
+    if filename is None:
+        raise ValueError(f"{array_name} must be loaded as a memory-mapped array")
+
+    return str(filename)
+
+
+def load_memmap_array(array_path):
+    """
+    Load and cache a read-only memory-mapped array.
+
+    Parameters
+    ----------
+    array_path : str
+        Path to a ``.npy`` array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Read-only memory-mapped array.
+    """
+
+    array_path = str(array_path)
+    array = _MEMMAP_CACHE.get(array_path)
+    if array is None:
+        array = np.load(array_path, mmap_mode="r")
+        _MEMMAP_CACHE[array_path] = array
+
+    return array
+
+
+def plot_vdf_sample_from_dataset(
+        X_path,
+        sample_index,
+        y_label,
+        metadata_row,
+        extent,
+        output_path,
+        dv,
+        threshold,
+        vdflim=2e6,
+):
+    """
+    Plot and save one VDF sample loaded from a memory-mapped dataset.
+
+    Parameters
+    ----------
+    X_path : str
+        Path to the saved VDF ``.npy`` array.
+    sample_index : int
+        Sample index to plot.
+    y_label : int
+        Integer label.
+    metadata_row : dict
+        Metadata row for the sample.
+    extent : array-like of float
+        Velocity mesh extent ``[vxmin, vymin, vzmin, vxmax, vymax, vzmax]``.
+    output_path : str
+        Output PNG path.
+    dv : float
+        Velocity grid cell size in m/s.
+    threshold : float
+        VDF threshold before multiplying by ``dv``.
+    vdflim : float, optional
+        Visible velocity limit in m/s.
+    """
+
+    X = load_memmap_array(X_path)
+    plot_vdf_xz_slice(
+        vdf=X[int(sample_index)],
+        y_label=y_label,
+        metadata_row=metadata_row,
+        extent=extent,
+        output_path=output_path,
+        dv=dv,
+        threshold=threshold,
+        vdflim=vdflim,
+    )
 
 
 def plot_vdf_xz_slice(
