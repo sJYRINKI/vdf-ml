@@ -192,7 +192,7 @@ def draw_manual_point_search_boxes(ax, metadata_rows):
         return
 
     plotted_labels = set()
-    colors = {"x": "tab:orange", "o": "tab:cyan"}
+    colors = {"x": "tab:blue", "o": "tab:blue"}
 
     for _, row in box_rows.iterrows():
         values = np.asarray(
@@ -320,8 +320,8 @@ def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
         polygon = Polygon(
             vertices,
             closed=True,
-            facecolor="tab:orange",
-            edgecolor="tab:orange",
+            facecolor="tab:blue",
+            edgecolor="tab:blue",
             alpha=0.18,
             linewidth=1.5,
             label=label,
@@ -415,8 +415,8 @@ def draw_o_point_search_areas(
         polygon = Polygon(
             vertices_re,
             closed=True,
-            facecolor="tab:cyan",
-            edgecolor="tab:cyan",
+            facecolor="tab:blue",
+            edgecolor="tab:blue",
             alpha=0.18,
             linewidth=1.5,
             label=label,

@@ -251,7 +251,14 @@ def get_vdf_cellids_in_manual(config, point_record, vdf_cellids, vdf_coords_re):
     center_re = np.asarray(point_record["coord_re"], dtype=float)
     offsets_re = vdf_coords_re - center_re
 
-    selected = np.all(np.abs(offsets_re) <= half_widths_re, axis=1)
+    active_axes = half_widths_re > 0
+    if np.any(active_axes):
+        selected = np.all(
+            np.abs(offsets_re[:, active_axes]) <= half_widths_re[active_axes],
+            axis=1,
+        )
+    else:
+        selected = np.ones(len(vdf_cellids), dtype=bool)
 
     return {
         f"{point_kind}_box_{index:04d}": int(cid)
@@ -306,7 +313,10 @@ def get_vdf_cellids_in_hessian_di_box(config, point_record, vdf_cellids, vdf_coo
     selected = (
         (np.abs(projections_m[:, 0]) <= half_widths_m[0])
         & (np.abs(projections_m[:, 1]) <= half_widths_m[1])
-        & (np.abs(offsets_re[:, 1]) <= y_half_width_re)
+        & (
+            (y_half_width_re <= 0)
+            | (np.abs(offsets_re[:, 1]) <= y_half_width_re)
+        )
     )
 
     return {
@@ -354,7 +364,10 @@ def get_vdf_cellids_in_flux_contour(config, point_record, vdf_cellids, vdf_coord
     contour_path = MplPath(np.asarray(contour_vertices_re, dtype=float))
     selected = (
         contour_path.contains_points(vdf_coords_re[:, [0, 2]])
-        & (np.abs(offsets_re[:, 1]) <= y_half_width_re)
+        & (
+            (y_half_width_re <= 0)
+            | (np.abs(offsets_re[:, 1]) <= y_half_width_re)
+        )
     )
 
     return {
