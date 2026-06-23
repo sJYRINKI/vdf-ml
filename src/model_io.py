@@ -75,8 +75,8 @@ def load_pytorch_multilayer_perceptron_classifier_model(model_dir):
 
     Returns
     -------
-    model : src.pytorch_mlp.PyTorchClassifierAdapter
-        Trained PyTorch classifier with a NumPy prediction interface.
+    model : src.pytorch_mlp.PyTorchMLPClassifier
+        Trained PyTorch classifier.
     preprocessing : numpy.lib.npyio.NpzFile
         Saved preprocessing values.
     """
