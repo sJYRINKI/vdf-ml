@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 
 import joblib
@@ -129,7 +130,8 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
     learning_rate_init = float(model_config.get("learning_rate_init", 0.001))
     max_iter = int(model_config.get("max_iter", 300))
     early_stopping = bool(model_config.get("early_stopping", True))
-    validation_fraction = float(model_config.get("validation_fraction", 0.15))
+    n_iter_no_change = int(model_config.get("n_iter_no_change", 10))
+    tol = float(model_config.get("tol", 1e-4))
     random_state = int(model_config.get("random_state", 1234))
 
     estimator = MLPClassifier(
@@ -139,9 +141,8 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
         alpha=alpha,
         batch_size=model_batch_size,
         learning_rate_init=learning_rate_init,
-        max_iter=max_iter,
-        early_stopping=early_stopping,
-        validation_fraction=validation_fraction,
+        max_iter=1,
+        early_stopping=False,
         random_state=random_state,
     )
 
@@ -156,8 +157,15 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
     for label, class_name in zip(class_labels, class_names):
         print(f"  {label}: {class_name}")
 
-    model = make_pipeline(StandardScaler(), estimator)
-    model.fit(data["X_train_features"], data["y_train"])
+    model, training_result = _fit_sklearn_mlp_with_timestep_validation(
+        estimator=estimator,
+        data=data,
+        class_labels=class_labels,
+        max_iter=max_iter,
+        early_stopping=early_stopping,
+        n_iter_no_change=n_iter_no_change,
+        tol=tol,
+    )
 
     results = evaluate_model(
         model=model,
@@ -170,6 +178,8 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
     print("\n")
     print(f"Train accuracy: {results['train_accuracy']}")
     print("\n")
+    print(f"Validation accuracy: {results['validation_accuracy']}")
+    print("\n")
     print(f"Test accuracy: {results['test_accuracy']}")
     print("\n")
     print(results["print_report"])
@@ -177,10 +187,13 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
     predictions = create_predictions(
         metadata=data["metadata"],
         train_indices=data["train_indices"],
+        validation_indices=data["validation_indices"],
         test_indices=data["test_indices"],
         y_train=data["y_train"],
+        y_validation=data["y_validation"],
         y_test=data["y_test"],
         y_train_pred=results["y_train_pred"],
+        y_validation_pred=results["y_validation_pred"],
         y_test_pred=results["y_test_pred"],
     )
     predictions["true_class_name"] = predictions["true_label"].map(class_names_by_label)
@@ -200,6 +213,9 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
             "log_eps": data["log_eps"],
             "batch_size": data["batch_size"],
             "n_jobs": data["n_jobs"],
+            "train_fraction": data["train_fraction"],
+            "validation_fraction": data["validation_fraction"],
+            "gap_timesteps": data["gap_timesteps"],
             "class_labels": class_labels,
             "class_names": np.asarray(class_names),
         },
@@ -225,13 +241,122 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
                 f"Learning rate init: {learning_rate_init}",
                 f"Max iterations: {max_iter}",
                 f"Early stopping: {early_stopping}",
-                f"Validation fraction: {validation_fraction}",
+                f"Iterations without improvement: {n_iter_no_change}",
+                f"Tolerance: {tol}",
                 f"Classifier classes: {list(fitted_classifier.classes_)}",
-                f"Iterations: {fitted_classifier.n_iter_}",
+                f"Iterations: {training_result['n_epochs']}",
+                f"Best iteration: {training_result['best_epoch']}",
+                "Best validation accuracy: "
+                f"{training_result['best_validation_accuracy']}",
                 f"Final loss: {fitted_classifier.loss_}",
             ],
         ),
     )
+
+
+def _fit_sklearn_mlp_with_timestep_validation(
+    estimator,
+    data,
+    class_labels,
+    max_iter,
+    early_stopping,
+    n_iter_no_change,
+    tol,
+):
+    """
+    Fit a scikit-learn MLP using the timestep validation partition.
+
+    Parameters
+    ----------
+    estimator : sklearn.neural_network.MLPClassifier
+        Unfitted classifier.
+    data : dict
+        Training data returned by ``load_training_data``.
+    class_labels : array-like of int
+        Configured project labels.
+    max_iter : int
+        Maximum number of training epochs.
+    early_stopping : bool
+        Whether to stop based on validation accuracy.
+    n_iter_no_change : int
+        Epochs without sufficient improvement before stopping.
+    tol : float
+        Minimum validation-accuracy improvement that resets patience.
+
+    Returns
+    -------
+    model : sklearn.pipeline.Pipeline
+        Fitted scaler and classifier pipeline.
+    training_result : dict
+        Epoch count and best validation metrics.
+    """
+
+    if estimator.solver not in {"adam", "sgd"}:
+        raise ValueError(
+            "Timestep-validation MLP training supports only the adam and "
+            "sgd solvers"
+        )
+    if max_iter <= 0:
+        raise ValueError("max_iter must be positive")
+    if n_iter_no_change <= 0:
+        raise ValueError("n_iter_no_change must be positive")
+    if tol < 0.0:
+        raise ValueError("tol must be non-negative")
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(data["X_train_features"])
+    X_validation_scaled = scaler.transform(
+        data["X_validation_features"]
+    )
+
+    best_estimator = None
+    best_validation_accuracy = None
+    best_epoch = 0
+    epochs_without_improvement = 0
+
+    for epoch in range(1, max_iter + 1):
+        if epoch == 1:
+            estimator.partial_fit(
+                X_train_scaled,
+                data["y_train"],
+                classes=class_labels,
+            )
+        else:
+            estimator.partial_fit(X_train_scaled, data["y_train"])
+
+        validation_accuracy = estimator.score(
+            X_validation_scaled,
+            data["y_validation"],
+        )
+        significantly_improved = (
+            best_validation_accuracy is None
+            or validation_accuracy > best_validation_accuracy + tol
+        )
+        if (
+            best_validation_accuracy is None
+            or validation_accuracy > best_validation_accuracy
+        ):
+            best_validation_accuracy = validation_accuracy
+            best_epoch = epoch
+            if early_stopping:
+                best_estimator = deepcopy(estimator)
+
+        if significantly_improved:
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if early_stopping and epochs_without_improvement >= n_iter_no_change:
+            break
+
+    if best_estimator is not None:
+        estimator = best_estimator
+
+    return make_pipeline(scaler, estimator), {
+        "n_epochs": epoch,
+        "best_epoch": best_epoch,
+        "best_validation_accuracy": best_validation_accuracy,
+    }
 
 
 def train_binary_classifier(
@@ -282,6 +407,8 @@ def train_binary_classifier(
     print("\n")
     print(f"Train accuracy: {results['train_accuracy']}")
     print("\n")
+    print(f"Validation accuracy: {results['validation_accuracy']}")
+    print("\n")
     print(f"Test accuracy: {results['test_accuracy']}")
     print("\n")
     print(results["print_report"])
@@ -289,10 +416,13 @@ def train_binary_classifier(
     predictions = create_predictions(
         metadata=data["metadata"],
         train_indices=data["train_indices"],
+        validation_indices=data["validation_indices"],
         test_indices=data["test_indices"],
         y_train=data["y_train"],
+        y_validation=data["y_validation"],
         y_test=data["y_test"],
         y_train_pred=results["y_train_pred"],
+        y_validation_pred=results["y_validation_pred"],
         y_test_pred=results["y_test_pred"],
     )
 
@@ -307,6 +437,9 @@ def train_binary_classifier(
             "log_eps": data["log_eps"],
             "batch_size": data["batch_size"],
             "n_jobs": data["n_jobs"],
+            "train_fraction": data["train_fraction"],
+            "validation_fraction": data["validation_fraction"],
+            "gap_timesteps": data["gap_timesteps"],
         },
         predictions=predictions,
         metrics_text=create_metrics_text(
@@ -363,22 +496,41 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     n_jobs = int(features_config.get("n_jobs", 1))
     log_eps = float(features_config.get("log_eps", 1e-30))
 
+    split_config = config.get("split", {})
+    train_fraction = float(split_config.get("train_fraction", 0.6))
+    validation_fraction = float(split_config.get("validation_fraction", 0.2))
+    gap_timesteps = int(split_config.get("gap_timesteps", 10))
+
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
 
     print(X.shape)
     print(y.shape)
     print(metadata.shape)
 
-    train_indices, test_indices, train_timesteps, test_timesteps = split_by_timestep(
-        metadata=metadata
+    (
+        train_indices,
+        validation_indices,
+        test_indices,
+        train_timesteps,
+        validation_timesteps,
+        test_timesteps,
+        train_validation_gap,
+        validation_test_gap,
+    ) = split_by_timestep(
+        metadata=metadata,
+        train_fraction=train_fraction,
+        validation_fraction=validation_fraction,
+        gap_timesteps=gap_timesteps,
     )
 
     if target_kind == "lobe_vs_rest":
         target = create_lobe_vs_rest_labels(metadata)
         y_train = target[train_indices]
+        y_validation = target[validation_indices]
         y_test = target[test_indices]
     elif target_kind == "multiclass":
         y_train = np.asarray(y[train_indices], dtype=int)
+        y_validation = np.asarray(y[validation_indices], dtype=int)
         y_test = np.asarray(y[test_indices], dtype=int)
     else:
         raise ValueError(f"Unknown target kind: {target_kind}")
@@ -387,6 +539,16 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     X_train_features = create_features_in_batches(
         X=X,
         indices=train_indices,
+        downsample_factor=downsample_factor,
+        batch_size=batch_size,
+        n_jobs=n_jobs,
+        log_eps=log_eps,
+    )
+
+    print("Creating validation features")
+    X_validation_features = create_features_in_batches(
+        X=X,
+        indices=validation_indices,
         downsample_factor=downsample_factor,
         batch_size=batch_size,
         n_jobs=n_jobs,
@@ -404,6 +566,7 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     )
 
     print(f"Train features: {X_train_features.shape}")
+    print(f"Validation features: {X_validation_features.shape}")
     print(f"Test features: {X_test_features.shape}")
 
     return {
@@ -413,23 +576,32 @@ def load_training_data(config, dataset_id, model_id, target_kind):
         "dataset_dir": dataset_dir,
         "output_dir": output_dir,
         "train_indices": train_indices,
+        "validation_indices": validation_indices,
         "test_indices": test_indices,
         "train_timesteps": train_timesteps,
+        "validation_timesteps": validation_timesteps,
         "test_timesteps": test_timesteps,
+        "train_validation_gap": train_validation_gap,
+        "validation_test_gap": validation_test_gap,
         "y_train": y_train,
+        "y_validation": y_validation,
         "y_test": y_test,
         "X_train_features": X_train_features,
+        "X_validation_features": X_validation_features,
         "X_test_features": X_test_features,
         "downsample_factor": downsample_factor,
         "batch_size": batch_size,
         "n_jobs": n_jobs,
         "log_eps": log_eps,
+        "train_fraction": train_fraction,
+        "validation_fraction": validation_fraction,
+        "gap_timesteps": gap_timesteps,
     }
 
 
 def evaluate_model(model, data, report_labels=None, target_names=None):
     """
-    Evaluate a fitted model on train and test splits.
+    Evaluate a fitted model on train, validation, and test splits.
 
     Parameters
     ----------
@@ -449,11 +621,16 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
     """
 
     y_train_pred = model.predict(data["X_train_features"])
+    y_validation_pred = model.predict(data["X_validation_features"])
     y_test_pred = model.predict(data["X_test_features"])
 
     train_accuracy = accuracy_score(data["y_train"], y_train_pred)
+    validation_accuracy = accuracy_score(
+        data["y_validation"], y_validation_pred
+    )
     test_accuracy = accuracy_score(data["y_test"], y_test_pred)
     train_error = 1.0 - train_accuracy
+    validation_error = 1.0 - validation_accuracy
     test_error = 1.0 - test_accuracy
     generalization_gap = test_error - train_error
 
@@ -482,10 +659,13 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
 
     return {
         "y_train_pred": y_train_pred,
+        "y_validation_pred": y_validation_pred,
         "y_test_pred": y_test_pred,
         "train_accuracy": train_accuracy,
+        "validation_accuracy": validation_accuracy,
         "test_accuracy": test_accuracy,
         "train_error": train_error,
+        "validation_error": validation_error,
         "test_error": test_error,
         "generalization_gap": generalization_gap,
         "bias_proxy": train_error,
@@ -499,14 +679,17 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
 def create_predictions(
     metadata,
     train_indices,
+    validation_indices,
     test_indices,
     y_train,
+    y_validation,
     y_test,
     y_train_pred,
+    y_validation_pred,
     y_test_pred,
 ):
     """
-    Create train and test prediction rows.
+    Create train, validation, and test prediction rows.
 
     Parameters
     ----------
@@ -514,14 +697,20 @@ def create_predictions(
         Dataset metadata.
     train_indices : numpy.ndarray
         Training sample indices.
+    validation_indices : numpy.ndarray
+        Validation sample indices.
     test_indices : numpy.ndarray
         Test sample indices.
     y_train : numpy.ndarray
         Training labels.
+    y_validation : numpy.ndarray
+        Validation labels.
     y_test : numpy.ndarray
         Test labels.
     y_train_pred : numpy.ndarray
         Training predictions.
+    y_validation_pred : numpy.ndarray
+        Validation predictions.
     y_test_pred : numpy.ndarray
         Test predictions.
 
@@ -538,6 +727,13 @@ def create_predictions(
         y_pred=y_train_pred,
         split_name="train",
     )
+    validation_predictions = create_predictions_dataframe(
+        metadata=metadata,
+        indices=validation_indices,
+        y_true=y_validation,
+        y_pred=y_validation_pred,
+        split_name="validation",
+    )
     test_predictions = create_predictions_dataframe(
         metadata=metadata,
         indices=test_indices,
@@ -547,7 +743,7 @@ def create_predictions(
     )
 
     return pd.concat(
-        [train_predictions, test_predictions],
+        [train_predictions, validation_predictions, test_predictions],
         ignore_index=True,
     )
 
@@ -673,10 +869,19 @@ def create_metrics_text(
         f"Dataset directory: {data['dataset_dir']}",
         f"Raw dataset shape: {data['X'].shape}",
         f"Train feature shape: {data['X_train_features'].shape}",
+        f"Validation feature shape: {data['X_validation_features'].shape}",
         f"Test feature shape: {data['X_test_features'].shape}",
         f"Train samples: {len(data['train_indices'])}",
+        f"Validation samples: {len(data['validation_indices'])}",
         f"Test samples: {len(data['test_indices'])}",
         f"Feature extraction jobs: {data['n_jobs']}",
+        "Train fraction of usable timesteps: "
+        f"{data['train_fraction']}",
+        "Validation fraction of usable timesteps: "
+        f"{data['validation_fraction']}",
+        "Test fraction of usable timesteps: "
+        f"{1.0 - data['train_fraction'] - data['validation_fraction']}",
+        f"Gap timesteps per boundary: {data['gap_timesteps']}",
     ]
 
     if target_line is not None:
@@ -684,16 +889,26 @@ def create_metrics_text(
 
     lines.extend(
         [
-            f"Train timesteps: {data['train_timesteps'][0]} ... {data['train_timesteps'][-1]}",
-            f"Test timesteps: {data['test_timesteps'][0]} ... {data['test_timesteps'][-1]}",
+            "Train timesteps: "
+            f"{_format_timestep_range(data['train_timesteps'])}",
+            "Train-validation gap: "
+            f"{_format_timestep_range(data['train_validation_gap'])}",
+            "Validation timesteps: "
+            f"{_format_timestep_range(data['validation_timesteps'])}",
+            "Validation-test gap: "
+            f"{_format_timestep_range(data['validation_test_gap'])}",
+            "Test timesteps: "
+            f"{_format_timestep_range(data['test_timesteps'])}",
         ]
     )
     lines.extend(extra_lines or [])
     lines.extend(
         [
             f"Train accuracy: {results['train_accuracy']}",
+            f"Validation accuracy: {results['validation_accuracy']}",
             f"Test accuracy: {results['test_accuracy']}",
             f"Train error: {results['train_error']}",
+            f"Validation error: {results['validation_error']}",
             f"Test error: {results['test_error']}",
             f"Generalization gap: {results['generalization_gap']}",
             f"Bias proxy: {results['bias_proxy']}",
@@ -711,3 +926,11 @@ def create_metrics_text(
     )
 
     return "\n".join(lines)
+
+
+def _format_timestep_range(timesteps):
+    if len(timesteps) == 0:
+        return "none"
+    if len(timesteps) == 1:
+        return str(timesteps[0])
+    return f"{timesteps[0]} ... {timesteps[-1]}"

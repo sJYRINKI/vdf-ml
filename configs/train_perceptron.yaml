@@ -1,6 +1,11 @@
 dataset_dir: data/train/timesteps_{dataset_id}
 output_dir: data/models/perceptron/{model_id}
 
+split:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  gap_timesteps: 10
+
 features:
   downsample_factor: 8
   batch_size: 512

@@ -3,7 +3,6 @@ import random
 
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
@@ -223,7 +222,6 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
     learning_rate_init = float(model_config.get("learning_rate_init", 0.001))
     max_iter = int(model_config.get("max_iter", 300))
     early_stopping = bool(model_config.get("early_stopping", True))
-    validation_fraction = float(model_config.get("validation_fraction", 0.15))
     n_iter_no_change = int(model_config.get("n_iter_no_change", 10))
     tol = float(model_config.get("tol", 1e-4))
     random_state = int(model_config.get("random_state", 1234))
@@ -238,8 +236,6 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         alpha=alpha,
         learning_rate_init=learning_rate_init,
         max_iter=max_iter,
-        early_stopping=early_stopping,
-        validation_fraction=validation_fraction,
         n_iter_no_change=n_iter_no_change,
         tol=tol,
         prediction_batch_size=prediction_batch_size,
@@ -252,21 +248,20 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         target_kind="multiclass",
     )
     encoded_y_train = _encode_labels(data["y_train"], class_labels)
+    encoded_y_validation = _encode_labels(
+        data["y_validation"], class_labels
+    )
     _validate_dataset_labels(
         y_train=data["y_train"],
+        y_validation=data["y_validation"],
         y_test=data["y_test"],
         class_labels=class_labels,
     )
 
-    fit_indices, validation_indices = _create_validation_split(
-        encoded_y_train=encoded_y_train,
-        early_stopping=early_stopping,
-        validation_fraction=validation_fraction,
-        random_state=random_state,
-    )
+    fit_indices = np.arange(len(encoded_y_train), dtype=int)
     model_batch_size = _resolve_batch_size(
         configured_batch_size=configured_batch_size,
-        n_samples=len(fit_indices),
+        n_samples=len(encoded_y_train),
     )
 
     scaler = StandardScaler()
@@ -298,13 +293,15 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         features=data["X_train_features"],
         encoded_targets=encoded_y_train,
         fit_indices=fit_indices,
-        validation_indices=validation_indices,
+        validation_features=data["X_validation_features"],
+        encoded_validation_targets=encoded_y_validation,
         device=device,
         batch_size=model_batch_size,
         prediction_batch_size=prediction_batch_size,
         learning_rate_init=learning_rate_init,
         alpha=alpha,
         max_iter=max_iter,
+        early_stopping=early_stopping,
         tol=tol,
         n_iter_no_change=n_iter_no_change,
         random_state=random_state,
@@ -327,6 +324,8 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
     print("\n")
     print(f"Train accuracy: {results['train_accuracy']}")
     print("\n")
+    print(f"Validation accuracy: {results['validation_accuracy']}")
+    print("\n")
     print(f"Test accuracy: {results['test_accuracy']}")
     print("\n")
     print(results["print_report"])
@@ -334,10 +333,13 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
     predictions = create_predictions(
         metadata=data["metadata"],
         train_indices=data["train_indices"],
+        validation_indices=data["validation_indices"],
         test_indices=data["test_indices"],
         y_train=data["y_train"],
+        y_validation=data["y_validation"],
         y_test=data["y_test"],
         y_train_pred=results["y_train_pred"],
+        y_validation_pred=results["y_validation_pred"],
         y_test_pred=results["y_test_pred"],
     )
     predictions["true_class_name"] = predictions["true_label"].map(
@@ -373,7 +375,6 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         f"Learning rate init: {learning_rate_init}",
         f"Max iterations: {max_iter}",
         f"Early stopping: {early_stopping}",
-        f"Validation fraction: {validation_fraction}",
         f"Iterations without improvement: {n_iter_no_change}",
         f"Tolerance: {tol}",
         f"Random state: {random_state}",
@@ -400,6 +401,9 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
             "log_eps": data["log_eps"],
             "batch_size": data["batch_size"],
             "n_jobs": data["n_jobs"],
+            "train_fraction": data["train_fraction"],
+            "validation_fraction": data["validation_fraction"],
+            "gap_timesteps": data["gap_timesteps"],
             "class_labels": class_labels,
             "class_names": np.asarray(class_names),
         },
@@ -523,13 +527,15 @@ def _fit_model(
     features,
     encoded_targets,
     fit_indices,
-    validation_indices,
+    validation_features,
+    encoded_validation_targets,
     device,
     batch_size,
     prediction_batch_size,
     learning_rate_init,
     alpha,
     max_iter,
+    early_stopping,
     tol,
     n_iter_no_change,
     random_state,
@@ -602,13 +608,12 @@ def _fit_model(
 
         final_training_loss = float(total_loss.cpu()) / n_processed
 
-        if len(validation_indices) > 0:
+        if early_stopping:
             validation_probabilities = _predict_probabilities(
                 model=model,
-                features=features,
+                features=validation_features,
                 device=device,
                 batch_size=prediction_batch_size,
-                indices=validation_indices,
             )
             validation_predictions = np.argmax(
                 validation_probabilities,
@@ -617,7 +622,7 @@ def _fit_model(
             validation_accuracy = float(
                 np.mean(
                     validation_predictions
-                    == encoded_targets[validation_indices]
+                    == encoded_validation_targets
                 )
             )
             significantly_improved = (
@@ -709,32 +714,6 @@ def _predict_probabilities(
     return np.concatenate(probability_batches, axis=0)
 
 
-def _create_validation_split(
-    encoded_y_train,
-    early_stopping,
-    validation_fraction,
-    random_state,
-):
-    sample_indices = np.arange(len(encoded_y_train), dtype=int)
-    if not early_stopping:
-        return sample_indices, np.empty(0, dtype=int)
-
-    try:
-        fit_indices, validation_indices = train_test_split(
-            sample_indices,
-            test_size=validation_fraction,
-            random_state=random_state,
-            stratify=encoded_y_train,
-        )
-    except ValueError as error:
-        raise ValueError(
-            "Could not create a stratified validation split. Check that each "
-            "configured class has enough training samples."
-        ) from error
-
-    return np.asarray(fit_indices), np.asarray(validation_indices)
-
-
 def _encode_labels(labels, class_labels):
     label_to_index = {
         int(label): class_index
@@ -751,11 +730,11 @@ def _encode_labels(labels, class_labels):
         ) from error
 
 
-def _validate_dataset_labels(y_train, y_test, class_labels):
+def _validate_dataset_labels(y_train, y_validation, y_test, class_labels):
     configured_labels = set(int(label) for label in class_labels)
     observed_labels = set(
         int(label)
-        for label in np.concatenate((y_train, y_test))
+        for label in np.concatenate((y_train, y_validation, y_test))
     )
     unknown_labels = observed_labels - configured_labels
     if unknown_labels:
@@ -780,8 +759,6 @@ def _validate_training_config(
     alpha,
     learning_rate_init,
     max_iter,
-    early_stopping,
-    validation_fraction,
     n_iter_no_change,
     tol,
     prediction_batch_size,
@@ -798,8 +775,6 @@ def _validate_training_config(
         raise ValueError("learning_rate_init must be positive")
     if max_iter <= 0:
         raise ValueError("max_iter must be positive")
-    if early_stopping and not 0.0 < validation_fraction < 1.0:
-        raise ValueError("validation_fraction must be between zero and one")
     if n_iter_no_change <= 0:
         raise ValueError("n_iter_no_change must be positive")
     if tol < 0.0:
