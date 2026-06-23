@@ -581,20 +581,53 @@ def save_training_outputs(
 
     output_dir = Path(output_dir)
     model_path = output_dir / model_filename
+    metrics_path = output_dir / "metrics.txt"
+
+    joblib.dump(model, model_path)
+
+    save_training_artifacts(
+        output_dir=output_dir,
+        preprocessing_values=preprocessing_values,
+        predictions=predictions,
+        metrics_text=metrics_text,
+    )
+
+    print(model_path)
+    print(metrics_path)
+    print(predictions)
+
+
+def save_training_artifacts(
+    output_dir,
+    preprocessing_values,
+    predictions,
+    metrics_text,
+):
+    """
+    Save preprocessing metadata, predictions, and evaluation metrics.
+
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path
+        Directory where training artifacts are saved.
+    preprocessing_values : dict
+        Values saved to ``preprocessing.npz``.
+    predictions : pandas.DataFrame
+        Prediction rows to save.
+    metrics_text : str
+        Metrics report text.
+    """
+
+    output_dir = Path(output_dir)
     preprocessing_path = output_dir / "preprocessing.npz"
     predictions_path = output_dir / "predictions.csv"
     metrics_path = output_dir / "metrics.txt"
 
-    joblib.dump(model, model_path)
     np.savez(preprocessing_path, **preprocessing_values)
     predictions.to_csv(predictions_path, index=False)
 
     with open(metrics_path, "w") as metrics_file:
         metrics_file.write(metrics_text)
-
-    print(model_path)
-    print(metrics_path)
-    print(predictions)
 
 
 def create_metrics_text(
