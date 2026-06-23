@@ -13,7 +13,7 @@ labels:
   reconnection: 3
 
 features:
-  downsample_factor: 2
+  downsample_factor: 1
   batch_size: 512
   n_jobs: 16
   log_eps: 1e-30

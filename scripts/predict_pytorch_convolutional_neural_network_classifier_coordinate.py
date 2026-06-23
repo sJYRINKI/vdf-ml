@@ -1,4 +1,4 @@
-#python scripts/predict_pytorch_multilayer_perceptron_classifier_coordinate.py --config configs/predict_coordinate_pytorch_multilayer_perceptron_classifier.yaml --timestep 4000 --model-id v1.0 --coord-re -12 0 0
+#python scripts/predict_pytorch_convolutional_neural_network_classifier_coordinate.py --config configs/predict_coordinate_pytorch_convolutional_neural_network_classifier.yaml --timestep 4000 --model-id v1.0 --coord-re -12 0 0
 
 import argparse
 import sys
@@ -9,12 +9,12 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.coordinate_prediction import predict_coordinate
-from src.model_io import load_pytorch_multilayer_perceptron_classifier_model
+from src.model_io import load_pytorch_convolutional_neural_network_classifier_model
 
 
 def main(config_path, timestep, model_id, coord_re):
     """
-    Predict one VDF from coordinates with a PyTorch classifier.
+    Predict one VDF from coordinates with a PyTorch CNN.
 
     Parameters
     ----------
@@ -34,7 +34,7 @@ def main(config_path, timestep, model_id, coord_re):
         timestep=timestep,
         model_id=model_id,
         coord_re=coord_re,
-        load_model=load_pytorch_multilayer_perceptron_classifier_model,
+        load_model=load_pytorch_convolutional_neural_network_classifier_model,
     )
 
     print(f"Saved plot: {result['output_plot_path']}")
@@ -45,30 +45,23 @@ def main(config_path, timestep, model_id, coord_re):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description=(
-            "Predict one VDF from coordinates using a trained PyTorch "
-            "multilayer perceptron classifier."
-        )
+        description="Predict one VDF using a trained PyTorch CNN classifier."
     )
-
     parser.add_argument(
         "--config",
         required=True,
         help="Path to coordinate prediction config.",
     )
-
     parser.add_argument(
         "--timestep",
         required=True,
         help="VLSV timestep to read, for example 3500.",
     )
-
     parser.add_argument(
         "--model-id",
         required=True,
         help="Trained model identifier, for example v1.0.",
     )
-
     parser.add_argument(
         "--coord-re",
         type=float,
@@ -77,7 +70,6 @@ if __name__ == "__main__":
         metavar=("X_RE", "Y_RE", "Z_RE"),
         help="Coordinate in Earth radii.",
     )
-
     args = parser.parse_args()
 
     main(

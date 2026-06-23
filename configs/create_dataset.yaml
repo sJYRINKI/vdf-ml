@@ -13,7 +13,7 @@ labels:
 
 creation:
   planning_n_jobs: 24
-  extraction_n_jobs: 16
+  extraction_n_jobs: 8
 
 points:
   x_class_name: reconnection

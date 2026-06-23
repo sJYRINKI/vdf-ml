@@ -64,9 +64,9 @@ def load_multilayer_perceptron_classifier_model(model_dir):
     return load_model(model_dir, "multilayer_perceptron_classifier.joblib")
 
 
-def load_pytorch_multilayer_perceptron_classifier_model(model_dir):
+def load_pytorch_convolutional_neural_network_classifier_model(model_dir):
     """
-    Load a trained PyTorch multilayer perceptron and preprocessing values.
+    Load a trained PyTorch CNN and preprocessing values.
 
     Parameters
     ----------
@@ -75,21 +75,21 @@ def load_pytorch_multilayer_perceptron_classifier_model(model_dir):
 
     Returns
     -------
-    model : src.pytorch_mlp.PyTorchMLPClassifier
-        Trained PyTorch classifier.
+    model : src.pytorch_cnn.PyTorchCNNClassifier
+        Trained PyTorch CNN classifier.
     preprocessing : numpy.lib.npyio.NpzFile
         Saved preprocessing values.
     """
 
-    from src.pytorch_mlp import load_pytorch_mlp_checkpoint
+    from src.pytorch_cnn import load_pytorch_cnn_checkpoint
 
     model_dir = Path(model_dir)
     model_path = (
-        model_dir / "pytorch_multilayer_perceptron_classifier.pt"
+        model_dir / "pytorch_convolutional_neural_network_classifier.pt"
     )
     preprocessing_path = model_dir / "preprocessing.npz"
 
-    model = load_pytorch_mlp_checkpoint(
+    model = load_pytorch_cnn_checkpoint(
         checkpoint_path=model_path,
         device="cpu",
     )

@@ -13,16 +13,20 @@ from src.training import (
 )
 
 
-class PyTorchMLPClassifier(nn.Module):
+class PyTorchCNNClassifier(nn.Module):
     """
-    Classify flattened VDF features with a PyTorch neural network.
+    Classify flattened VDF xz-slice features with a 2D CNN.
 
     Parameters
     ----------
     input_size : int
-        Number of input features.
-    hidden_layer_sizes : sequence of int
-        Number of neurons in each hidden layer.
+        Number of flattened input features.
+    channels : sequence of int
+        Number of output channels in each convolutional block.
+    classifier_size : int
+        Number of neurons in the fully connected hidden layer.
+    dropout : float
+        Dropout probability before the output layer.
     class_labels : array-like of int
         Project labels in model-output order.
     feature_mean : array-like of float
@@ -36,7 +40,9 @@ class PyTorchMLPClassifier(nn.Module):
     def __init__(
         self,
         input_size,
-        hidden_layer_sizes,
+        channels,
+        classifier_size,
+        dropout,
         class_labels,
         feature_mean,
         feature_scale,
@@ -45,11 +51,21 @@ class PyTorchMLPClassifier(nn.Module):
         super().__init__()
 
         self.input_size = int(input_size)
-        self.hidden_layer_sizes = tuple(
-            int(size) for size in hidden_layer_sizes
-        )
+        self.image_size = int(np.sqrt(self.input_size))
+        self.channels = tuple(int(channel) for channel in channels)
+        self.classifier_size = int(classifier_size)
+        self.dropout = float(dropout)
         self.classes_ = np.asarray(class_labels, dtype=int)
         self.prediction_batch_size = int(prediction_batch_size)
+
+        if self.image_size ** 2 != self.input_size:
+            raise ValueError("CNN input features must form a square image")
+        if not self.channels or any(channel <= 0 for channel in self.channels):
+            raise ValueError("channels must contain positive integers")
+        if self.classifier_size <= 0:
+            raise ValueError("classifier_size must be positive")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be between zero and one")
         if self.prediction_batch_size <= 0:
             raise ValueError("prediction_batch_size must be positive")
 
@@ -62,26 +78,44 @@ class PyTorchMLPClassifier(nn.Module):
             torch.as_tensor(feature_scale, dtype=torch.float32),
         )
 
-        layer_sizes = (
-            self.input_size,
-            *self.hidden_layer_sizes,
-            len(self.classes_),
-        )
-        layers = []
-        for layer_index, (input_features, output_features) in enumerate(
-            zip(layer_sizes[:-1], layer_sizes[1:])
-        ):
-            layers.append(nn.Linear(input_features, output_features))
-            if layer_index < len(layer_sizes) - 2:
-                layers.append(nn.ReLU())
+        convolution_layers = []
+        input_channels = 1
+        for output_channels in self.channels:
+            convolution_layers.extend(
+                [
+                    nn.Conv2d(
+                        input_channels,
+                        output_channels,
+                        kernel_size=3,
+                        padding=1,
+                    ),
+                    nn.ReLU(),
+                    nn.AvgPool2d(kernel_size=2),
+                ]
+            )
+            input_channels = output_channels
 
-        self.layers = nn.Sequential(*layers)
+        convolution_layers.append(nn.AdaptiveAvgPool2d((4, 4)))
+        self.convolutions = nn.Sequential(*convolution_layers)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.channels[-1] * 4 * 4, self.classifier_size),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.classifier_size, len(self.classes_)),
+        )
 
     def forward(self, features):
         """Return unnormalized class scores for a feature batch."""
 
         features = (features - self.feature_mean) / self.feature_scale
-        return self.layers(features)
+        images = features.reshape(
+            -1,
+            1,
+            self.image_size,
+            self.image_size,
+        )
+        return self.classifier(self.convolutions(images))
 
     def predict(self, features):
         """Predict project class labels."""
@@ -123,9 +157,13 @@ class PyTorchMLPClassifier(nn.Module):
         return probabilities
 
 
-def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id):
+def train_pytorch_convolutional_neural_network_classifier(
+    config,
+    dataset_id,
+    model_id,
+):
     """
-    Train and save a PyTorch multilayer perceptron classifier.
+    Train and save a PyTorch convolutional neural network classifier.
 
     Parameters
     ----------
@@ -151,30 +189,24 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         raise ValueError("At least two configured classes are required")
 
     model_config = config["model"]
-    hidden_layer_sizes = tuple(
-        int(size)
-        for size in model_config.get("hidden_layer_sizes", [128, 64])
+    channels = tuple(
+        int(channel)
+        for channel in model_config.get("channels", [16, 32, 64])
     )
-    if (
-        model_config.get("activation", "relu") != "relu"
-        or model_config.get("solver", "adam") != "adam"
-    ):
-        raise ValueError("PyTorch MLP supports only relu activation and adam solver")
-    if not hidden_layer_sizes or any(size <= 0 for size in hidden_layer_sizes):
-        raise ValueError("hidden_layer_sizes must contain positive integers")
-
-    alpha = float(model_config.get("alpha", 0.0001))
-    learning_rate = float(model_config.get("learning_rate_init", 0.001))
-    max_epochs = int(model_config.get("max_iter", 300))
+    classifier_size = int(model_config.get("classifier_size", 64))
+    dropout = float(model_config.get("dropout", 0.2))
+    weight_decay = float(model_config.get("weight_decay", 0.0001))
+    learning_rate = float(model_config.get("learning_rate", 0.0003))
+    max_epochs = int(model_config.get("max_epochs", 300))
     early_stopping = bool(model_config.get("early_stopping", True))
-    patience = int(model_config.get("n_iter_no_change", 10))
-    tolerance = float(model_config.get("tol", 1e-4))
+    patience = int(model_config.get("patience", 15))
+    tolerance = float(model_config.get("tolerance", 1e-4))
     random_seed = int(model_config.get("random_state", 1234))
 
-    if alpha < 0.0 or learning_rate <= 0.0:
-        raise ValueError("alpha must be non-negative and learning rate positive")
+    if weight_decay < 0.0 or learning_rate <= 0.0:
+        raise ValueError("weight_decay must be non-negative and learning rate positive")
     if max_epochs <= 0 or patience <= 0 or tolerance < 0.0:
-        raise ValueError("Invalid iteration or early-stopping configuration")
+        raise ValueError("Invalid epoch or early-stopping configuration")
 
     data = load_training_data(
         config=config,
@@ -185,6 +217,7 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
     y_train = _encode_labels(data["y_train"], class_labels)
     y_validation = _encode_labels(data["y_validation"], class_labels)
     _encode_labels(data["y_test"], class_labels)
+
     missing_classes = set(range(len(class_labels))) - set(y_train)
     if missing_classes:
         missing_labels = class_labels[sorted(missing_classes)]
@@ -194,19 +227,15 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         )
 
     scaler = StandardScaler().fit(data["X_train_features"])
-    device_name = model_config.get("device", "auto")
-    if device_name == "auto":
-        device_name = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device_name)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available")
-
+    device = _resolve_device(model_config.get("device", "auto"))
     deterministic = bool(model_config.get("deterministic", False))
     _set_random_seed(random_seed, deterministic)
 
-    model = PyTorchMLPClassifier(
+    model = PyTorchCNNClassifier(
         input_size=data["X_train_features"].shape[1],
-        hidden_layer_sizes=hidden_layer_sizes,
+        channels=channels,
+        classifier_size=classifier_size,
+        dropout=dropout,
         class_labels=class_labels,
         feature_mean=np.asarray(scaler.mean_, dtype=np.float32),
         feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
@@ -214,17 +243,15 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
             model_config.get("prediction_batch_size", 4096)
         ),
     ).to(device)
-    model_batch_size = model_config.get("batch_size", "auto")
-    if model_batch_size == "auto":
-        model_batch_size = min(200, len(y_train))
-    else:
-        model_batch_size = min(int(model_batch_size), len(y_train))
-        if model_batch_size <= 0:
-            raise ValueError("batch_size must be positive or 'auto'")
+    model_batch_size = _resolve_batch_size(
+        model_config.get("batch_size", 32),
+        len(y_train),
+    )
 
     print("Configured classes:")
     for label, class_name in zip(class_labels, class_names):
         print(f"  {label}: {class_name}")
+    print(f"CNN input image: {model.image_size} x {model.image_size}")
     print(f"Training device: {device}")
 
     training_result = _fit_model(
@@ -236,7 +263,7 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         device=device,
         batch_size=model_batch_size,
         learning_rate=learning_rate,
-        alpha=alpha,
+        weight_decay=weight_decay,
         max_epochs=max_epochs,
         early_stopping=early_stopping,
         tolerance=tolerance,
@@ -251,7 +278,7 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         report_labels=class_labels,
         target_names=class_names,
     )
-    print("PyTorch multilayer perceptron classifier results")
+    print("PyTorch convolutional neural network classifier results")
     print(f"Train accuracy: {results['train_accuracy']}")
     print(f"Validation accuracy: {results['validation_accuracy']}")
     print(f"Test accuracy: {results['test_accuracy']}")
@@ -278,9 +305,9 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
 
     checkpoint_path = (
         data["output_dir"]
-        / "pytorch_multilayer_perceptron_classifier.pt"
+        / "pytorch_convolutional_neural_network_classifier.pt"
     )
-    save_pytorch_mlp_checkpoint(model, checkpoint_path)
+    save_pytorch_cnn_checkpoint(model, checkpoint_path)
 
     metric_lines = [
         "Configured classes:",
@@ -288,15 +315,19 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
             f"  {label}: {class_name}"
             for label, class_name in zip(class_labels, class_names)
         ],
-        f"Hidden layer sizes: {hidden_layer_sizes}",
+        f"Input image shape: (1, {model.image_size}, {model.image_size})",
+        f"Convolution channels: {channels}",
+        f"Classifier size: {classifier_size}",
+        f"Dropout: {dropout}",
         "Activation: relu",
-        "Solver: adam",
-        f"Alpha: {alpha}",
+        "Pooling: average",
+        "Optimizer: AdamW",
+        f"Weight decay: {weight_decay}",
         f"Model batch size: {model_batch_size}",
-        f"Learning rate init: {learning_rate}",
-        f"Max iterations: {max_epochs}",
+        f"Learning rate: {learning_rate}",
+        f"Max epochs: {max_epochs}",
         f"Early stopping: {early_stopping}",
-        f"Iterations without improvement: {patience}",
+        f"Patience: {patience}",
         f"Tolerance: {tolerance}",
         f"Random state: {random_seed}",
         f"Device: {device}",
@@ -330,7 +361,7 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
         },
         predictions=predictions,
         metrics_text=create_metrics_text(
-            title="PyTorch multilayer perceptron classifier evaluation",
+            title="PyTorch convolutional neural network classifier evaluation",
             dataset_id=dataset_id,
             model_id=model_id,
             data=data,
@@ -344,13 +375,13 @@ def train_pytorch_multilayer_perceptron_classifier(config, dataset_id, model_id)
     print(predictions)
 
 
-def load_pytorch_mlp_checkpoint(
+def load_pytorch_cnn_checkpoint(
     checkpoint_path,
     device="cpu",
     prediction_batch_size=4096,
 ):
     """
-    Load a PyTorch multilayer perceptron checkpoint.
+    Load a PyTorch convolutional neural network checkpoint.
 
     Parameters
     ----------
@@ -363,7 +394,7 @@ def load_pytorch_mlp_checkpoint(
 
     Returns
     -------
-    PyTorchMLPClassifier
+    PyTorchCNNClassifier
         Loaded classifier with a NumPy prediction interface.
     """
 
@@ -378,11 +409,9 @@ def load_pytorch_mlp_checkpoint(
 
     if int(checkpoint["format_version"]) != 1:
         raise ValueError(
-            "Unsupported PyTorch checkpoint format version: "
+            "Unsupported PyTorch CNN checkpoint format version: "
             f"{checkpoint['format_version']}"
         )
-    if checkpoint.get("activation", "relu") != "relu":
-        raise ValueError("Checkpoint activation is not supported")
 
     class_labels = checkpoint["class_labels"]
     if isinstance(class_labels, torch.Tensor):
@@ -391,9 +420,11 @@ def load_pytorch_mlp_checkpoint(
         raise ValueError("Checkpoint class-label count does not match model output")
 
     input_size = int(checkpoint["input_size"])
-    model = PyTorchMLPClassifier(
+    model = PyTorchCNNClassifier(
         input_size=input_size,
-        hidden_layer_sizes=checkpoint["hidden_layer_sizes"],
+        channels=checkpoint["channels"],
+        classifier_size=int(checkpoint["classifier_size"]),
+        dropout=float(checkpoint["dropout"]),
         class_labels=class_labels,
         feature_mean=np.zeros(input_size, dtype=np.float32),
         feature_scale=np.ones(input_size, dtype=np.float32),
@@ -403,7 +434,7 @@ def load_pytorch_mlp_checkpoint(
     return model.to(device).eval()
 
 
-def save_pytorch_mlp_checkpoint(model, checkpoint_path):
+def save_pytorch_cnn_checkpoint(model, checkpoint_path):
     """Save model weights and architecture information."""
 
     torch.save(
@@ -414,9 +445,10 @@ def save_pytorch_mlp_checkpoint(model, checkpoint_path):
                 for name, value in model.state_dict().items()
             },
             "input_size": model.input_size,
-            "hidden_layer_sizes": list(model.hidden_layer_sizes),
+            "channels": list(model.channels),
+            "classifier_size": model.classifier_size,
+            "dropout": model.dropout,
             "n_classes": len(model.classes_),
-            "activation": "relu",
             "class_labels": torch.as_tensor(model.classes_, dtype=torch.int64),
         },
         checkpoint_path,
@@ -432,7 +464,7 @@ def _fit_model(
     device,
     batch_size,
     learning_rate,
-    alpha,
+    weight_decay,
     max_epochs,
     early_stopping,
     tolerance,
@@ -444,23 +476,21 @@ def _fit_model(
         torch.from_numpy(features),
         torch.from_numpy(targets),
     )
-    generator = torch.Generator().manual_seed(random_seed)
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
         pin_memory=device.type == "cuda",
-        generator=generator,
+        generator=torch.Generator().manual_seed(random_seed),
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
     loss_function = nn.CrossEntropyLoss()
-    weights = [
-        layer.weight
-        for layer in model.layers
-        if isinstance(layer, nn.Linear)
-    ]
     best_score = float("-inf")
     best_state_dict = None
     best_epoch = 0
@@ -481,11 +511,6 @@ def _fit_model(
             )
             optimizer.zero_grad(set_to_none=True)
             loss = loss_function(model(feature_batch), target_batch)
-            if alpha > 0.0:
-                squared_weights = sum(
-                    weight.square().sum() for weight in weights
-                )
-                loss = loss + alpha * squared_weights / (2 * len(dataset))
             loss.backward()
             optimizer.step()
             total_loss += loss.detach() * len(feature_batch)
@@ -542,6 +567,24 @@ def _encode_labels(labels, class_labels):
         raise ValueError(
             f"Dataset contains label {error.args[0]} that is not configured"
         ) from error
+
+
+def _resolve_batch_size(configured_batch_size, n_samples):
+    if configured_batch_size == "auto":
+        return min(32, n_samples)
+    batch_size = min(int(configured_batch_size), n_samples)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive or 'auto'")
+    return batch_size
+
+
+def _resolve_device(device_name):
+    if device_name == "auto":
+        device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available")
+    return device
 
 
 def _set_random_seed(random_seed, deterministic):
