@@ -5,7 +5,12 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression, Perceptron
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+)
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -629,6 +634,25 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
         data["y_validation"], y_validation_pred
     )
     test_accuracy = accuracy_score(data["y_test"], y_test_pred)
+    macro_f1_kwargs = {"average": "macro", "zero_division": 0}
+    if report_labels is not None:
+        macro_f1_kwargs["labels"] = report_labels
+
+    train_macro_f1 = f1_score(
+        data["y_train"],
+        y_train_pred,
+        **macro_f1_kwargs,
+    )
+    validation_macro_f1 = f1_score(
+        data["y_validation"],
+        y_validation_pred,
+        **macro_f1_kwargs,
+    )
+    test_macro_f1 = f1_score(
+        data["y_test"],
+        y_test_pred,
+        **macro_f1_kwargs,
+    )
     train_error = 1.0 - train_accuracy
     validation_error = 1.0 - validation_accuracy
     test_error = 1.0 - test_accuracy
@@ -645,13 +669,35 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
         y_test_pred,
         **report_kwargs,
     )
-    metrics_report = classification_report(
+    train_metrics_report = classification_report(
+        data["y_train"],
+        y_train_pred,
+        zero_division=0,
+        **report_kwargs,
+    )
+    validation_metrics_report = classification_report(
+        data["y_validation"],
+        y_validation_pred,
+        zero_division=0,
+        **report_kwargs,
+    )
+    test_metrics_report = classification_report(
         data["y_test"],
         y_test_pred,
         zero_division=0,
         **report_kwargs,
     )
-    matrix = confusion_matrix(
+    train_confusion_matrix = confusion_matrix(
+        data["y_train"],
+        y_train_pred,
+        labels=report_labels,
+    )
+    validation_confusion_matrix = confusion_matrix(
+        data["y_validation"],
+        y_validation_pred,
+        labels=report_labels,
+    )
+    test_confusion_matrix = confusion_matrix(
         data["y_test"],
         y_test_pred,
         labels=report_labels,
@@ -664,6 +710,9 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
         "train_accuracy": train_accuracy,
         "validation_accuracy": validation_accuracy,
         "test_accuracy": test_accuracy,
+        "train_macro_f1": train_macro_f1,
+        "validation_macro_f1": validation_macro_f1,
+        "test_macro_f1": test_macro_f1,
         "train_error": train_error,
         "validation_error": validation_error,
         "test_error": test_error,
@@ -671,8 +720,14 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
         "bias_proxy": train_error,
         "variance_proxy": max(0.0, generalization_gap),
         "print_report": print_report,
-        "metrics_report": metrics_report,
-        "confusion_matrix": matrix,
+        "train_metrics_report": train_metrics_report,
+        "validation_metrics_report": validation_metrics_report,
+        "test_metrics_report": test_metrics_report,
+        "metrics_report": test_metrics_report,
+        "train_confusion_matrix": train_confusion_matrix,
+        "validation_confusion_matrix": validation_confusion_matrix,
+        "test_confusion_matrix": test_confusion_matrix,
+        "confusion_matrix": test_confusion_matrix,
     }
 
 
@@ -907,6 +962,9 @@ def create_metrics_text(
             f"Train accuracy: {results['train_accuracy']}",
             f"Validation accuracy: {results['validation_accuracy']}",
             f"Test accuracy: {results['test_accuracy']}",
+            f"Train macro F1: {results['train_macro_f1']}",
+            f"Validation macro F1: {results['validation_macro_f1']}",
+            f"Test macro F1: {results['test_macro_f1']}",
             f"Train error: {results['train_error']}",
             f"Validation error: {results['validation_error']}",
             f"Test error: {results['test_error']}",
@@ -914,13 +972,29 @@ def create_metrics_text(
             f"Bias proxy: {results['bias_proxy']}",
             f"Variance proxy: {results['variance_proxy']}",
             "",
+            "Train classification report",
+            "=" * 70,
+            results["train_metrics_report"],
+            "",
+            "Validation classification report",
+            "=" * 70,
+            results["validation_metrics_report"],
+            "",
             "Test classification report",
             "=" * 70,
-            results["metrics_report"],
+            results["test_metrics_report"],
+            "",
+            "Train confusion matrix",
+            "=" * 70,
+            str(results["train_confusion_matrix"]),
+            "",
+            "Validation confusion matrix",
+            "=" * 70,
+            str(results["validation_confusion_matrix"]),
             "",
             "Test confusion matrix",
             "=" * 70,
-            str(results["confusion_matrix"]),
+            str(results["test_confusion_matrix"]),
             "",
         ]
     )

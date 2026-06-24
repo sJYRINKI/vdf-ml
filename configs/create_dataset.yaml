@@ -22,24 +22,24 @@ points:
     x_between: [-30.0, -10.0]
     z_abs_max: 1.0
   x_selection:
-    #method: physical
-    method: manual
+    method: physical
+    #method: manual
     density_variable: rho
     half_width_di:
       eigenvector_0: 2.0
       eigenvector_1: 2.0
     y_half_width_re: 0.0
     manual_re:
-      x_half_width_re: 0.5
+      x_half_width_re: 0.4
       y_half_width_re: 0.0
       z_half_width_re: 0.3
   o_selection:
-    #method: physical
-    method: manual
-    core_fraction: 0.8
+    method: physical
+    #method: manual
+    core_fraction: 0.7
     y_half_width_re: 0.0
     manual_re:
-      x_half_width_re: 0.5
+      x_half_width_re: 0.4
       y_half_width_re: 0.0
       z_half_width_re: 0.3
 
