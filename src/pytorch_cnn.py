@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from sklearn.metrics import f1_score
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -195,6 +196,7 @@ def train_pytorch_convolutional_neural_network_classifier(
     )
     classifier_size = int(model_config.get("classifier_size", 64))
     dropout = float(model_config.get("dropout", 0.2))
+    class_weight = _resolve_class_weight(model_config.get("class_weight", "none"))
     weight_decay = float(model_config.get("weight_decay", 0.0001))
     learning_rate = float(model_config.get("learning_rate", 0.0003))
     max_epochs = int(model_config.get("max_epochs", 300))
@@ -225,6 +227,12 @@ def train_pytorch_convolutional_neural_network_classifier(
             "Configured classes have no training samples: "
             f"{list(missing_labels)}"
         )
+
+    class_weights = _create_class_weights(
+        targets=y_train,
+        n_classes=len(class_labels),
+        class_weight=class_weight,
+    )
 
     scaler = StandardScaler().fit(data["X_train_features"])
     device = _resolve_device(model_config.get("device", "auto"))
@@ -260,6 +268,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         targets=y_train,
         validation_features=data["X_validation_features"],
         validation_targets=y_validation,
+        class_weights=class_weights,
         device=device,
         batch_size=model_batch_size,
         learning_rate=learning_rate,
@@ -319,6 +328,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Convolution channels: {channels}",
         f"Classifier size: {classifier_size}",
         f"Dropout: {dropout}",
+        f"Class weight: {class_weight}",
         "Activation: relu",
         "Pooling: average",
         "Optimizer: AdamW",
@@ -327,6 +337,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Learning rate: {learning_rate}",
         f"Max epochs: {max_epochs}",
         f"Early stopping: {early_stopping}",
+        "Early stopping metric: validation macro F1",
         f"Patience: {patience}",
         f"Tolerance: {tolerance}",
         f"Random state: {random_seed}",
@@ -338,10 +349,12 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Best epoch: {training_result['best_epoch']}",
         f"Final training loss: {training_result['final_training_loss']}",
     ]
-    if training_result["best_validation_accuracy"] is not None:
+    if class_weights is not None:
+        metric_lines.append(f"Class weights: {class_weights.tolist()}")
+    if training_result["best_validation_macro_f1"] is not None:
         metric_lines.append(
-            "Best validation accuracy: "
-            f"{training_result['best_validation_accuracy']}"
+            "Best validation macro F1: "
+            f"{training_result['best_validation_macro_f1']}"
         )
 
     save_training_artifacts(
@@ -461,6 +474,7 @@ def _fit_model(
     targets,
     validation_features,
     validation_targets,
+    class_weights,
     device,
     batch_size,
     learning_rate,
@@ -490,7 +504,15 @@ def _fit_model(
         lr=learning_rate,
         weight_decay=weight_decay,
     )
-    loss_function = nn.CrossEntropyLoss()
+    if class_weights is None:
+        loss_weights = None
+    else:
+        loss_weights = torch.as_tensor(
+            class_weights,
+            dtype=torch.float32,
+            device=device,
+        )
+    loss_function = nn.CrossEntropyLoss(weight=loss_weights)
     best_score = float("-inf")
     best_state_dict = None
     best_epoch = 0
@@ -521,7 +543,13 @@ def _fit_model(
                 model.predict_proba(validation_features),
                 axis=1,
             )
-            score = float(np.mean(validation_predictions == validation_targets))
+            score = f1_score(
+                validation_targets,
+                validation_predictions,
+                labels=np.arange(len(model.classes_)),
+                average="macro",
+                zero_division=0,
+            )
         else:
             score = -training_loss
 
@@ -548,7 +576,7 @@ def _fit_model(
     return {
         "n_epochs": epoch,
         "best_epoch": best_epoch,
-        "best_validation_accuracy": best_score if early_stopping else None,
+        "best_validation_macro_f1": best_score if early_stopping else None,
         "final_training_loss": training_loss,
     }
 
@@ -567,6 +595,31 @@ def _encode_labels(labels, class_labels):
         raise ValueError(
             f"Dataset contains label {error.args[0]} that is not configured"
         ) from error
+
+
+def _resolve_class_weight(configured_class_weight):
+    if configured_class_weight is None:
+        return "none"
+
+    class_weight = str(configured_class_weight).lower()
+    if class_weight in {"false", "no", "none", "unweighted"}:
+        return "none"
+    if class_weight in {"true", "yes", "balanced", "weight", "weights", "weighted"}:
+        return "balanced"
+
+    raise ValueError("class_weight must be 'none' or 'balanced'")
+
+
+def _create_class_weights(targets, n_classes, class_weight):
+    if class_weight == "none":
+        return None
+
+    class_counts = np.bincount(targets, minlength=n_classes).astype(float)
+    if np.any(class_counts == 0.0):
+        raise ValueError("Cannot create class weights for empty classes")
+
+    weights = len(targets) / (n_classes * class_counts)
+    return weights.astype(np.float32)
 
 
 def _resolve_batch_size(configured_batch_size, n_samples):
