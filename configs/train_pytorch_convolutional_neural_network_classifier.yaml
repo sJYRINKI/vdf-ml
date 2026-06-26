@@ -21,11 +21,12 @@ features:
 model:
   channels: [16, 32, 64]
   classifier_size: 64
-  dropout: 0.2
+  dropout: 0.3
+  class_weight: sqrt_balanced
   #class_weight: none
-  class_weight: balanced
+  #class_weight: balanced
   weight_decay: 0.0001
-  batch_size: 1024
+  batch_size: 256
   learning_rate: 0.0003
   max_epochs: 300
   early_stopping: true
@@ -34,4 +35,10 @@ model:
   random_state: 1234
   device: auto
   deterministic: false
-  prediction_batch_size: 1024
+  prediction_batch_size: 512
+
+failure_plots:
+  enabled: true
+  splits: [validation, test]
+  max_per_pair: 8
+  vdflim: 2000000.0

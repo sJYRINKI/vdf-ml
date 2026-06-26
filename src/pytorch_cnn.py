@@ -4,6 +4,9 @@ from sklearn.metrics import f1_score
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
+import os
+
+os.environ["PTNOLATEX"] = "1"
 
 from src.training import (
     create_metrics_text,
@@ -47,7 +50,7 @@ class PyTorchCNNClassifier(nn.Module):
         class_labels,
         feature_mean,
         feature_scale,
-        prediction_batch_size=4096,
+        prediction_batch_size=64,
     ):
         super().__init__()
 
@@ -239,6 +242,16 @@ def train_pytorch_convolutional_neural_network_classifier(
     deterministic = bool(model_config.get("deterministic", False))
     _set_random_seed(random_seed, deterministic)
 
+    model_batch_size = _resolve_batch_size(
+        model_config.get("batch_size", 32),
+        len(y_train),
+    )
+    prediction_batch_size = _resolve_prediction_batch_size(
+        configured_batch_size=model_config.get("prediction_batch_size", 64),
+        model_batch_size=model_batch_size,
+        n_samples=len(y_train),
+    )
+
     model = PyTorchCNNClassifier(
         input_size=data["X_train_features"].shape[1],
         channels=channels,
@@ -247,14 +260,8 @@ def train_pytorch_convolutional_neural_network_classifier(
         class_labels=class_labels,
         feature_mean=np.asarray(scaler.mean_, dtype=np.float32),
         feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
-        prediction_batch_size=int(
-            model_config.get("prediction_batch_size", 4096)
-        ),
+        prediction_batch_size=prediction_batch_size,
     ).to(device)
-    model_batch_size = _resolve_batch_size(
-        model_config.get("batch_size", 32),
-        len(y_train),
-    )
 
     print("Configured classes:")
     for label, class_name in zip(class_labels, class_names):
@@ -312,6 +319,13 @@ def train_pytorch_convolutional_neural_network_classifier(
         class_names_by_label
     )
 
+    failure_plot_paths = _plot_failure_cases(
+        data=data,
+        predictions=predictions,
+        class_names_by_label=class_names_by_label,
+        plot_config=config.get("failure_plots", {}),
+    )
+
     checkpoint_path = (
         data["output_dir"]
         / "pytorch_convolutional_neural_network_classifier.pt"
@@ -334,6 +348,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         "Optimizer: AdamW",
         f"Weight decay: {weight_decay}",
         f"Model batch size: {model_batch_size}",
+        f"Prediction batch size: {prediction_batch_size}",
         f"Learning rate: {learning_rate}",
         f"Max epochs: {max_epochs}",
         f"Early stopping: {early_stopping}",
@@ -348,7 +363,10 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Epochs: {training_result['n_epochs']}",
         f"Best epoch: {training_result['best_epoch']}",
         f"Final training loss: {training_result['final_training_loss']}",
+        f"Failure plots saved: {len(failure_plot_paths)}",
     ]
+    if failure_plot_paths:
+        metric_lines.append(f"Failure plot directory: {data['output_dir'] / 'failure_plots'}")
     if class_weights is not None:
         metric_lines.append(f"Class weights: {class_weights.tolist()}")
     if training_result["best_validation_macro_f1"] is not None:
@@ -391,7 +409,7 @@ def train_pytorch_convolutional_neural_network_classifier(
 def load_pytorch_cnn_checkpoint(
     checkpoint_path,
     device="cpu",
-    prediction_batch_size=4096,
+    prediction_batch_size=64,
 ):
     """
     Load a PyTorch convolutional neural network checkpoint.
@@ -597,6 +615,96 @@ def _encode_labels(labels, class_labels):
         ) from error
 
 
+def _plot_failure_cases(data, predictions, class_names_by_label, plot_config):
+    if not bool(plot_config.get("enabled", False)):
+        return []
+    if "sample_index" not in predictions.columns:
+        print("Skipping failure plots because predictions lack sample_index")
+        return []
+
+    from src.dataset_plot import plot_vdf_xz_slice
+    from src.vdf_helpers import get_vdf_plot_parameters_from_file
+
+    splits = _resolve_failure_plot_splits(
+        plot_config.get("splits", ["validation", "test"])
+    )
+    max_per_pair = int(plot_config.get("max_per_pair", 8))
+    if max_per_pair <= 0:
+        raise ValueError("failure_plots.max_per_pair must be positive")
+
+    vdflim = float(plot_config.get("vdflim", 2e6))
+    failures = predictions[
+        (~predictions["correct"])
+        & predictions["split"].isin(splits)
+    ]
+    if failures.empty:
+        return []
+
+    output_paths = []
+    plot_parameter_cache = {}
+    vdf_shape = tuple(data["X"].shape[1:])
+
+    group_columns = ["split", "true_label", "predicted_label"]
+    for (split, true_label, predicted_label), group in failures.groupby(
+        group_columns,
+        sort=True,
+    ):
+        true_label = int(true_label)
+        predicted_label = int(predicted_label)
+        true_class_name = class_names_by_label[true_label]
+        predicted_class_name = class_names_by_label[predicted_label]
+
+        for _, failure in group.head(max_per_pair).iterrows():
+            sample_index = int(failure["sample_index"])
+            metadata_row = data["metadata"].iloc[sample_index].to_dict()
+            file_location = metadata_row["file_location"]
+            cid = int(metadata_row["cid"])
+            cache_key = (file_location, cid, vdf_shape)
+
+            if cache_key not in plot_parameter_cache:
+                plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
+                    file_location=file_location,
+                    cid=cid,
+                    vdf_shape=vdf_shape,
+                )
+            extent, dv, threshold = plot_parameter_cache[cache_key]
+
+            output_path = (
+                data["output_dir"]
+                / "failure_plots"
+                / str(split)
+                / f"true_{true_class_name}"
+                / f"pred_{predicted_class_name}"
+                / _create_failure_plot_filename(metadata_row, sample_index)
+            )
+            plot_vdf_xz_slice(
+                vdf=data["X"][sample_index],
+                y_label=true_label,
+                metadata_row=metadata_row,
+                extent=extent,
+                output_path=output_path,
+                dv=dv,
+                threshold=threshold,
+                vdflim=vdflim,
+                predicted_class_name=predicted_class_name,
+            )
+            output_paths.append(output_path)
+
+    return output_paths
+
+
+def _resolve_failure_plot_splits(configured_splits):
+    if isinstance(configured_splits, str):
+        return [configured_splits]
+    return [str(split) for split in configured_splits]
+
+
+def _create_failure_plot_filename(metadata_row, sample_index):
+    timestep = metadata_row.get("timestep", "unknown")
+    cid = metadata_row.get("cid", "unknown")
+    return f"sample_{sample_index:06d}_t{timestep}_cid{cid}.png"
+
+
 def _resolve_class_weight(configured_class_weight):
     if configured_class_weight is None:
         return "none"
@@ -604,10 +712,12 @@ def _resolve_class_weight(configured_class_weight):
     class_weight = str(configured_class_weight).lower()
     if class_weight in {"false", "no", "none", "unweighted"}:
         return "none"
+    if class_weight in {"soft", "sqrt", "sqrt_balanced", "soft_balanced"}:
+        return "sqrt_balanced"
     if class_weight in {"true", "yes", "balanced", "weight", "weights", "weighted"}:
         return "balanced"
 
-    raise ValueError("class_weight must be 'none' or 'balanced'")
+    raise ValueError("class_weight must be 'none', 'sqrt_balanced', or 'balanced'")
 
 
 def _create_class_weights(targets, n_classes, class_weight):
@@ -619,6 +729,9 @@ def _create_class_weights(targets, n_classes, class_weight):
         raise ValueError("Cannot create class weights for empty classes")
 
     weights = len(targets) / (n_classes * class_counts)
+    if class_weight == "sqrt_balanced":
+        weights = np.sqrt(weights)
+
     return weights.astype(np.float32)
 
 
@@ -629,6 +742,11 @@ def _resolve_batch_size(configured_batch_size, n_samples):
     if batch_size <= 0:
         raise ValueError("batch_size must be positive or 'auto'")
     return batch_size
+
+
+def _resolve_prediction_batch_size(configured_batch_size, model_batch_size, n_samples):
+    prediction_batch_size = _resolve_batch_size(configured_batch_size, n_samples)
+    return min(prediction_batch_size, model_batch_size)
 
 
 def _resolve_device(device_name):
