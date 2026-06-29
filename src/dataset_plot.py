@@ -7,6 +7,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
 
 from src.config import load_config
@@ -446,15 +447,303 @@ def plot_vdf_xz_slice(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    extent = np.asarray(extent)
+    fig, ax1 = plt.subplots(figsize=(7, 6))
+    im = _plot_vdf_xz_slice_on_axis(
+        ax=ax1,
+        vdf=vdf,
+        y_label=y_label,
+        metadata_row=metadata_row,
+        extent=extent,
+        dv=dv,
+        threshold=threshold,
+        vdflim=vdflim,
+        decision_score=decision_score,
+        predicted_class_name=predicted_class_name,
+    )
 
-    vxmin = extent[0]
-    vzmin = extent[2]
-    vxmax = extent[3]
-    vzmax = extent[5]
+    if im is None:
+        plt.close(fig)
+        return
+
+    fig.colorbar(im, ax=ax1, label="f(v)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_random_class_samples(
+        X,
+        y,
+        metadata,
+        output_path,
+        vdflim=2e6,
+        random_state=None,
+        n_columns=2,
+):
+    """
+    Plot one random xz VDF sample from each class in one figure.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Memory-mapped VDF sample array.
+    y : numpy.ndarray
+        Integer labels for VDF samples.
+    metadata : pandas.DataFrame
+        Dataset metadata with one row per sample and a ``class_name`` column.
+    output_path : str or pathlib.Path
+        Output PNG path.
+    vdflim : float, optional
+        Visible velocity limit in m/s.
+    random_state : int, optional
+        Random seed for reproducible class sampling.
+    n_columns : int, optional
+        Number of subplot columns.
+
+    Returns
+    -------
+    dict
+        Mapping from class name to selected sample index.
+    """
+
+    if n_columns <= 0:
+        raise ValueError("n_columns must be positive")
+
+    selected_indices = _select_random_class_sample_indices(
+        metadata=metadata,
+        random_state=random_state,
+    )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    n_samples = len(selected_indices)
+    n_rows = (n_samples + n_columns - 1) // n_columns
+
+    plot_parameter_cache = {}
+    plot_items = []
+    vdf_shape = tuple(X.shape[1:])
+
+    for class_name, sample_index in selected_indices.items():
+        metadata_row = metadata.iloc[sample_index].to_dict()
+        file_location = metadata_row["file_location"]
+        cid = int(metadata_row["cid"])
+        cache_key = (file_location, cid, vdf_shape)
+
+        if cache_key not in plot_parameter_cache:
+            plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
+                file_location=file_location,
+                cid=cid,
+                vdf_shape=vdf_shape,
+            )
+
+        extent, dv, threshold = plot_parameter_cache[cache_key]
+        vdf_plot = _prepare_vdf_xz_plot(
+            vdf=X[sample_index],
+            metadata_row=metadata_row,
+            dv=dv,
+            threshold=threshold,
+        )
+
+        plot_items.append(
+            {
+                "class_name": class_name,
+                "sample_index": sample_index,
+                "y_label": y[sample_index],
+                "metadata_row": metadata_row,
+                "extent": extent,
+                "vdf_plot": vdf_plot,
+            }
+        )
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_columns,
+        figsize=(5 * n_columns, 5 * n_rows),
+        squeeze=False,
+    )
+
+    for plot_index, plot_item in enumerate(plot_items):
+        ax = axes.flat[plot_index]
+        vdf_plot = plot_item["vdf_plot"]
+
+        if vdf_plot is None:
+            ax.set_axis_off()
+            ax.set_title(str(plot_item["class_name"]), fontsize=11)
+            continue
+
+        im = _plot_prepared_vdf_xz_slice_on_axis(
+            ax=ax,
+            vdf_plot=vdf_plot,
+            y_label=plot_item["y_label"],
+            metadata_row=plot_item["metadata_row"],
+            extent=plot_item["extent"],
+            vdflim=vdflim,
+            title=str(plot_item["class_name"]),
+        )
+        _add_matching_colorbar(fig=fig, ax=ax, im=im)
+
+    for ax in axes.flat[n_samples:]:
+        ax.set_axis_off()
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    return selected_indices
+
+
+def _select_random_class_sample_indices(metadata, random_state=None):
+    """
+    Select one random sample index from each class.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        Dataset metadata with a ``class_name`` column. If available, the
+        ``sample_index`` column is used as the index into ``X`` and ``y``.
+    random_state : int, optional
+        Random seed for reproducible class sampling.
+
+    Returns
+    -------
+    dict
+        Mapping from class name to selected sample index.
+    """
+
+    if "class_name" not in metadata.columns:
+        raise ValueError("metadata must contain a class_name column")
+
+    if metadata.empty:
+        raise ValueError("metadata must contain at least one sample")
+
+    rng = np.random.default_rng(random_state)
+    selected_indices = {}
+
+    for class_name, class_rows in metadata.groupby("class_name", sort=True):
+        if "sample_index" in class_rows.columns:
+            candidate_indices = class_rows["sample_index"].to_numpy(dtype=int)
+        else:
+            candidate_indices = class_rows.index.to_numpy(dtype=int)
+
+        selected_indices[str(class_name)] = int(rng.choice(candidate_indices))
+
+    return selected_indices
+
+
+def _add_matching_colorbar(fig, ax, im):
+    """
+    Add a colorbar with the same height as its VDF subplot.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figure containing the subplot.
+    ax : matplotlib.axes.Axes
+        Axis whose height the colorbar should match.
+    im : matplotlib.image.AxesImage
+        Image object used for colorbar scaling.
+    """
+
+    divider = make_axes_locatable(ax)
+    colorbar_ax = divider.append_axes("right", size="4%", pad=0.05)
+    colorbar = fig.colorbar(im, cax=colorbar_ax, label="f(v)")
+    colorbar.ax.tick_params(labelsize=8)
+
+
+def _plot_vdf_xz_slice_on_axis(
+        ax,
+        vdf,
+        y_label,
+        metadata_row,
+        extent,
+        dv,
+        threshold,
+        vdflim=2e6,
+        decision_score=None,
+        predicted_class_name=None,
+        sample_index=None,
+):
+    """
+    Plot one xz VDF slice on an existing matplotlib axis.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis where the VDF slice is drawn.
+    vdf : numpy.ndarray
+        3D VDF array with axis order ``[vx, vy, vz]``.
+    y_label : int
+        Integer label.
+    metadata_row : dict or pandas.Series
+        Metadata row for the sample.
+    extent : array-like of float
+        Velocity mesh extent ``[vxmin, vymin, vzmin, vxmax, vymax, vzmax]``.
+    dv : float
+        Velocity grid cell size in m/s.
+    threshold : float
+        VDF threshold before multiplying by ``dv``.
+    vdflim : float, optional
+        Visible velocity limit in m/s.
+    decision_score : float, optional
+        Optional model score or probability to show in the plot title.
+    predicted_class_name : str, optional
+        Optional predicted class name to show in the plot title.
+    sample_index : int, optional
+        Dataset sample index to show in the plot title.
+
+    Returns
+    -------
+    matplotlib.image.AxesImage or None
+        Image object for colorbar creation, or ``None`` for empty samples.
+    """
+
+    vdf_plot = _prepare_vdf_xz_plot(
+        vdf=vdf,
+        metadata_row=metadata_row,
+        dv=dv,
+        threshold=threshold,
+    )
+
+    if vdf_plot is None:
+        return None
+
+    return _plot_prepared_vdf_xz_slice_on_axis(
+        ax=ax,
+        vdf_plot=vdf_plot,
+        y_label=y_label,
+        metadata_row=metadata_row,
+        extent=extent,
+        vdflim=vdflim,
+        decision_score=decision_score,
+        predicted_class_name=predicted_class_name,
+        sample_index=sample_index,
+    )
+
+
+def _prepare_vdf_xz_plot(vdf, metadata_row, dv, threshold):
+    """
+    Create a thresholded xz VDF slice for plotting.
+
+    Parameters
+    ----------
+    vdf : numpy.ndarray
+        3D VDF array with axis order ``[vx, vy, vz]``.
+    metadata_row : dict or pandas.Series
+        Metadata row for the sample.
+    dv : float
+        Velocity grid cell size in m/s.
+    threshold : float
+        VDF threshold before multiplying by ``dv``.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray or None
+        Thresholded xz VDF slice multiplied by ``dv``, or ``None`` when the
+        sample has no positive values.
+    """
 
     vdf_swapped = np.swapaxes(vdf, 2, 0)
-
     mid = vdf_swapped.shape[1] // 2
 
     vdf_plot_raw = vdf_swapped[:, mid, :] * dv
@@ -477,11 +766,63 @@ def plot_vdf_xz_slice(
             f"cid={metadata_row.get('cid', 'unknown')}, "
             f"class={metadata_row.get('class_name', 'unknown')}"
         )
-        return
+        return None
 
-    fig, ax1 = plt.subplots(figsize=(7, 6))
+    return vdf_plot
 
-    im = ax1.imshow(
+
+def _plot_prepared_vdf_xz_slice_on_axis(
+        ax,
+        vdf_plot,
+        y_label,
+        metadata_row,
+        extent,
+        vdflim=2e6,
+        decision_score=None,
+        predicted_class_name=None,
+        sample_index=None,
+        title=None,
+):
+    """
+    Plot a prepared xz VDF slice on an existing matplotlib axis.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis where the VDF slice is drawn.
+    vdf_plot : numpy.ma.MaskedArray
+        Thresholded xz VDF slice multiplied by ``dv``.
+    y_label : int
+        Integer label.
+    metadata_row : dict or pandas.Series
+        Metadata row for the sample.
+    extent : array-like of float
+        Velocity mesh extent ``[vxmin, vymin, vzmin, vxmax, vymax, vzmax]``.
+    vdflim : float, optional
+        Visible velocity limit in m/s.
+    decision_score : float, optional
+        Optional model score or probability to show in the plot title.
+    predicted_class_name : str, optional
+        Optional predicted class name to show in the plot title.
+    sample_index : int, optional
+        Dataset sample index to show in the plot title.
+    title : str, optional
+        Explicit plot title. When omitted, a metadata title is created.
+
+    Returns
+    -------
+    matplotlib.image.AxesImage
+        Image object for colorbar creation.
+    """
+
+    extent = np.asarray(extent)
+
+    vxmin = extent[0]
+    vzmin = extent[2]
+    vxmax = extent[3]
+    vzmax = extent[5]
+
+    im = ax.imshow(
         vdf_plot,
         origin="lower",
         extent=[
@@ -493,16 +834,23 @@ def plot_vdf_xz_slice(
         cmap="nipy_spectral",
     )
 
-    ax1.grid(color="gray", axis="both")
-    ax1.set_xlim(-vdflim / 1000, vdflim / 1000)
-    ax1.set_ylim(-vdflim / 1000, vdflim / 1000)
-    ax1.set_xlabel("v_x")
-    ax1.set_ylabel("v_z")
+    ax.grid(color="gray", axis="both")
+    ax.set_xlim(-vdflim / 1000, vdflim / 1000)
+    ax.set_ylim(-vdflim / 1000, vdflim / 1000)
+    ax.set_xlabel("v_x")
+    ax.set_ylabel("v_z")
+
+    if title is not None:
+        ax.set_title(title)
+        return im
 
     title_parts = [
         f"timestep={metadata_row.get('timestep', 'unknown')}",
         f"cid={metadata_row.get('cid', 'unknown')}",
     ]
+
+    if sample_index is not None:
+        title_parts.insert(0, f"sample={int(sample_index)}")
 
     class_name = metadata_row.get("class_name")
     if class_name is not None:
@@ -517,9 +865,6 @@ def plot_vdf_xz_slice(
     if decision_score is not None:
         title_parts.append(f"score={decision_score:.3g}")
 
-    ax1.set_title(", ".join(title_parts))
+    ax.set_title(", ".join(title_parts))
 
-    fig.colorbar(im, ax=ax1, label="f(v)")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
+    return im

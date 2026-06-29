@@ -1,0 +1,8 @@
+dataset_dir: data/train/timesteps_{timestep}
+output_dir: data/train/timesteps_{timestep}/plots/random_class_samples
+
+plot:
+  vdflim: 2000000.0
+  random_state: 1234
+  n_columns: 2
+  output_file: random_class_samples_xz.png
