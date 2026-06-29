@@ -362,6 +362,46 @@ def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
     return float((vmax - vmin) / vdf_shape[axis_index])
 
 
+def get_vdf_plot_parameters(reader, cid, vdf_shape, pop="avgs"):
+    """
+    Read sample specific parameters from an open VLSV reader.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    cid : int
+        Spatial cell ID..
+    vdf_shape : tuple of int
+        Shape of the VDF array.
+    pop : str, optional
+        Particle population name.
+
+    Returns
+    -------
+    extent : numpy.ndarray
+        Velocity mesh extent.
+    dc : float
+        Velocity cell size.
+    threshold : float
+        VDF sparsity threshold.
+    """
+
+    extent = np.asarray(
+        reader.get_velocity_mesh_extent(pop=pop),
+        dtype=float
+    )
+
+    dv = get_velocity_cell_size_from_extent(
+        extent=extent,
+        vdf_shape=vdf_shape,
+    )
+
+    threshold = float(reader.read_variable("MinValue", int(cid)))
+
+    return extent, dv, threshold
+
+
 def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs"):
     """
     Read sample specific parameters from a VLSV file.
@@ -389,19 +429,12 @@ def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs")
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
 
-    extent = np.asarray(
-        reader.get_velocity_mesh_extent(pop=pop),
-        dtype=float
-    )
-
-    dv = get_velocity_cell_size_from_extent(
-        extent=extent,
+    return get_vdf_plot_parameters(
+        reader=reader,
+        cid=cid,
         vdf_shape=vdf_shape,
+        pop=pop,
     )
-
-    threshold = float(reader.read_variable("MinValue", int(cid)))
-
-    return extent, dv, threshold
 
 
 def create_xz_slice(vdf):

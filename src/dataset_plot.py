@@ -20,7 +20,7 @@ from src.colormap_helpers import (
     scatter_all_vdf_cells,
     scatter_label_points,
 )
-from src.vdf_helpers import get_vdf_plot_parameters_from_file
+from src.vdf_helpers import get_vdf_plot_parameters
 
 
 _MEMMAP_CACHE = {}
@@ -141,6 +141,7 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
     X_path = get_memmap_path(X, "X")
     class_frame_counts = {}
     plot_parameter_cache = {}
+    reader_cache = {}
     vdf_shape = tuple(X.shape[1:])
 
     for sample_index in range(X.shape[0]):
@@ -153,11 +154,16 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
             class_frame_counts[class_name] = 0
 
         class_frame_index = class_frame_counts[class_name]
-        cache_key = (file_location, cid, vdf_shape)
+        file_key = str(file_location)
+        cache_key = (file_key, cid, vdf_shape)
 
         if cache_key not in plot_parameter_cache:
-            plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
-                file_location=file_location,
+            reader = _get_cached_vlsv_reader(
+                reader_cache=reader_cache,
+                file_location=file_key,
+            )
+            plot_parameter_cache[cache_key] = get_vdf_plot_parameters(
+                reader=reader,
                 cid=cid,
                 vdf_shape=vdf_shape,
             )
@@ -521,6 +527,7 @@ def plot_random_class_samples(
     n_rows = (n_samples + n_columns - 1) // n_columns
 
     plot_parameter_cache = {}
+    reader_cache = {}
     plot_items = []
     vdf_shape = tuple(X.shape[1:])
 
@@ -528,11 +535,16 @@ def plot_random_class_samples(
         metadata_row = metadata.iloc[sample_index].to_dict()
         file_location = metadata_row["file_location"]
         cid = int(metadata_row["cid"])
-        cache_key = (file_location, cid, vdf_shape)
+        file_key = str(file_location)
+        cache_key = (file_key, cid, vdf_shape)
 
         if cache_key not in plot_parameter_cache:
-            plot_parameter_cache[cache_key] = get_vdf_plot_parameters_from_file(
-                file_location=file_location,
+            reader = _get_cached_vlsv_reader(
+                reader_cache=reader_cache,
+                file_location=file_key,
+            )
+            plot_parameter_cache[cache_key] = get_vdf_plot_parameters(
+                reader=reader,
                 cid=cid,
                 vdf_shape=vdf_shape,
             )
@@ -591,6 +603,32 @@ def plot_random_class_samples(
     plt.close(fig)
 
     return selected_indices
+
+
+def _get_cached_vlsv_reader(reader_cache, file_location):
+    """
+    Return an open VLSV reader from a per-call cache.
+
+    Parameters
+    ----------
+    reader_cache : dict
+        Mapping from VLSV file path to open reader.
+    file_location : str or pathlib.Path
+        Path to the VLSV file.
+
+    Returns
+    -------
+    analysator.vlsvfile.VlsvReader
+        Open reader for ``file_location``.
+    """
+
+    file_location = str(file_location)
+    reader = reader_cache.get(file_location)
+    if reader is None:
+        reader = pt.vlsvfile.VlsvReader(file_location)
+        reader_cache[file_location] = reader
+
+    return reader
 
 
 def _select_random_class_sample_indices(metadata, random_state=None):
