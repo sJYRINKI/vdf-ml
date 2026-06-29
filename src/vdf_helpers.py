@@ -381,10 +381,44 @@ def get_vdf_plot_parameters(reader, cid, vdf_shape, pop="avgs"):
     -------
     extent : numpy.ndarray
         Velocity mesh extent.
-    dc : float
+    dv : float
         Velocity cell size.
     threshold : float
         VDF sparsity threshold.
+    """
+
+    extent, dv = get_vdf_plot_axes_parameters(
+        reader=reader,
+        vdf_shape=vdf_shape,
+        pop=pop,
+    )
+    threshold = get_vdf_plot_threshold(
+        reader=reader,
+        cid=cid,
+    )
+
+    return extent, dv, threshold
+
+
+def get_vdf_plot_axes_parameters(reader, vdf_shape, pop="avgs"):
+    """
+    Read file-level VDF plot axis parameters from an open VLSV reader.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    vdf_shape : tuple of int
+        Shape of the VDF array.
+    pop : str, optional
+        Particle population name.
+
+    Returns
+    -------
+    extent : numpy.ndarray
+        Velocity mesh extent.
+    dv : float
+        Velocity cell size.
     """
 
     extent = np.asarray(
@@ -397,9 +431,29 @@ def get_vdf_plot_parameters(reader, cid, vdf_shape, pop="avgs"):
         vdf_shape=vdf_shape,
     )
 
+    return extent, dv
+
+
+def get_vdf_plot_threshold(reader, cid):
+    """
+    Read the VDF sparsity threshold for one spatial cell.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    cid : int
+        Spatial cell ID.
+
+    Returns
+    -------
+    float
+        VDF sparsity threshold.
+    """
+
     threshold = float(reader.read_variable("MinValue", int(cid)))
 
-    return extent, dv, threshold
+    return threshold
 
 
 def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs"):
@@ -421,7 +475,7 @@ def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs")
     -------
     extent : numpy.ndarray
         Velocity mesh extent.
-    dc : float
+    dv : float
         Velocity cell size.
     threshold : float
         VDF sparsity threshold.

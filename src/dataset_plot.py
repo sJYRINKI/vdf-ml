@@ -20,7 +20,7 @@ from src.colormap_helpers import (
     scatter_all_vdf_cells,
     scatter_label_points,
 )
-from src.vdf_helpers import get_vdf_plot_parameters
+from src.vdf_helpers import get_vdf_plot_axes_parameters, get_vdf_plot_threshold
 
 
 _MEMMAP_CACHE = {}
@@ -140,7 +140,8 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
 
     X_path = get_memmap_path(X, "X")
     class_frame_counts = {}
-    plot_parameter_cache = {}
+    plot_axes_cache = {}
+    plot_threshold_cache = {}
     reader_cache = {}
     vdf_shape = tuple(X.shape[1:])
 
@@ -155,20 +156,14 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
 
         class_frame_index = class_frame_counts[class_name]
         file_key = str(file_location)
-        cache_key = (file_key, cid, vdf_shape)
-
-        if cache_key not in plot_parameter_cache:
-            reader = _get_cached_vlsv_reader(
-                reader_cache=reader_cache,
-                file_location=file_key,
-            )
-            plot_parameter_cache[cache_key] = get_vdf_plot_parameters(
-                reader=reader,
-                cid=cid,
-                vdf_shape=vdf_shape,
-            )
-
-        extent, dv, threshold = plot_parameter_cache[cache_key]
+        extent, dv, threshold = _get_cached_vdf_plot_parameters(
+            reader_cache=reader_cache,
+            plot_axes_cache=plot_axes_cache,
+            plot_threshold_cache=plot_threshold_cache,
+            file_location=file_key,
+            cid=cid,
+            vdf_shape=vdf_shape,
+        )
 
         class_output_dir = output_dir / class_name
         output_path = class_output_dir / f"sample_{class_frame_index:04d}_xz.png"
@@ -526,7 +521,8 @@ def plot_random_class_samples(
     n_samples = len(selected_indices)
     n_rows = (n_samples + n_columns - 1) // n_columns
 
-    plot_parameter_cache = {}
+    plot_axes_cache = {}
+    plot_threshold_cache = {}
     reader_cache = {}
     plot_items = []
     vdf_shape = tuple(X.shape[1:])
@@ -536,20 +532,14 @@ def plot_random_class_samples(
         file_location = metadata_row["file_location"]
         cid = int(metadata_row["cid"])
         file_key = str(file_location)
-        cache_key = (file_key, cid, vdf_shape)
-
-        if cache_key not in plot_parameter_cache:
-            reader = _get_cached_vlsv_reader(
-                reader_cache=reader_cache,
-                file_location=file_key,
-            )
-            plot_parameter_cache[cache_key] = get_vdf_plot_parameters(
-                reader=reader,
-                cid=cid,
-                vdf_shape=vdf_shape,
-            )
-
-        extent, dv, threshold = plot_parameter_cache[cache_key]
+        extent, dv, threshold = _get_cached_vdf_plot_parameters(
+            reader_cache=reader_cache,
+            plot_axes_cache=plot_axes_cache,
+            plot_threshold_cache=plot_threshold_cache,
+            file_location=file_key,
+            cid=cid,
+            vdf_shape=vdf_shape,
+        )
         vdf_plot = _prepare_vdf_xz_plot(
             vdf=X[sample_index],
             metadata_row=metadata_row,
@@ -603,6 +593,69 @@ def plot_random_class_samples(
     plt.close(fig)
 
     return selected_indices
+
+
+def _get_cached_vdf_plot_parameters(
+        reader_cache,
+        plot_axes_cache,
+        plot_threshold_cache,
+        file_location,
+        cid,
+        vdf_shape,
+):
+    """
+    Return VDF plot parameters using per-file and per-cell caches.
+
+    Parameters
+    ----------
+    reader_cache : dict
+        Mapping from VLSV file path to open reader.
+    plot_axes_cache : dict
+        Mapping from ``(file_location, vdf_shape)`` to ``(extent, dv)``.
+    plot_threshold_cache : dict
+        Mapping from ``(file_location, cid)`` to VDF sparsity threshold.
+    file_location : str or pathlib.Path
+        Path to the VLSV file.
+    cid : int
+        Spatial cell ID.
+    vdf_shape : tuple of int
+        Shape of one saved VDF sample.
+
+    Returns
+    -------
+    extent : numpy.ndarray
+        Velocity mesh extent.
+    dv : float
+        Velocity cell size.
+    threshold : float
+        VDF sparsity threshold.
+    """
+
+    file_location = str(file_location)
+    cid = int(cid)
+    axes_key = (file_location, tuple(vdf_shape))
+    threshold_key = (file_location, cid)
+
+    reader = _get_cached_vlsv_reader(
+        reader_cache=reader_cache,
+        file_location=file_location,
+    )
+
+    if axes_key not in plot_axes_cache:
+        plot_axes_cache[axes_key] = get_vdf_plot_axes_parameters(
+            reader=reader,
+            vdf_shape=vdf_shape,
+        )
+    if threshold_key not in plot_threshold_cache:
+        plot_threshold_cache[threshold_key] = get_vdf_plot_threshold(
+            reader=reader,
+            cid=cid,
+        )
+
+    extent, dv = plot_axes_cache[axes_key]
+    threshold = plot_threshold_cache[threshold_key]
+
+    return extent, dv, threshold
 
 
 def _get_cached_vlsv_reader(reader_cache, file_location):
