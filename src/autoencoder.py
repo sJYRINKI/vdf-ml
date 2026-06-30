@@ -26,6 +26,9 @@ from src.autoencoder_plot import (
 )
 
 
+LOG_10 = float(np.log(10.0))
+
+
 class VdfSliceAutoencoder2D(nn.Module):
     """
     Deterministic convolutional autoencoder for 2D VDF xz slices.
@@ -38,14 +41,29 @@ class VdfSliceAutoencoder2D(nn.Module):
         Output channels for each encoder convolution block.
     latent_dim : int
         Size of the latent vector.
+    encoder_pooling : {"average", "stride"}, optional
+        Downsampling method used in the encoder.
+    encoder_adaptive_pool_shape : tuple of int or None, optional
+        Optional adaptive average pooling output shape after convolution blocks.
     """
 
-    def __init__(self, input_shape, channels=(16, 32, 64, 128), latent_dim=64):
+    def __init__(
+        self,
+        input_shape,
+        channels=(16, 32, 64),
+        latent_dim=64,
+        encoder_pooling="average",
+        encoder_adaptive_pool_shape=(4, 4),
+    ):
         super().__init__()
 
         self.input_shape = tuple(int(value) for value in input_shape)
         self.channels = tuple(int(channel) for channel in channels)
         self.latent_dim = int(latent_dim)
+        self.encoder_pooling = str(encoder_pooling)
+        self.encoder_adaptive_pool_shape = resolve_optional_pool_shape(
+            encoder_adaptive_pool_shape
+        )
 
         if len(self.input_shape) != 3:
             raise ValueError("input_shape must be (channels, height, width)")
@@ -55,6 +73,8 @@ class VdfSliceAutoencoder2D(nn.Module):
             raise ValueError("channels must contain positive integers")
         if self.latent_dim <= 0:
             raise ValueError("latent_dim must be positive")
+        if self.encoder_pooling not in {"average", "stride"}:
+            raise ValueError("encoder_pooling must be 'average' or 'stride'")
 
         encoder_layers = []
         encoder_sizes = [self.input_shape[1:]]
@@ -62,22 +82,34 @@ class VdfSliceAutoencoder2D(nn.Module):
         height, width = self.input_shape[1:]
 
         for output_channels in self.channels:
+            convolution_stride = 2 if self.encoder_pooling == "stride" else 1
             encoder_layers.extend(
                 [
                     nn.Conv2d(
                         input_channels,
                         output_channels,
                         kernel_size=3,
-                        stride=2,
+                        stride=convolution_stride,
                         padding=1,
                     ),
                     nn.ReLU(),
                 ]
             )
-            height = _conv_stride2_output_size(height)
-            width = _conv_stride2_output_size(width)
+            if self.encoder_pooling == "average":
+                encoder_layers.append(nn.AvgPool2d(kernel_size=2))
+                height = _pool_stride2_output_size(height)
+                width = _pool_stride2_output_size(width)
+            else:
+                height = _conv_stride2_output_size(height)
+                width = _conv_stride2_output_size(width)
             encoder_sizes.append((height, width))
             input_channels = output_channels
+
+        if self.encoder_adaptive_pool_shape is not None:
+            encoder_layers.append(
+                nn.AdaptiveAvgPool2d(self.encoder_adaptive_pool_shape)
+            )
+            height, width = self.encoder_adaptive_pool_shape
 
         self.encoder = nn.Sequential(*encoder_layers)
         self.encoder_shape = (self.channels[-1], height, width)
@@ -94,13 +126,16 @@ class VdfSliceAutoencoder2D(nn.Module):
 
         decoder_layers = []
         decoder_input_channels = self.channels[-1]
+        decoder_targets, decoder_channels = create_decoder_plan(
+            input_channels=self.input_shape[0],
+            channels=self.channels,
+            encoder_sizes=self.encoder_sizes,
+            has_adaptive_pool=self.encoder_adaptive_pool_shape is not None,
+        )
 
-        for block_index in reversed(range(len(self.channels))):
-            target_size = self.encoder_sizes[block_index]
-            if block_index > 0:
-                output_channels = self.channels[block_index - 1]
-            else:
-                output_channels = self.input_shape[0]
+        for layer_index, (target_size, output_channels) in enumerate(
+            zip(decoder_targets, decoder_channels)
+        ):
 
             decoder_layers.append(
                 nn.Upsample(
@@ -117,7 +152,7 @@ class VdfSliceAutoencoder2D(nn.Module):
                     padding=1,
                 )
             )
-            if block_index > 0:
+            if layer_index < len(decoder_channels) - 1:
                 decoder_layers.append(nn.ReLU())
 
             decoder_input_channels = output_channels
@@ -168,6 +203,89 @@ class VdfSliceAutoencoder2D(nn.Module):
         """Return reconstructed normalized log VDF slices."""
 
         return self.decode(self.encode(inputs))
+
+
+class VdfAutoencoderLoss(nn.Module):
+    """
+    Reconstruction loss with optional high-signal and physical terms.
+
+    Parameters
+    ----------
+    mean : float
+        Training-set mean used to normalize log-scaled VDF slices.
+    std : float
+        Training-set standard deviation used to normalize log-scaled VDF slices.
+    high_signal_loss_weight : float, optional
+        Weight for the high-signal reconstruction term.
+    high_signal_quantile : float, optional
+        Target-slice quantile used to define high-signal pixels.
+    mass_loss_weight : float, optional
+        Weight for the log10 slice-mass loss.
+    peak_loss_weight : float, optional
+        Weight for the log10 peak-value loss.
+    """
+
+    def __init__(
+        self,
+        mean,
+        std,
+        high_signal_loss_weight=0.0,
+        high_signal_quantile=0.95,
+        mass_loss_weight=0.0,
+        peak_loss_weight=0.0,
+    ):
+        super().__init__()
+
+        self.mean = float(mean)
+        self.std = float(std)
+        self.high_signal_loss_weight = float(high_signal_loss_weight)
+        self.high_signal_quantile = float(high_signal_quantile)
+        self.mass_loss_weight = float(mass_loss_weight)
+        self.peak_loss_weight = float(peak_loss_weight)
+
+        if self.std <= 0.0:
+            raise ValueError("Loss normalization std must be positive")
+        if self.high_signal_loss_weight < 0.0:
+            raise ValueError("loss.high_signal_loss_weight must be non-negative")
+        if not 0.0 <= self.high_signal_quantile < 1.0:
+            raise ValueError("loss.high_signal_quantile must be in [0, 1)")
+        if self.mass_loss_weight < 0.0:
+            raise ValueError("loss.mass_loss_weight must be non-negative")
+        if self.peak_loss_weight < 0.0:
+            raise ValueError("loss.peak_loss_weight must be non-negative")
+
+    def forward(self, reconstruction, target):
+        """Return weighted autoencoder loss."""
+
+        reconstruction_loss = torch.mean(torch.square(reconstruction - target))
+        total_loss = reconstruction_loss
+
+        if self.high_signal_loss_weight > 0.0:
+            total_loss = (
+                total_loss
+                + self.high_signal_loss_weight
+                * high_signal_reconstruction_loss(
+                    reconstruction=reconstruction,
+                    target=target,
+                    quantile=self.high_signal_quantile,
+                )
+            )
+        if self.mass_loss_weight > 0.0:
+            total_loss = total_loss + self.mass_loss_weight * torch.mean(
+                torch.square(
+                    normalized_log_slice_mass(reconstruction, self.mean, self.std)
+                    - normalized_log_slice_mass(target, self.mean, self.std)
+                )
+            )
+        if self.peak_loss_weight > 0.0:
+            total_loss = total_loss + self.peak_loss_weight * torch.mean(
+                torch.square(
+                    normalized_log_slice_peak(reconstruction, self.mean, self.std)
+                    - normalized_log_slice_peak(target, self.mean, self.std)
+                )
+            )
+
+        return total_loss
 
 
 def maybe_wrap_data_parallel(model, device, multi_gpu=True, device_ids="all"):
@@ -313,6 +431,222 @@ def encode_model(model, inputs):
     return get_base_model(model).encode(inputs)
 
 
+def resolve_optional_pool_shape(pool_shape):
+    """
+    Resolve an optional two-dimensional pooling shape.
+
+    Parameters
+    ----------
+    pool_shape : sequence of int or None
+        Pooling shape, or ``None`` to disable adaptive pooling.
+
+    Returns
+    -------
+    tuple of int or None
+        Validated pooling shape.
+    """
+
+    if pool_shape is None:
+        return None
+
+    if isinstance(pool_shape, str):
+        if pool_shape.lower() in {"none", "false", "off"}:
+            return None
+        values = [int(value.strip()) for value in pool_shape.split(",")]
+    else:
+        values = [int(value) for value in pool_shape]
+
+    if len(values) != 2 or any(value <= 0 for value in values):
+        raise ValueError("encoder_adaptive_pool_shape must contain two positives")
+
+    return tuple(values)
+
+
+def create_decoder_plan(input_channels, channels, encoder_sizes, has_adaptive_pool):
+    """
+    Create decoder target sizes and channels.
+
+    Parameters
+    ----------
+    input_channels : int
+        Number of model input channels.
+    channels : sequence of int
+        Encoder channel sizes.
+    encoder_sizes : sequence of tuple of int
+        Spatial sizes before and after each encoder downsampling block.
+    has_adaptive_pool : bool
+        Whether the encoder ends with adaptive pooling.
+
+    Returns
+    -------
+    decoder_targets : list of tuple of int
+        Spatial sizes used by decoder upsampling blocks.
+    decoder_channels : list of int
+        Output channels for each decoder convolution.
+    """
+
+    if has_adaptive_pool:
+        decoder_targets = list(reversed(encoder_sizes))
+        decoder_channels = [channels[-1], *reversed(channels[:-1]), input_channels]
+    else:
+        decoder_targets = list(reversed(encoder_sizes[:-1]))
+        decoder_channels = [*reversed(channels[:-1]), input_channels]
+
+    return decoder_targets, decoder_channels
+
+
+def normalized_log_slice_mass(normalized_slice, mean, std):
+    """
+    Return log10 slice mass from normalized log-scaled VDF slices.
+
+    Parameters
+    ----------
+    normalized_slice : torch.Tensor
+        Normalized log-scaled VDF slices with shape ``(batch, 1, height, width)``.
+    mean : float
+        Training-set mean used for normalization.
+    std : float
+        Training-set standard deviation used for normalization.
+
+    Returns
+    -------
+    torch.Tensor
+        Approximate ``log10(sum(f))`` for each slice.
+    """
+
+    log_values = normalized_slice * float(std) + float(mean)
+    return torch.logsumexp(log_values * LOG_10, dim=(1, 2, 3)) / LOG_10
+
+
+def normalized_log_slice_peak(normalized_slice, mean, std):
+    """
+    Return log10 peak value from normalized log-scaled VDF slices.
+
+    Parameters
+    ----------
+    normalized_slice : torch.Tensor
+        Normalized log-scaled VDF slices with shape ``(batch, 1, height, width)``.
+    mean : float
+        Training-set mean used for normalization.
+    std : float
+        Training-set standard deviation used for normalization.
+
+    Returns
+    -------
+    torch.Tensor
+        Approximate ``log10(max(f))`` for each slice.
+    """
+
+    log_values = normalized_slice * float(std) + float(mean)
+    return torch.amax(log_values, dim=(1, 2, 3))
+
+
+def high_signal_reconstruction_loss(reconstruction, target, quantile):
+    """
+    Return MSE over the highest-signal pixels in each target slice.
+
+    Parameters
+    ----------
+    reconstruction : torch.Tensor
+        Reconstructed normalized log VDF slices.
+    target : torch.Tensor
+        Target normalized log VDF slices.
+    quantile : float
+        Target-slice quantile used to select high-signal pixels.
+
+    Returns
+    -------
+    torch.Tensor
+        Mean squared reconstruction error over high-signal pixels.
+    """
+
+    return torch.mean(
+        per_sample_high_signal_reconstruction_loss(
+            reconstruction=reconstruction,
+            target=target,
+            quantile=quantile,
+        )
+    )
+
+
+def per_sample_high_signal_reconstruction_loss(reconstruction, target, quantile):
+    """
+    Return per-sample MSE over high-signal target pixels.
+
+    Parameters
+    ----------
+    reconstruction : torch.Tensor
+        Reconstructed normalized log VDF slices.
+    target : torch.Tensor
+        Target normalized log VDF slices.
+    quantile : float
+        Target-slice quantile used to select high-signal pixels.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-sample high-signal reconstruction losses.
+    """
+
+    flattened_target = target.reshape(target.shape[0], -1)
+    flattened_error = torch.square(
+        reconstruction.reshape(reconstruction.shape[0], -1) - flattened_target
+    )
+    n_pixels = flattened_target.shape[1]
+    n_high_signal = max(1, int(np.ceil((1.0 - float(quantile)) * n_pixels)))
+    high_signal_indices = torch.topk(
+        flattened_target,
+        k=n_high_signal,
+        dim=1,
+        largest=True,
+        sorted=False,
+    ).indices
+
+    return torch.mean(
+        torch.gather(flattened_error, dim=1, index=high_signal_indices),
+        dim=1,
+    )
+
+
+def resolve_autoencoder_loss_config(config):
+    """
+    Resolve autoencoder loss settings.
+
+    Parameters
+    ----------
+    config : dict
+        Loss configuration.
+
+    Returns
+    -------
+    dict
+        Validated loss settings.
+    """
+
+    if config is None:
+        config = {}
+
+    loss_config = {
+        "high_signal_loss_weight": float(
+            config.get("high_signal_loss_weight", 0.0)
+        ),
+        "high_signal_quantile": float(config.get("high_signal_quantile", 0.95)),
+        "mass_loss_weight": float(config.get("mass_loss_weight", 0.0)),
+        "peak_loss_weight": float(config.get("peak_loss_weight", 0.0)),
+    }
+
+    if loss_config["high_signal_loss_weight"] < 0.0:
+        raise ValueError("loss.high_signal_loss_weight must be non-negative")
+    if not 0.0 <= loss_config["high_signal_quantile"] < 1.0:
+        raise ValueError("loss.high_signal_quantile must be in [0, 1)")
+    if loss_config["mass_loss_weight"] < 0.0:
+        raise ValueError("loss.mass_loss_weight must be non-negative")
+    if loss_config["peak_loss_weight"] < 0.0:
+        raise ValueError("loss.peak_loss_weight must be non-negative")
+
+    return loss_config
+
+
 def train_autoencoder(config, dataset_id, model_id):
     """
     Train and save a deterministic VDF slice autoencoder.
@@ -335,13 +669,18 @@ def train_autoencoder(config, dataset_id, model_id):
     )
     load_elapsed = time.perf_counter() - load_start
     model_config = config.get("model", {})
+    loss_config = resolve_autoencoder_loss_config(config.get("loss", {}))
     training_config = config.get("training", {})
 
     channels = tuple(
         int(channel)
-        for channel in model_config.get("channels", [16, 32, 64, 128])
+        for channel in model_config.get("channels", [16, 32, 64])
     )
     latent_dim = int(model_config.get("latent_dim", 64))
+    encoder_pooling = str(model_config.get("encoder_pooling", "average"))
+    encoder_adaptive_pool_shape = resolve_optional_pool_shape(
+        model_config.get("encoder_adaptive_pool_shape", [4, 4])
+    )
     learning_rate = float(training_config.get("learning_rate", 0.0003))
     weight_decay = float(training_config.get("weight_decay", 0.0001))
     max_epochs = int(training_config.get("max_epochs", 200))
@@ -382,12 +721,22 @@ def train_autoencoder(config, dataset_id, model_id):
         input_shape=input_shape,
         channels=channels,
         latent_dim=latent_dim,
+        encoder_pooling=encoder_pooling,
+        encoder_adaptive_pool_shape=encoder_adaptive_pool_shape,
     ).to(device)
     model = maybe_wrap_data_parallel(
         model=model,
         device=device,
         multi_gpu=multi_gpu,
         device_ids=device_ids,
+    )
+    loss_function = VdfAutoencoderLoss(
+        mean=data["normalization"]["mean"],
+        std=data["normalization"]["std"],
+        high_signal_loss_weight=loss_config["high_signal_loss_weight"],
+        high_signal_quantile=loss_config["high_signal_quantile"],
+        mass_loss_weight=loss_config["mass_loss_weight"],
+        peak_loss_weight=loss_config["peak_loss_weight"],
     )
 
     train_loader = create_data_loader(
@@ -440,6 +789,7 @@ def train_autoencoder(config, dataset_id, model_id):
         model=model,
         train_loader=train_loader,
         validation_loader=validation_loader,
+        loss_function=loss_function,
         device=device,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
@@ -468,6 +818,7 @@ def train_autoencoder(config, dataset_id, model_id):
             "test": test_loader,
         },
         data=data,
+        loss_config=loss_config,
         device=device,
     )
     reconstruction_metrics_path = output_dir / "reconstruction_metrics.csv"
@@ -520,6 +871,9 @@ def train_autoencoder(config, dataset_id, model_id):
         model_id=model_id,
         channels=channels,
         latent_dim=latent_dim,
+        encoder_pooling=encoder_pooling,
+        encoder_adaptive_pool_shape=encoder_adaptive_pool_shape,
+        loss_config=loss_config,
         batch_size=batch_size,
     )
 
@@ -528,6 +882,7 @@ def train_autoencoder(config, dataset_id, model_id):
         model_id=model_id,
         data=data,
         model=model,
+        loss_config=loss_config,
         training_result=training_result,
         reconstruction_metrics=reconstruction_metrics,
         checkpoint_path=checkpoint_path,
@@ -636,6 +991,7 @@ def fit_autoencoder(
     model,
     train_loader,
     validation_loader,
+    loss_function,
     device,
     learning_rate,
     weight_decay,
@@ -655,6 +1011,8 @@ def fit_autoencoder(
         Training data loader.
     validation_loader : torch.utils.data.DataLoader
         Validation data loader.
+    loss_function : torch.nn.Module
+        Training and validation loss.
     device : torch.device
         Training device.
     learning_rate : float
@@ -681,7 +1039,6 @@ def fit_autoencoder(
         lr=float(learning_rate),
         weight_decay=float(weight_decay),
     )
-    loss_function = nn.MSELoss()
     history = []
     best_validation_loss = None
     best_epoch = 0
@@ -810,7 +1167,7 @@ def evaluate_autoencoder_loss(model, data_loader, loss_function, device):
     return total_loss / total_samples
 
 
-def create_reconstruction_metrics(model, loaders, data, device):
+def create_reconstruction_metrics(model, loaders, data, loss_config, device):
     """
     Create per-sample reconstruction metrics for all splits.
 
@@ -822,6 +1179,8 @@ def create_reconstruction_metrics(model, loaders, data, device):
         Mapping from split name to data loader.
     data : dict
         Autoencoder training data.
+    loss_config : dict
+        Autoencoder loss settings.
     device : torch.device
         Inference device.
 
@@ -834,6 +1193,7 @@ def create_reconstruction_metrics(model, loaders, data, device):
     metric_frames = []
     normalization = data["normalization"]
     input_config = data["input_config"]
+    high_signal_quantile = float(loss_config.get("high_signal_quantile", 0.95))
 
     model.eval()
     with torch.inference_mode():
@@ -854,6 +1214,15 @@ def create_reconstruction_metrics(model, loaders, data, device):
                     torch.square(reconstruction - targets),
                     dim=(1, 2, 3),
                 ).cpu().numpy()
+                high_signal_losses = (
+                    per_sample_high_signal_reconstruction_loss(
+                        reconstruction=reconstruction,
+                        target=targets,
+                        quantile=high_signal_quantile,
+                    )
+                    .cpu()
+                    .numpy()
+                )
 
                 original = normalized_log_slice_to_physical(
                     normalized_slice=targets.cpu().numpy()[:, 0, :, :],
@@ -871,6 +1240,22 @@ def create_reconstruction_metrics(model, loaders, data, device):
                 reconstructed_mass = reconstructed.sum(axis=(1, 2))
                 original_peak = original.max(axis=(1, 2))
                 reconstructed_peak = reconstructed.max(axis=(1, 2))
+                original_mass_log10 = _log10_with_eps(
+                    original_mass,
+                    input_config["log_eps"],
+                )
+                reconstructed_mass_log10 = _log10_with_eps(
+                    reconstructed_mass,
+                    input_config["log_eps"],
+                )
+                original_peak_log10 = _log10_with_eps(
+                    original_peak,
+                    input_config["log_eps"],
+                )
+                reconstructed_peak_log10 = _log10_with_eps(
+                    reconstructed_peak,
+                    input_config["log_eps"],
+                )
 
                 for row_index, sample_index in enumerate(
                     batch["sample_index"].cpu().numpy()
@@ -883,6 +1268,22 @@ def create_reconstruction_metrics(model, loaders, data, device):
                     peak_error = (
                         reconstructed_peak[row_index] - original_peak[row_index]
                     )
+                    mass_relative_error = _safe_relative_error(
+                        error=mass_error,
+                        reference=original_mass[row_index],
+                    )
+                    peak_relative_error = _safe_relative_error(
+                        error=peak_error,
+                        reference=original_peak[row_index],
+                    )
+                    mass_log10_error = (
+                        reconstructed_mass_log10[row_index]
+                        - original_mass_log10[row_index]
+                    )
+                    peak_log10_error = (
+                        reconstructed_peak_log10[row_index]
+                        - original_peak_log10[row_index]
+                    )
                     split_rows.append(
                         {
                             "split": split_name,
@@ -892,23 +1293,42 @@ def create_reconstruction_metrics(model, loaders, data, device):
                             "timestep": metadata_row.get("timestep"),
                             "cid": metadata_row.get("cid"),
                             "reconstruction_loss": float(losses[row_index]),
+                            "high_signal_reconstruction_loss": float(
+                                high_signal_losses[row_index]
+                            ),
                             "slice_mass": float(original_mass[row_index]),
                             "reconstructed_slice_mass": float(
                                 reconstructed_mass[row_index]
                             ),
                             "slice_mass_error": float(mass_error),
-                            "slice_mass_relative_error": _safe_relative_error(
-                                error=mass_error,
-                                reference=original_mass[row_index],
+                            "slice_mass_relative_error": mass_relative_error,
+                            "slice_mass_absolute_relative_error": abs(
+                                mass_relative_error
+                            ),
+                            "slice_mass_log10": float(original_mass_log10[row_index]),
+                            "reconstructed_slice_mass_log10": float(
+                                reconstructed_mass_log10[row_index]
+                            ),
+                            "slice_mass_log10_error": float(mass_log10_error),
+                            "slice_mass_log10_absolute_error": abs(
+                                float(mass_log10_error)
                             ),
                             "peak_value": float(original_peak[row_index]),
                             "reconstructed_peak_value": float(
                                 reconstructed_peak[row_index]
                             ),
                             "peak_value_error": float(peak_error),
-                            "peak_value_relative_error": _safe_relative_error(
-                                error=peak_error,
-                                reference=original_peak[row_index],
+                            "peak_value_relative_error": peak_relative_error,
+                            "peak_value_absolute_relative_error": abs(
+                                peak_relative_error
+                            ),
+                            "peak_value_log10": float(original_peak_log10[row_index]),
+                            "reconstructed_peak_value_log10": float(
+                                reconstructed_peak_log10[row_index]
+                            ),
+                            "peak_value_log10_error": float(peak_log10_error),
+                            "peak_value_log10_absolute_error": abs(
+                                float(peak_log10_error)
                             ),
                         }
                     )
@@ -1175,6 +1595,9 @@ def save_preprocessing(
     model_id,
     channels,
     latent_dim,
+    encoder_pooling,
+    encoder_adaptive_pool_shape,
+    loss_config,
     batch_size,
 ):
     """
@@ -1194,9 +1617,20 @@ def save_preprocessing(
         Autoencoder channel configuration.
     latent_dim : int
         Latent vector size.
+    encoder_pooling : str
+        Encoder downsampling method.
+    encoder_adaptive_pool_shape : tuple of int or None
+        Encoder adaptive pooling output shape.
+    loss_config : dict
+        Autoencoder loss settings.
     batch_size : int
         Training batch size.
     """
+
+    if encoder_adaptive_pool_shape is None:
+        adaptive_pool_shape = np.asarray([], dtype=int)
+    else:
+        adaptive_pool_shape = np.asarray(encoder_adaptive_pool_shape, dtype=int)
 
     np.savez(
         preprocessing_path,
@@ -1232,6 +1666,14 @@ def save_preprocessing(
         validation_test_gap=data["validation_test_gap"],
         channels=np.asarray(channels, dtype=int),
         latent_dim=np.asarray(latent_dim),
+        encoder_pooling=np.asarray(encoder_pooling),
+        encoder_adaptive_pool_shape=adaptive_pool_shape,
+        high_signal_loss_weight=np.asarray(
+            loss_config["high_signal_loss_weight"]
+        ),
+        high_signal_quantile=np.asarray(loss_config["high_signal_quantile"]),
+        mass_loss_weight=np.asarray(loss_config["mass_loss_weight"]),
+        peak_loss_weight=np.asarray(loss_config["peak_loss_weight"]),
         batch_size=np.asarray(batch_size),
     )
 
@@ -1241,6 +1683,7 @@ def create_autoencoder_metrics_text(
     model_id,
     data,
     model,
+    loss_config,
     training_result,
     reconstruction_metrics,
     checkpoint_path,
@@ -1281,6 +1724,8 @@ def create_autoencoder_metrics_text(
         Autoencoder training data.
     model : VdfSliceAutoencoder2D
         Trained model.
+    loss_config : dict
+        Autoencoder loss settings.
     training_result : dict
         Training history summary.
     reconstruction_metrics : pandas.DataFrame
@@ -1364,11 +1809,19 @@ def create_autoencoder_metrics_text(
         f"Input log min: {data['normalization']['log_min']}",
         f"Input log max: {data['normalization']['log_max']}",
         f"Encoder channels: {base_model.channels}",
+        f"Encoder pooling: {base_model.encoder_pooling}",
+        "Encoder adaptive pool shape: "
+        f"{base_model.encoder_adaptive_pool_shape}",
         f"Latent dimension: {base_model.latent_dim}",
         f"Training module: {model.__class__.__name__}",
         f"CUDA devices used: {get_model_device_ids(model)}",
         "Activation: relu",
         "Optimizer: AdamW",
+        "Loss reconstruction term: normalized log-space MSE",
+        f"Loss high-signal weight: {loss_config['high_signal_loss_weight']}",
+        f"Loss high-signal quantile: {loss_config['high_signal_quantile']}",
+        f"Loss log-mass weight: {loss_config['mass_loss_weight']}",
+        f"Loss log-peak weight: {loss_config['peak_loss_weight']}",
         f"Batch size: {batch_size}",
         f"Data loader workers: {num_workers}",
         f"Persistent workers: {persistent_workers and num_workers > 0}",
@@ -1413,8 +1866,11 @@ def create_autoencoder_metrics_text(
                 "cid",
                 "class_name",
                 "reconstruction_loss",
+                "high_signal_reconstruction_loss",
                 "slice_mass_relative_error",
                 "peak_value_relative_error",
+                "slice_mass_log10_error",
+                "peak_value_log10_error",
             ]
         ].to_string(index=False),
         "",
@@ -1455,8 +1911,59 @@ def summarize_split_losses(reconstruction_metrics):
             mean_loss=("reconstruction_loss", "mean"),
             median_loss=("reconstruction_loss", "median"),
             max_loss=("reconstruction_loss", "max"),
+            mean_high_signal_loss=("high_signal_reconstruction_loss", "mean"),
+            median_high_signal_loss=("high_signal_reconstruction_loss", "median"),
+            max_high_signal_loss=("high_signal_reconstruction_loss", "max"),
             mean_mass_relative_error=("slice_mass_relative_error", "mean"),
+            median_abs_mass_rel_error=(
+                "slice_mass_absolute_relative_error",
+                "median",
+            ),
+            p90_abs_mass_rel_error=(
+                "slice_mass_absolute_relative_error",
+                _quantile_90,
+            ),
+            p99_abs_mass_rel_error=(
+                "slice_mass_absolute_relative_error",
+                _quantile_99,
+            ),
+            median_abs_mass_log10_error=(
+                "slice_mass_log10_absolute_error",
+                "median",
+            ),
+            p90_abs_mass_log10_error=(
+                "slice_mass_log10_absolute_error",
+                _quantile_90,
+            ),
+            p99_abs_mass_log10_error=(
+                "slice_mass_log10_absolute_error",
+                _quantile_99,
+            ),
             mean_peak_relative_error=("peak_value_relative_error", "mean"),
+            median_abs_peak_rel_error=(
+                "peak_value_absolute_relative_error",
+                "median",
+            ),
+            p90_abs_peak_rel_error=(
+                "peak_value_absolute_relative_error",
+                _quantile_90,
+            ),
+            p99_abs_peak_rel_error=(
+                "peak_value_absolute_relative_error",
+                _quantile_99,
+            ),
+            median_abs_peak_log10_error=(
+                "peak_value_log10_absolute_error",
+                "median",
+            ),
+            p90_abs_peak_log10_error=(
+                "peak_value_log10_absolute_error",
+                _quantile_90,
+            ),
+            p99_abs_peak_log10_error=(
+                "peak_value_log10_absolute_error",
+                _quantile_99,
+            ),
         )
         .reset_index()
     )
@@ -1490,6 +1997,23 @@ def summarize_class_losses(reconstruction_metrics, split_name):
                 "mean_loss",
                 "median_loss",
                 "max_loss",
+                "mean_high_signal_loss",
+                "median_high_signal_loss",
+                "max_high_signal_loss",
+                "mean_mass_relative_error",
+                "median_abs_mass_rel_error",
+                "p90_abs_mass_rel_error",
+                "p99_abs_mass_rel_error",
+                "median_abs_mass_log10_error",
+                "p90_abs_mass_log10_error",
+                "p99_abs_mass_log10_error",
+                "mean_peak_relative_error",
+                "median_abs_peak_rel_error",
+                "p90_abs_peak_rel_error",
+                "p99_abs_peak_rel_error",
+                "median_abs_peak_log10_error",
+                "p90_abs_peak_log10_error",
+                "p99_abs_peak_log10_error",
             ]
         )
 
@@ -1500,8 +2024,59 @@ def summarize_class_losses(reconstruction_metrics, split_name):
             mean_loss=("reconstruction_loss", "mean"),
             median_loss=("reconstruction_loss", "median"),
             max_loss=("reconstruction_loss", "max"),
+            mean_high_signal_loss=("high_signal_reconstruction_loss", "mean"),
+            median_high_signal_loss=("high_signal_reconstruction_loss", "median"),
+            max_high_signal_loss=("high_signal_reconstruction_loss", "max"),
             mean_mass_relative_error=("slice_mass_relative_error", "mean"),
+            median_abs_mass_rel_error=(
+                "slice_mass_absolute_relative_error",
+                "median",
+            ),
+            p90_abs_mass_rel_error=(
+                "slice_mass_absolute_relative_error",
+                _quantile_90,
+            ),
+            p99_abs_mass_rel_error=(
+                "slice_mass_absolute_relative_error",
+                _quantile_99,
+            ),
+            median_abs_mass_log10_error=(
+                "slice_mass_log10_absolute_error",
+                "median",
+            ),
+            p90_abs_mass_log10_error=(
+                "slice_mass_log10_absolute_error",
+                _quantile_90,
+            ),
+            p99_abs_mass_log10_error=(
+                "slice_mass_log10_absolute_error",
+                _quantile_99,
+            ),
             mean_peak_relative_error=("peak_value_relative_error", "mean"),
+            median_abs_peak_rel_error=(
+                "peak_value_absolute_relative_error",
+                "median",
+            ),
+            p90_abs_peak_rel_error=(
+                "peak_value_absolute_relative_error",
+                _quantile_90,
+            ),
+            p99_abs_peak_rel_error=(
+                "peak_value_absolute_relative_error",
+                _quantile_99,
+            ),
+            median_abs_peak_log10_error=(
+                "peak_value_log10_absolute_error",
+                "median",
+            ),
+            p90_abs_peak_log10_error=(
+                "peak_value_log10_absolute_error",
+                _quantile_90,
+            ),
+            p99_abs_peak_log10_error=(
+                "peak_value_log10_absolute_error",
+                _quantile_99,
+            ),
         )
         .reset_index()
     )
@@ -1532,6 +2107,8 @@ def save_autoencoder_checkpoint(model, checkpoint_path):
             "input_shape": base_model.input_shape,
             "channels": list(base_model.channels),
             "latent_dim": base_model.latent_dim,
+            "encoder_pooling": base_model.encoder_pooling,
+            "encoder_adaptive_pool_shape": base_model.encoder_adaptive_pool_shape,
         },
         checkpoint_path,
     )
@@ -1573,6 +2150,11 @@ def load_autoencoder_checkpoint(checkpoint_path, device="cpu"):
         input_shape=checkpoint["input_shape"],
         channels=checkpoint["channels"],
         latent_dim=checkpoint["latent_dim"],
+        encoder_pooling=checkpoint.get("encoder_pooling", "stride"),
+        encoder_adaptive_pool_shape=checkpoint.get(
+            "encoder_adaptive_pool_shape",
+            None,
+        ),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -1604,6 +2186,23 @@ def format_timestep_range(timesteps):
 
 def _conv_stride2_output_size(size):
     return int(np.floor((int(size) + 2 - 2 - 1) / 2 + 1))
+
+
+def _pool_stride2_output_size(size):
+    return int(np.floor((int(size) - 2) / 2 + 1))
+
+
+def _log10_with_eps(values, log_eps):
+    values = np.asarray(values, dtype=np.float64)
+    return np.log10(np.maximum(values, 0.0) + float(log_eps))
+
+
+def _quantile_90(values):
+    return values.quantile(0.90)
+
+
+def _quantile_99(values):
+    return values.quantile(0.99)
 
 
 def _safe_relative_error(error, reference):

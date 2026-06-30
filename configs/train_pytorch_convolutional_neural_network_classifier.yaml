@@ -21,9 +21,9 @@ features:
 model:
   channels: [16, 32, 64]
   classifier_size: 64
-  dropout: 0.3
-  class_weight: sqrt_balanced
-  #class_weight: none
+  dropout: 0.2
+  #class_weight: sqrt_balanced
+  class_weight: none
   #class_weight: balanced
   weight_decay: 0.0001
   batch_size: 256
