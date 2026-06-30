@@ -98,6 +98,38 @@ def load_pytorch_convolutional_neural_network_classifier_model(model_dir):
     return model, preprocessing
 
 
+def load_autoencoder_model(model_dir):
+    """
+    Load a trained VDF slice autoencoder and preprocessing values.
+
+    Parameters
+    ----------
+    model_dir : str
+        Directory containing the model and preprocessing files.
+
+    Returns
+    -------
+    model : src.autoencoder.VdfSliceAutoencoder2D
+        Trained autoencoder.
+    preprocessing : numpy.lib.npyio.NpzFile
+        Saved preprocessing values.
+    """
+
+    from src.autoencoder import load_autoencoder_checkpoint
+
+    model_dir = Path(model_dir)
+    model_path = model_dir / "autoencoder.pt"
+    preprocessing_path = model_dir / "preprocessing.npz"
+
+    model = load_autoencoder_checkpoint(
+        checkpoint_path=model_path,
+        device="cpu",
+    )
+    preprocessing = np.load(preprocessing_path)
+
+    return model, preprocessing
+
+
 def load_model(model_dir, model_filename):
     """
     Load a trained model and preprocessing values from a model directory.
