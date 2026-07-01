@@ -42,6 +42,192 @@ def create_coordinate_name(coord_re):
     )
 
 
+def iter_enabled_regions_re(points_config, names_key, default_region_name="tail"):
+    """
+    Iterate configured spatial regions in Earth radii.
+
+    Parameters
+    ----------
+    points_config : dict
+        Point sampling configuration.
+    names_key : str
+        Key containing the ordered region names to use.
+    default_region_name : str, optional
+        Region name used for old configs with only ``region_re``.
+
+    Yields
+    ------
+    region_name : str
+        Region name.
+    region_re : dict
+        Region bounds in Earth radii.
+    """
+
+    points_config = points_config or {}
+    regions_re = points_config.get("regions_re")
+
+    if regions_re is None:
+        region_re = points_config.get("region_re")
+        if region_re is not None:
+            yield default_region_name, region_re
+        return
+
+    region_names = points_config.get(names_key)
+    if region_names is None:
+        region_names = list(regions_re)
+    elif isinstance(region_names, str):
+        region_names = [region_names]
+
+    for region_name in region_names:
+        if region_name not in regions_re:
+            raise ValueError(
+                f"points.{names_key} contains unknown region "
+                f"{region_name!r}"
+            )
+
+        yield str(region_name), regions_re[region_name]
+
+
+def find_matching_region_name_re(coord_re, points_config, names_key):
+    """
+    Return the first configured region containing a coordinate.
+
+    Parameters
+    ----------
+    coord_re : array-like of float
+        Coordinate in Earth radii, given as ``[x, y, z]``.
+    points_config : dict
+        Point sampling configuration.
+    names_key : str
+        Key containing the ordered region names to use.
+
+    Returns
+    -------
+    str or None
+        Matching region name, or ``None`` when the coordinate is outside all
+        enabled regions.
+    """
+
+    points_config = points_config or {}
+    if (
+            points_config.get("regions_re") is None
+            and points_config.get("region_re") is None
+    ):
+        return "all"
+
+    for region_name, region_re in iter_enabled_regions_re(
+            points_config=points_config,
+            names_key=names_key,
+    ):
+        if is_coord_in_region_re(coord_re, region_re):
+            return region_name
+
+    return None
+
+
+def is_coord_in_region_re(coord_re, region_re):
+    """
+    Check whether a coordinate is inside a region.
+
+    Parameters
+    ----------
+    coord_re : array-like of float
+        Coordinate in Earth radii, given as ``[x, y, z]``.
+    region_re : dict
+        Region bounds in Earth radii.
+
+    Returns
+    -------
+    bool
+        Whether the coordinate is inside the configured bounds.
+    """
+
+    coord_re = np.asarray(coord_re, dtype=float)
+
+    for axis_index, axis_name in enumerate(("x", "y", "z")):
+        lower_re, upper_re = get_region_axis_bounds_re(region_re, axis_name)
+
+        if lower_re is not None and coord_re[axis_index] < lower_re:
+            return False
+
+        if upper_re is not None and coord_re[axis_index] > upper_re:
+            return False
+
+    return True
+
+
+def create_region_mask_re(coords_re, region_re):
+    """
+    Create a boolean mask for coordinates inside a region.
+
+    Parameters
+    ----------
+    coords_re : numpy.ndarray
+        Coordinates in Earth radii with shape ``(n_cells, 3)``.
+    region_re : dict
+        Region bounds in Earth radii.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean mask selecting coordinates inside the configured region.
+    """
+
+    coords_re = np.asarray(coords_re, dtype=float)
+    selected = np.ones(coords_re.shape[0], dtype=bool)
+
+    for axis_index, axis_name in enumerate(("x", "y", "z")):
+        lower_re, upper_re = get_region_axis_bounds_re(region_re, axis_name)
+
+        if lower_re is not None:
+            selected &= coords_re[:, axis_index] >= lower_re
+
+        if upper_re is not None:
+            selected &= coords_re[:, axis_index] <= upper_re
+
+    return selected
+
+
+def get_region_axis_bounds_re(region_re, axis_name):
+    """
+    Return optional sorted bounds for one region axis.
+
+    Parameters
+    ----------
+    region_re : dict
+        Region bounds in Earth radii.
+    axis_name : {"x", "y", "z"}
+        Coordinate axis name.
+
+    Returns
+    -------
+    tuple
+        Pair of optional lower and upper bounds in Earth radii.
+    """
+
+    between = region_re.get(f"{axis_name}_between")
+    if between is not None:
+        lower_re, upper_re = between
+        return min(lower_re, upper_re), max(lower_re, upper_re)
+
+    abs_max_re = region_re.get(f"{axis_name}_abs_max")
+    if abs_max_re is not None:
+        abs_max_re = float(abs_max_re)
+        return -abs_max_re, abs_max_re
+
+    lower_re = region_re.get(f"{axis_name}_min")
+    upper_re = region_re.get(f"{axis_name}_max")
+    if lower_re is not None:
+        lower_re = float(lower_re)
+    if upper_re is not None:
+        upper_re = float(upper_re)
+
+    if lower_re is not None and upper_re is not None:
+        return min(lower_re, upper_re), max(lower_re, upper_re)
+
+    return lower_re, upper_re
+
+
 def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
     """
     Find the nearest cell ID with a VDF.

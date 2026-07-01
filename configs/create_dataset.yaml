@@ -7,20 +7,29 @@ output_dirs:
 
 labels:
   lobe: 0
-  other: 1
+  exhaust: 1
   o_point: 2
   reconnection: 3
+  dayside: 4
 
 creation:
-  planning_n_jobs: 24
-  extraction_n_jobs: 8
+  planning_n_jobs: 32
+  extraction_n_jobs: 2
 
 points:
   x_class_name: reconnection
   o_class_name: o_point
-  region_re:
-    x_between: [-30.0, -10.0]
-    z_abs_max: 1.0
+  point_region_names: [tail, dayside]
+  background_region_names: [tail, dayside]
+  regions_re:
+    tail:
+      background_class_name: exhaust
+      x_between: [-30.0, -10.0]
+      z_abs_max: 1.0
+    dayside:
+      background_class_name: dayside
+      x_between: [6.0, 15.0]
+      z_abs_max: 8.0
   x_selection:
     method: physical
     #method: manual
@@ -34,14 +43,14 @@ points:
       y_half_width_re: 0.0
       z_half_width_re: 0.3
   o_selection:
-    method: physical
-    #method: manual
+    #method: physical
+    method: manual
     core_fraction: 0.7
     y_half_width_re: 0.0
     manual_re:
-      x_half_width_re: 0.4
+      x_half_width_re: 0.3
       y_half_width_re: 0.0
-      z_half_width_re: 0.3
+      z_half_width_re: 0.2
 
 class_coords_re:
   lobe:

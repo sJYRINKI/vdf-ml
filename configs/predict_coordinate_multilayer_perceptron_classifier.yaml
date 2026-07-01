@@ -5,9 +5,10 @@ output_dir: data/predictions/multilayer_perceptron_classifier/{model_id}/timeste
 
 labels:
   lobe: 0
-  other: 1
+  exhaust: 1
   o_point: 2
   reconnection: 3
+  dayside: 4
 
 plot:
   vdflim: 2000000.0

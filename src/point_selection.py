@@ -69,6 +69,36 @@ def get_point_cellids_by_position(config, point_record, vdf_cellids, vdf_coords_
         Mapping from neighbor position name to VDF cell ID.
     """
 
+    return get_point_selection_result(
+        config=config,
+        point_record=point_record,
+        vdf_cellids=vdf_cellids,
+        vdf_coords_re=vdf_coords_re,
+    )["cellids_by_position"]
+
+
+def get_point_selection_result(config, point_record, vdf_cellids, vdf_coords_re):
+    """
+    Select VDF cell IDs and rejected candidates for a detected X/O point.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration.
+    point_record : dict
+        Detected X/O point record.
+    vdf_cellids : numpy.ndarray
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+
+    Returns
+    -------
+    dict
+        Selection result with selected ``cellids_by_position``,
+        ``rejected_cellids``, and optional ``metadata_by_position``.
+    """
+
     point_kind = point_record["point_kind"]
     selection_method = get_point_selection_method(
         config=config,
@@ -76,12 +106,76 @@ def get_point_cellids_by_position(config, point_record, vdf_cellids, vdf_coords_
     )
 
     if selection_method == "manual":
-        return get_vdf_cellids_in_manual(
-            config=config,
-            point_record=point_record,
-            vdf_cellids=vdf_cellids,
-            vdf_coords_re=vdf_coords_re,
+        return create_point_selection_result(
+            cellids_by_position=get_vdf_cellids_in_manual(
+                config=config,
+                point_record=point_record,
+                vdf_cellids=vdf_cellids,
+                vdf_coords_re=vdf_coords_re,
+            )
         )
+
+    physical_cellids_by_position = get_physical_point_cellids_by_position(
+        config=config,
+        point_record=point_record,
+        vdf_cellids=vdf_cellids,
+        vdf_coords_re=vdf_coords_re,
+    )
+
+    if selection_method == "physical":
+        return create_point_selection_result(
+            cellids_by_position=physical_cellids_by_position
+        )
+
+    manual_cellids_by_position = get_vdf_cellids_in_manual(
+        config=config,
+        point_record=point_record,
+        vdf_cellids=vdf_cellids,
+        vdf_coords_re=vdf_coords_re,
+    )
+
+    if selection_method == "consensus":
+        return create_consensus_point_selection_result(
+            physical_cellids_by_position=physical_cellids_by_position,
+            manual_cellids_by_position=manual_cellids_by_position,
+        )
+
+    if selection_method == "union_physical_priority":
+        return create_union_physical_priority_point_selection_result(
+            physical_cellids_by_position=physical_cellids_by_position,
+            manual_cellids_by_position=manual_cellids_by_position,
+        )
+
+    raise ValueError(f"Unsupported point selection method: {selection_method}")
+
+
+def get_physical_point_cellids_by_position(
+    config,
+    point_record,
+    vdf_cellids,
+    vdf_coords_re,
+):
+    """
+    Select VDF cell IDs with the physical method for one X/O point.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset configuration.
+    point_record : dict
+        Detected X/O point record.
+    vdf_cellids : numpy.ndarray
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+
+    Returns
+    -------
+    dict
+        Mapping from physical selection position name to VDF cell ID.
+    """
+
+    point_kind = point_record["point_kind"]
 
     if point_kind == "x":
         return get_vdf_cellids_in_hessian_di_box(
@@ -102,6 +196,214 @@ def get_point_cellids_by_position(config, point_record, vdf_cellids, vdf_coords_
     raise ValueError(f"Unknown point kind: {point_kind}")
 
 
+def create_point_selection_result(
+    cellids_by_position,
+    rejected_cellids=None,
+    metadata_by_position=None,
+):
+    """
+    Create a normalized point-selection result dictionary.
+
+    Parameters
+    ----------
+    cellids_by_position : dict
+        Mapping from selection position name to VDF cell ID.
+    rejected_cellids : set of int, optional
+        VDF cell IDs rejected from point and background classes.
+    metadata_by_position : dict, optional
+        Additional metadata for selected positions.
+
+    Returns
+    -------
+    dict
+        Point-selection result.
+    """
+
+    return {
+        "cellids_by_position": {
+            position: int(cid)
+            for position, cid in cellids_by_position.items()
+        },
+        "rejected_cellids": {
+            int(cid)
+            for cid in (rejected_cellids or set())
+        },
+        "metadata_by_position": metadata_by_position or {},
+    }
+
+
+def create_consensus_point_selection_result(
+    physical_cellids_by_position,
+    manual_cellids_by_position,
+):
+    """
+    Keep only cells selected by both physical and manual methods.
+
+    Parameters
+    ----------
+    physical_cellids_by_position : dict
+        Physical selection positions and VDF cell IDs.
+    manual_cellids_by_position : dict
+        Manual selection positions and VDF cell IDs.
+
+    Returns
+    -------
+    dict
+        Consensus point-selection result. Disagreement cells are rejected from
+        all classes so they cannot become background samples.
+    """
+
+    physical_positions_by_cellid = invert_cellids_by_position(
+        physical_cellids_by_position
+    )
+    manual_positions_by_cellid = invert_cellids_by_position(
+        manual_cellids_by_position
+    )
+    physical_cellids = set(physical_positions_by_cellid)
+    manual_cellids = set(manual_positions_by_cellid)
+    consensus_cellids = physical_cellids & manual_cellids
+    rejected_cellids = (physical_cellids | manual_cellids) - consensus_cellids
+
+    cellids_by_position = {}
+    metadata_by_position = {}
+    for position, cid in physical_cellids_by_position.items():
+        cid = int(cid)
+        if cid not in consensus_cellids:
+            continue
+
+        cellids_by_position[position] = cid
+        metadata_by_position[position] = create_combined_selection_metadata(
+            selection_agreement="both",
+            physical_selected=True,
+            manual_selected=True,
+            plot_selection_method="physical",
+        )
+
+    return create_point_selection_result(
+        cellids_by_position=cellids_by_position,
+        rejected_cellids=rejected_cellids,
+        metadata_by_position=metadata_by_position,
+    )
+
+
+def create_union_physical_priority_point_selection_result(
+    physical_cellids_by_position,
+    manual_cellids_by_position,
+):
+    """
+    Keep all physical/manual cells and prefer physical entries on overlap.
+
+    Parameters
+    ----------
+    physical_cellids_by_position : dict
+        Physical selection positions and VDF cell IDs.
+    manual_cellids_by_position : dict
+        Manual selection positions and VDF cell IDs.
+
+    Returns
+    -------
+    dict
+        Union point-selection result with physical metadata used for cells
+        selected by both methods.
+    """
+
+    physical_positions_by_cellid = invert_cellids_by_position(
+        physical_cellids_by_position
+    )
+    manual_positions_by_cellid = invert_cellids_by_position(
+        manual_cellids_by_position
+    )
+    physical_cellids = set(physical_positions_by_cellid)
+    manual_cellids = set(manual_positions_by_cellid)
+
+    cellids_by_position = {}
+    metadata_by_position = {}
+    for position, cid in physical_cellids_by_position.items():
+        cid = int(cid)
+        manual_selected = cid in manual_cellids
+        cellids_by_position[position] = cid
+        metadata_by_position[position] = create_combined_selection_metadata(
+            selection_agreement="both" if manual_selected else "physical_only",
+            physical_selected=True,
+            manual_selected=manual_selected,
+            plot_selection_method="physical",
+        )
+
+    for position, cid in manual_cellids_by_position.items():
+        cid = int(cid)
+        if cid in physical_cellids:
+            continue
+
+        cellids_by_position[position] = cid
+        metadata_by_position[position] = create_combined_selection_metadata(
+            selection_agreement="manual_only",
+            physical_selected=False,
+            manual_selected=True,
+            plot_selection_method="manual",
+        )
+
+    return create_point_selection_result(
+        cellids_by_position=cellids_by_position,
+        metadata_by_position=metadata_by_position,
+    )
+
+
+def invert_cellids_by_position(cellids_by_position):
+    """
+    Return the first selection position found for each VDF cell ID.
+
+    Parameters
+    ----------
+    cellids_by_position : dict
+        Mapping from selection position name to VDF cell ID.
+
+    Returns
+    -------
+    dict
+        Mapping from VDF cell ID to selection position name.
+    """
+
+    positions_by_cellid = {}
+    for position, cid in cellids_by_position.items():
+        positions_by_cellid.setdefault(int(cid), position)
+
+    return positions_by_cellid
+
+
+def create_combined_selection_metadata(
+    selection_agreement,
+    physical_selected,
+    manual_selected,
+    plot_selection_method,
+):
+    """
+    Create metadata describing physical/manual selection agreement.
+
+    Parameters
+    ----------
+    selection_agreement : str
+        Agreement category, for example ``"both"`` or ``"manual_only"``.
+    physical_selected : bool
+        Whether the physical method selected the cell.
+    manual_selected : bool
+        Whether the manual method selected the cell.
+    plot_selection_method : {"physical", "manual"}
+        Selection geometry that should be emphasized in diagnostic plots.
+
+    Returns
+    -------
+    dict
+        Metadata fields for one selected VDF sample.
+    """
+
+    return {
+        "selection_agreement": selection_agreement,
+        "physical_selected": bool(physical_selected),
+        "manual_selected": bool(manual_selected),
+        "plot_selection_method": plot_selection_method,
+    }
+
+
 def get_point_selection_method(config, point_kind):
     """
     Return the configured selection method for one point kind.
@@ -116,7 +418,7 @@ def get_point_selection_method(config, point_kind):
     Returns
     -------
     str
-        Selection method, either ``"physical"`` or ``"manual"``.
+        Selection method.
     """
 
     selection_config = get_point_selection_config(
@@ -124,7 +426,12 @@ def get_point_selection_method(config, point_kind):
         point_kind=point_kind,
     )
     selection_method = selection_config.get("method", "physical")
-    valid_methods = {"physical", "manual"}
+    valid_methods = {
+        "physical",
+        "manual",
+        "consensus",
+        "union_physical_priority",
+    }
 
     if selection_method not in valid_methods:
         raise ValueError(
@@ -287,7 +594,7 @@ def get_vdf_cellids_in_hessian_di_box(config, point_record, vdf_cellids, vdf_coo
         Mapping from X-point selection position name to VDF cell ID.
     """
 
-    if len(vdf_cellids) == 0:
+    if len(vdf_cellids) == 0 or point_record.get("di_m") is None:
         return {}
 
     x_selection = get_point_selection_config(
@@ -407,8 +714,10 @@ def create_point_sample_metadata(config, point_record):
         "source_point_z_re": float(coord_re[2]),
         "source_point_flux": float(point_record["flux"]),
     }
+    if "region_name" in point_record:
+        metadata["region_name"] = point_record["region_name"]
 
-    if selection_method == "manual":
+    if selection_method in {"manual", "consensus", "union_physical_priority"}:
         box_config = get_manual_config_re(
             config=config,
             point_kind=point_kind,

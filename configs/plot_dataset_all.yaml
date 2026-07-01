@@ -6,6 +6,6 @@ plot:
   n_jobs: 24
   vdflim: 2000000.0
   colormap:
-    boxre: [-25, -10, -9, 9]
+    boxre: [-30, 15, -9, 9]
     vmin: -1500000.0
     vmax: 1500000.0

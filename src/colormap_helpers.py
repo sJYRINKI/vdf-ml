@@ -22,6 +22,18 @@ SOURCE_POINT_STYLES = {
         "s": 14,
         "linewidths": 1.0,
     },
+    "exhaust": {
+        "color": "red",
+        "marker": "s",
+        "label": "exhaust",
+        "s": 10,
+    },
+    "dayside": {
+        "color": "green",
+        "marker": "^",
+        "label": "dayside",
+        "s": 10,
+    },
     "other": {
         "color": "red",
         "marker": "s",
@@ -177,9 +189,22 @@ def draw_manual_point_search_boxes(ax, metadata_rows):
     if not required_columns.issubset(metadata_rows.columns):
         return
 
-    box_rows = metadata_rows[
-        metadata_rows["selection_method"] == "manual"
-    ].drop_duplicates(
+    box_mask = _metadata_method_mask(
+        metadata_rows=metadata_rows,
+        column="selection_method",
+        method="manual",
+    )
+    box_mask |= _metadata_method_mask(
+        metadata_rows=metadata_rows,
+        column="plot_selection_method",
+        method="manual",
+    )
+    box_mask |= _metadata_bool_mask(
+        metadata_rows=metadata_rows,
+        column="manual_selected",
+    )
+
+    box_rows = metadata_rows[box_mask].drop_duplicates(
         [
             "point_kind",
             "source_point_x_re",
@@ -193,6 +218,7 @@ def draw_manual_point_search_boxes(ax, metadata_rows):
 
     plotted_labels = set()
     colors = {"x": "tab:blue", "o": "tab:blue"}
+    combined_methods = {"consensus", "union_physical_priority"}
 
     for _, row in box_rows.iterrows():
         values = np.asarray(
@@ -215,18 +241,85 @@ def draw_manual_point_search_boxes(ax, metadata_rows):
 
         center_x_re, center_z_re, half_width_x_re, half_width_z_re = values
         color = colors.get(point_kind, "tab:red")
+        selection_method = str(row.get("selection_method", ""))
+        is_combined = selection_method in combined_methods
         rectangle = Rectangle(
             (center_x_re - half_width_x_re, center_z_re - half_width_z_re),
             2.0 * half_width_x_re,
             2.0 * half_width_z_re,
-            facecolor=color,
+            facecolor="none" if is_combined else color,
             edgecolor=color,
-            alpha=0.18,
+            alpha=0.9 if is_combined else 0.18,
             linewidth=1.5,
+            linestyle="--" if is_combined else "-",
             label=label,
             zorder=2.2,
         )
         ax.add_patch(rectangle)
+
+
+def _metadata_method_mask(metadata_rows, column, method):
+    """
+    Return a boolean mask for metadata rows using a named selection method.
+
+    Parameters
+    ----------
+    metadata_rows : pandas.DataFrame
+        Metadata rows to filter.
+    column : str
+        Metadata column name.
+    method : str
+        Selection method name to match.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean row mask.
+    """
+
+    if column not in metadata_rows.columns:
+        return np.zeros(len(metadata_rows), dtype=bool)
+
+    return (
+        metadata_rows[column]
+        .fillna("")
+        .astype(str)
+        .str.lower()
+        .to_numpy()
+        == str(method).lower()
+    )
+
+
+def _metadata_bool_mask(metadata_rows, column):
+    """
+    Return a boolean mask from a metadata boolean-like column.
+
+    Parameters
+    ----------
+    metadata_rows : pandas.DataFrame
+        Metadata rows to filter.
+    column : str
+        Metadata column name.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean row mask.
+    """
+
+    if column not in metadata_rows.columns:
+        return np.zeros(len(metadata_rows), dtype=bool)
+
+    values = metadata_rows[column].fillna(False)
+    if values.dtype == bool:
+        return values.to_numpy(dtype=bool)
+
+    return (
+        values.astype(str)
+        .str.lower()
+        .isin({"1", "true", "yes"})
+        .to_numpy(dtype=bool)
+    )
 
 
 def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
@@ -264,9 +357,26 @@ def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
     half_width_1_di = float(half_width_di["eigenvector_1"])
 
     x_point_rows = metadata_rows[metadata_rows["point_kind"] == "x"]
-    if "selection_method" in x_point_rows.columns:
+    if (
+        "selection_method" in x_point_rows.columns
+        or "plot_selection_method" in x_point_rows.columns
+        or "physical_selected" in x_point_rows.columns
+    ):
         x_point_rows = x_point_rows[
-            x_point_rows["selection_method"].fillna("physical") == "physical"
+            _metadata_method_mask(
+                metadata_rows=x_point_rows,
+                column="selection_method",
+                method="physical",
+            )
+            | _metadata_method_mask(
+                metadata_rows=x_point_rows,
+                column="plot_selection_method",
+                method="physical",
+            )
+            | _metadata_bool_mask(
+                metadata_rows=x_point_rows,
+                column="physical_selected",
+            )
         ]
     if x_point_rows.empty:
         return
@@ -367,9 +477,26 @@ def draw_o_point_search_areas(
         return
 
     o_point_rows = metadata_rows[metadata_rows["point_kind"] == "o"]
-    if "selection_method" in o_point_rows.columns:
+    if (
+        "selection_method" in o_point_rows.columns
+        or "plot_selection_method" in o_point_rows.columns
+        or "physical_selected" in o_point_rows.columns
+    ):
         o_point_rows = o_point_rows[
-            o_point_rows["selection_method"].fillna("physical") == "physical"
+            _metadata_method_mask(
+                metadata_rows=o_point_rows,
+                column="selection_method",
+                method="physical",
+            )
+            | _metadata_method_mask(
+                metadata_rows=o_point_rows,
+                column="plot_selection_method",
+                method="physical",
+            )
+            | _metadata_bool_mask(
+                metadata_rows=o_point_rows,
+                column="physical_selected",
+            )
         ]
     if o_point_rows.empty:
         return

@@ -8,9 +8,10 @@ split:
 
 labels:
   lobe: 0
-  other: 1
+  exhaust: 1
   o_point: 2
   reconnection: 3
+  dayside: 4
 
 features:
   downsample_factor: 1

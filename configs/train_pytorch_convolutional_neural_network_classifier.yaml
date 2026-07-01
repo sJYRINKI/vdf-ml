@@ -8,9 +8,10 @@ split:
 
 labels:
   lobe: 0
-  other: 1
+  exhaust: 1
   o_point: 2
   reconnection: 3
+  dayside: 4
 
 features:
   downsample_factor: 1
@@ -20,6 +21,7 @@ features:
 
 model:
   channels: [16, 32, 64]
+  adaptive_pool_shape: [4, 4]
   classifier_size: 64
   dropout: 0.2
   #class_weight: sqrt_balanced

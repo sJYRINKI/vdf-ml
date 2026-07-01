@@ -37,6 +37,8 @@ class PyTorchCNNClassifier(nn.Module):
         Training-feature means used for standardization.
     feature_scale : array-like of float
         Training-feature scales used for standardization.
+    adaptive_pool_shape : sequence of int, optional
+        Spatial output shape of the final adaptive average pooling layer.
     prediction_batch_size : int, optional
         Number of feature rows predicted at once.
     """
@@ -50,6 +52,7 @@ class PyTorchCNNClassifier(nn.Module):
         class_labels,
         feature_mean,
         feature_scale,
+        adaptive_pool_shape=(4, 4),
         prediction_batch_size=64,
     ):
         super().__init__()
@@ -60,6 +63,9 @@ class PyTorchCNNClassifier(nn.Module):
         self.classifier_size = int(classifier_size)
         self.dropout = float(dropout)
         self.classes_ = np.asarray(class_labels, dtype=int)
+        self.adaptive_pool_shape = _resolve_adaptive_pool_shape(
+            adaptive_pool_shape
+        )
         self.prediction_batch_size = int(prediction_batch_size)
 
         if self.image_size ** 2 != self.input_size:
@@ -99,11 +105,15 @@ class PyTorchCNNClassifier(nn.Module):
             )
             input_channels = output_channels
 
-        convolution_layers.append(nn.AdaptiveAvgPool2d((4, 4)))
+        convolution_layers.append(nn.AdaptiveAvgPool2d(self.adaptive_pool_shape))
         self.convolutions = nn.Sequential(*convolution_layers)
+        pooled_height, pooled_width = self.adaptive_pool_shape
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(self.channels[-1] * 4 * 4, self.classifier_size),
+            nn.Linear(
+                self.channels[-1] * pooled_height * pooled_width,
+                self.classifier_size,
+            ),
             nn.ReLU(),
             nn.Dropout(self.dropout),
             nn.Linear(self.classifier_size, len(self.classes_)),
@@ -197,6 +207,9 @@ def train_pytorch_convolutional_neural_network_classifier(
         int(channel)
         for channel in model_config.get("channels", [16, 32, 64])
     )
+    adaptive_pool_shape = _resolve_adaptive_pool_shape(
+        model_config.get("adaptive_pool_shape", [4, 4])
+    )
     classifier_size = int(model_config.get("classifier_size", 64))
     dropout = float(model_config.get("dropout", 0.2))
     class_weight = _resolve_class_weight(model_config.get("class_weight", "none"))
@@ -260,6 +273,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         class_labels=class_labels,
         feature_mean=np.asarray(scaler.mean_, dtype=np.float32),
         feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
+        adaptive_pool_shape=adaptive_pool_shape,
         prediction_batch_size=prediction_batch_size,
     ).to(device)
 
@@ -340,6 +354,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         ],
         f"Input image shape: (1, {model.image_size}, {model.image_size})",
         f"Convolution channels: {channels}",
+        f"Adaptive pool shape: {adaptive_pool_shape}",
         f"Classifier size: {classifier_size}",
         f"Dropout: {dropout}",
         f"Class weight: {class_weight}",
@@ -389,6 +404,7 @@ def train_pytorch_convolutional_neural_network_classifier(
             "gap_timesteps": data["gap_timesteps"],
             "class_labels": class_labels,
             "class_names": np.asarray(class_names),
+            "adaptive_pool_shape": np.asarray(adaptive_pool_shape, dtype=int),
         },
         predictions=predictions,
         metrics_text=create_metrics_text(
@@ -459,6 +475,7 @@ def load_pytorch_cnn_checkpoint(
         class_labels=class_labels,
         feature_mean=np.zeros(input_size, dtype=np.float32),
         feature_scale=np.ones(input_size, dtype=np.float32),
+        adaptive_pool_shape=checkpoint.get("adaptive_pool_shape", [4, 4]),
         prediction_batch_size=prediction_batch_size,
     )
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -478,6 +495,7 @@ def save_pytorch_cnn_checkpoint(model, checkpoint_path):
             "input_size": model.input_size,
             "channels": list(model.channels),
             "classifier_size": model.classifier_size,
+            "adaptive_pool_shape": list(model.adaptive_pool_shape),
             "dropout": model.dropout,
             "n_classes": len(model.classes_),
             "class_labels": torch.as_tensor(model.classes_, dtype=torch.int64),
@@ -747,6 +765,21 @@ def _resolve_batch_size(configured_batch_size, n_samples):
 def _resolve_prediction_batch_size(configured_batch_size, model_batch_size, n_samples):
     prediction_batch_size = _resolve_batch_size(configured_batch_size, n_samples)
     return min(prediction_batch_size, model_batch_size)
+
+
+def _resolve_adaptive_pool_shape(configured_shape):
+    if configured_shape is None:
+        configured_shape = [4, 4]
+
+    if isinstance(configured_shape, str):
+        values = [int(value.strip()) for value in configured_shape.split(",")]
+    else:
+        values = [int(value) for value in configured_shape]
+
+    if len(values) != 2 or any(value <= 0 for value in values):
+        raise ValueError("adaptive_pool_shape must contain two positive integers")
+
+    return tuple(values)
 
 
 def _resolve_device(device_name):

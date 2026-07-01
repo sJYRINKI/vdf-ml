@@ -7,7 +7,7 @@ from scipy.signal import convolve2d
 from shapely import geometry
 
 from src.point_selection import get_point_selection_method
-from src.vdf_helpers import R_EARTH
+from src.vdf_helpers import R_EARTH, find_matching_region_name_re
 
 PROTON_MASS = 1.67262192369e-27
 ELEMENTARY_CHARGE = 1.602176634e-19
@@ -113,6 +113,11 @@ def find_point_records(reader, flux_file_location, points_config=None):
         config=points_config,
         point_kind="o",
     )
+    physical_selection_methods = {
+        "physical",
+        "consensus",
+        "union_physical_priority",
+    }
 
     for k in range(len(x_coords)):
         coords = [x_coords[k], 0, z_coords[k]]
@@ -138,7 +143,12 @@ def find_point_records(reader, flux_file_location, points_config=None):
             float(coords[2] / R_EARTH),
         ]
 
-        if not is_in_point_region(coord_re, points_config):
+        region_name = find_matching_region_name_re(
+            coord_re=coord_re,
+            points_config=points_config,
+            names_key="point_region_names",
+        )
+        if region_name is None:
             continue
 
         interpolated_flux = interpolate_flux(
@@ -161,13 +171,17 @@ def find_point_records(reader, flux_file_location, points_config=None):
                 eigvals=eigvals,
                 eigvecs=eigvecs,
             )
-            if x_selection_method == "physical":
+            point_record["region_name"] = region_name
+            if x_selection_method in physical_selection_methods:
                 add_ion_inertial_length(
                     reader=reader,
                     point_record=point_record,
                     points_config=points_config,
                 )
-                if point_record.get("di_m") is None:
+                if (
+                    point_record.get("di_m") is None
+                    and x_selection_method == "physical"
+                ):
                     logging.warning(
                         "Skipping X point at %s because local d_i could not be computed",
                         coord_re,
@@ -176,20 +190,20 @@ def find_point_records(reader, flux_file_location, points_config=None):
             x_point_records.append(point_record)
 
         if det_hessian > 0 and hessian[0, 0] < 0:
-            o_point_records.append(
-                create_point_record(
-                    point_kind="o",
-                    coord_m=coords,
-                    coord_re=coord_re,
-                    cellid=cellid,
-                    flux=interpolated_flux,
-                    hessian=hessian,
-                    eigvals=eigvals,
-                    eigvecs=eigvecs,
-                )
+            point_record = create_point_record(
+                point_kind="o",
+                coord_m=coords,
+                coord_re=coord_re,
+                cellid=cellid,
+                flux=interpolated_flux,
+                hessian=hessian,
+                eigvals=eigvals,
+                eigvecs=eigvecs,
             )
+            point_record["region_name"] = region_name
+            o_point_records.append(point_record)
 
-    if o_selection_method == "physical":
+    if o_selection_method in physical_selection_methods:
         add_o_point_island_contours(
             o_point_records=o_point_records,
             x_point_records=x_point_records,
@@ -199,11 +213,12 @@ def find_point_records(reader, flux_file_location, points_config=None):
             points_config=points_config,
         )
 
-        o_point_records = [
-            point_record
-            for point_record in o_point_records
-            if point_record.get("contour_vertices_re") is not None
-        ]
+        if o_selection_method == "physical":
+            o_point_records = [
+                point_record
+                for point_record in o_point_records
+                if point_record.get("contour_vertices_re") is not None
+            ]
 
     return x_point_records, o_point_records
 
@@ -416,31 +431,11 @@ def is_in_point_region(coord_re, points_config):
         Whether the coordinate should be used as a labeled point.
     """
 
-    region_re = (points_config or {}).get("region_re", {})
-
-    x_between = region_re.get("x_between")
-    x_min = region_re.get("x_min")
-    x_max = region_re.get("x_max")
-    z_abs_max = region_re.get("z_abs_max")
-
-    x_re = coord_re[0]
-    z_re = coord_re[2]
-
-    if x_between is not None:
-        left_x, right_x = x_between
-        x_min = min(left_x, right_x)
-        x_max = max(left_x, right_x)
-
-    if x_min is not None and x_re < x_min:
-        return False
-
-    if x_max is not None and x_re > x_max:
-        return False
-
-    if z_abs_max is not None and abs(z_re) > z_abs_max:
-        return False
-
-    return True
+    return find_matching_region_name_re(
+        coord_re=coord_re,
+        points_config=points_config,
+        names_key="point_region_names",
+    ) is not None
 
 
 def interpolate_flux(flux_function_xz, x, z, xmin, zmin, dx):

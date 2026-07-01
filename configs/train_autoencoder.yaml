@@ -21,9 +21,9 @@ model:
 
 loss:
   high_signal_loss_weight: 0.25
-  high_signal_quantile: 0.95
+  high_signal_quantile: 0.98
   mass_loss_weight: 0.0
-  peak_loss_weight: 0.0
+  peak_loss_weight: 0.001
 
 cache:
   enabled: true

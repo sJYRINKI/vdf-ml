@@ -8,14 +8,17 @@ from src.vdf_extract import VdfExtractor
 from src.point_labels import create_point_labeled_coords, iter_labeled_coords
 from src.point_selection import (
     create_point_sample_metadata,
-    get_point_cellids_by_position,
+    get_point_selection_result,
     is_point_record,
     unpack_labeled_coord,
 )
 from src.vdf_helpers import (
     R_EARTH,
+    create_region_mask_re,
     get_nearest_vdf_cellid,
+    get_region_axis_bounds_re,
     get_vdf_cells_with_coords_re,
+    iter_enabled_regions_re,
 )
 
 
@@ -101,9 +104,9 @@ def create_timestep_sample_specs(
 
     Point classes configured under ``points`` are expanded using magnetic
     topology. Each detected X/O point can use either the physical selection
-    method or a fixed manual search box from the point-selection config. The
-    ``other`` class is then filled from all VDF cells in ``points.region_re``
-    that were not already assigned to the X-point or O-point classes.
+    method or a fixed manual search box from the point-selection config.
+    Background classes are then filled from VDF cells in the configured
+    sampling regions that were not already assigned to a point or static class.
 
     Parameters
     ----------
@@ -149,14 +152,18 @@ def create_timestep_sample_specs(
     for labeled_coord in labeled_coords:
         class_name, label, coord_re = unpack_labeled_coord(labeled_coord)
         sample_metadata = {}
+        metadata_by_position = {}
 
         if is_point_record(labeled_coord):
-            cellids_by_position = get_point_cellids_by_position(
+            selection_result = get_point_selection_result(
                 config=config,
                 point_record=labeled_coord,
                 vdf_cellids=vdf_cellids,
                 vdf_coords_re=vdf_coords_re,
             )
+            cellids_by_position = selection_result["cellids_by_position"]
+            rejected_cellids.update(selection_result["rejected_cellids"])
+            metadata_by_position = selection_result["metadata_by_position"]
             sample_metadata = create_point_sample_metadata(
                 config=config,
                 point_record=labeled_coord,
@@ -187,6 +194,7 @@ def create_timestep_sample_specs(
                 "timestep": int(timestep),
             }
             sample_spec.update(sample_metadata)
+            sample_spec.update(metadata_by_position.get(neighbor_position, {}))
             sample_specs.append(sample_spec)
 
     conflicting_cellids = find_conflicting_cellids(sample_specs)
@@ -197,7 +205,7 @@ def create_timestep_sample_specs(
     )
 
     sample_specs.extend(
-        create_other_region_sample_specs(
+        create_background_region_sample_specs(
             config=config,
             reader=reader,
             file_location=file_location,
@@ -216,7 +224,7 @@ def create_timestep_sample_specs(
     )
 
 
-def create_other_region_sample_specs(
+def create_background_region_sample_specs(
     config,
     reader,
     file_location,
@@ -229,11 +237,11 @@ def create_other_region_sample_specs(
     vdf_coords_re=None,
 ):
     """
-    Create ``other`` samples from VDF cells in the point region.
+    Create background samples from configured spatial regions.
 
-    The ``other`` class is always derived from ``points.region_re``. Cells
-    already assigned to X/O point boxes are excluded, so the region is filled
-    only by VDF cells that are not reconnection or O-point samples.
+    Each region can define ``background_class_name``. Cells already assigned to
+    static coordinates or X/O point boxes are excluded, so region backgrounds
+    are filled only by VDF cells that are not point-selected samples.
 
     Parameters
     ----------
@@ -252,7 +260,7 @@ def create_other_region_sample_specs(
         Timestep to process.
     rejected_cellids : set of int, optional
         Cell IDs rejected because they had conflicting class labels before the
-        ``other`` region samples were created.
+        background region samples were created.
     cell_has_vdf_func : callable, optional
         Function taking a cell ID and returning whether it has VDF data.
     vdf_cellids : numpy.ndarray, optional
@@ -263,19 +271,16 @@ def create_other_region_sample_specs(
     Returns
     -------
     list of dict
-        Sample specifications for ``other`` VDF cells in the point region.
+        Sample specifications for background VDF cells in configured regions.
     """
 
     labels = config["labels"]
-    class_name = "other"
-    label = int(labels[class_name])
-
     excluded_cellids = {
         int(sample_spec["cid"])
         for sample_spec in existing_sample_specs
     }
     excluded_cellids.update(int(cid) for cid in (rejected_cellids or set()))
-    seen_other_cellids = set()
+    seen_background_class_cellids = set()
     sample_specs = []
     coord_by_cellid = {}
     if vdf_cellids is not None and vdf_coords_re is not None:
@@ -284,35 +289,104 @@ def create_other_region_sample_specs(
             for cid, coord_re in zip(vdf_cellids, vdf_coords_re)
         }
 
-    for cid in get_vdf_cellids_in_point_region(
-        reader=reader,
-        config=config,
-        cell_has_vdf_func=cell_has_vdf_func,
-        vdf_cellids=vdf_cellids,
-        vdf_coords_re=vdf_coords_re,
+    points_config = config.get("points", {})
+    for region_name, region_re in iter_enabled_regions_re(
+            points_config=points_config,
+            names_key="background_region_names",
     ):
-        cid = int(cid)
-        if cid in excluded_cellids or cid in seen_other_cellids:
-            continue
-
-        seen_other_cellids.add(cid)
-        coord_re = coord_by_cellid.get(cid)
-        if coord_re is None:
-            coord_re = np.asarray(reader.get_cell_coordinates(cid), dtype=float) / R_EARTH
-        sample_specs.append(
-            {
-                "file_location": file_location,
-                "simulation_time": simulation_time,
-                "cid": cid,
-                "label": label,
-                "class_name": class_name,
-                "coord_re": coord_re,
-                "neighbor_position": "point_region",
-                "timestep": int(timestep),
-            }
+        class_name = get_region_background_class_name(
+            points_config=points_config,
+            region_name=region_name,
+            region_re=region_re,
         )
+        if class_name not in labels:
+            raise ValueError(
+                f"Region {region_name!r} uses background class "
+                f"{class_name!r}, but labels has no such class"
+            )
+        label = int(labels[class_name])
+
+        for cid in get_vdf_cellids_in_region_re(
+            reader=reader,
+            region_re=region_re,
+            cell_has_vdf_func=cell_has_vdf_func,
+            vdf_cellids=vdf_cellids,
+            vdf_coords_re=vdf_coords_re,
+        ):
+            cid = int(cid)
+            background_class_cellid = (class_name, cid)
+            if (
+                    cid in excluded_cellids
+                    or background_class_cellid in seen_background_class_cellids
+            ):
+                continue
+
+            seen_background_class_cellids.add(background_class_cellid)
+            coord_re = coord_by_cellid.get(cid)
+            if coord_re is None:
+                coord_re = (
+                    np.asarray(reader.get_cell_coordinates(cid), dtype=float)
+                    / R_EARTH
+                )
+            sample_specs.append(
+                {
+                    "file_location": file_location,
+                    "simulation_time": simulation_time,
+                    "cid": cid,
+                    "label": label,
+                    "class_name": class_name,
+                    "coord_re": coord_re,
+                    "neighbor_position": f"{region_name}_region",
+                    "region_name": region_name,
+                    "timestep": int(timestep),
+                }
+            )
 
     return sample_specs
+
+
+def create_other_region_sample_specs(*args, **kwargs):
+    """
+    Create background samples from configured regions.
+
+    This compatibility wrapper keeps older direct callers working after the
+    region background classes were generalized beyond ``other``.
+    """
+
+    return create_background_region_sample_specs(*args, **kwargs)
+
+
+def get_region_background_class_name(points_config, region_name, region_re):
+    """
+    Return the background class name for one spatial region.
+
+    Parameters
+    ----------
+    points_config : dict
+        Point sampling configuration.
+    region_name : str
+        Name of the configured region.
+    region_re : dict
+        Region bounds and optional background class.
+
+    Returns
+    -------
+    str
+        Background class name for cells not selected as point samples.
+    """
+
+    class_name = region_re.get("background_class_name")
+    if class_name is not None:
+        return str(class_name)
+
+    class_names = (points_config or {}).get("background_class_names", {})
+    if region_name in class_names:
+        return str(class_names[region_name])
+
+    if region_name == "tail":
+        return str((points_config or {}).get("background_class_name", "other"))
+
+    return str(region_name)
 
 
 def get_vdf_cellids_in_point_region(
@@ -323,14 +397,14 @@ def get_vdf_cellids_in_point_region(
     vdf_coords_re=None,
 ):
     """
-    Return VDF cell IDs inside ``points.region_re``.
+    Return VDF cell IDs inside configured background regions.
 
     Parameters
     ----------
     reader : analysator.vlsvfile.VlsvReader
         Reader for the timestep VLSV file.
     config : dict
-        Dataset configuration containing the ``points.region_re`` bounds.
+        Dataset configuration containing the ``points`` region bounds.
     cell_has_vdf_func : callable, optional
         Function taking a cell ID and returning whether it has VDF data.
     vdf_cellids : numpy.ndarray, optional
@@ -341,7 +415,60 @@ def get_vdf_cellids_in_point_region(
     Returns
     -------
     list of int
-        Cell IDs with VDF data inside the configured point region.
+        Cell IDs with VDF data inside the configured background regions.
+    """
+
+    selected_cellids = []
+    seen_cellids = set()
+    points_config = config.get("points", {})
+
+    for _, region_re in iter_enabled_regions_re(
+            points_config=points_config,
+            names_key="background_region_names",
+    ):
+        for cid in get_vdf_cellids_in_region_re(
+                reader=reader,
+                region_re=region_re,
+                cell_has_vdf_func=cell_has_vdf_func,
+                vdf_cellids=vdf_cellids,
+                vdf_coords_re=vdf_coords_re,
+        ):
+            if cid in seen_cellids:
+                continue
+
+            seen_cellids.add(cid)
+            selected_cellids.append(cid)
+
+    return selected_cellids
+
+
+def get_vdf_cellids_in_region_re(
+    reader,
+    region_re,
+    cell_has_vdf_func=None,
+    vdf_cellids=None,
+    vdf_coords_re=None,
+):
+    """
+    Return VDF cell IDs inside one configured spatial region.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Reader for the timestep VLSV file.
+    region_re : dict
+        Region bounds in Earth radii.
+    cell_has_vdf_func : callable, optional
+        Function taking a cell ID and returning whether it has VDF data.
+    vdf_cellids : numpy.ndarray, optional
+        Spatial cell IDs with VDF data.
+    vdf_coords_re : numpy.ndarray, optional
+        VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+
+    Returns
+    -------
+    list of int
+        Cell IDs with VDF data inside the configured spatial region.
     """
 
     if vdf_cellids is None or vdf_coords_re is None:
@@ -350,21 +477,7 @@ def get_vdf_cellids_in_point_region(
     if len(vdf_cellids) == 0:
         return []
 
-    region_re = config.get("points", {}).get("region_re", {})
-    x_min_re, x_max_re = get_region_x_bounds_re(region_re)
-    z_abs_max_re = float(region_re["z_abs_max"])
-
-    y_min_re = float(reader.read_parameter("ymin")) / R_EARTH
-    y_max_re = float(reader.read_parameter("ymax")) / R_EARTH
-
-    selected = (
-        (vdf_coords_re[:, 0] >= x_min_re)
-        & (vdf_coords_re[:, 0] <= x_max_re)
-        & (vdf_coords_re[:, 1] >= y_min_re)
-        & (vdf_coords_re[:, 1] <= y_max_re)
-        & (vdf_coords_re[:, 2] >= -z_abs_max_re)
-        & (vdf_coords_re[:, 2] <= z_abs_max_re)
-    )
+    selected = create_region_mask_re(vdf_coords_re, region_re)
 
     selected_cellids = vdf_cellids[selected]
     if cell_has_vdf_func is not None:
@@ -392,11 +505,11 @@ def get_region_x_bounds_re(region_re):
         Lower and upper x bounds in Earth radii.
     """
 
-    if region_re.get("x_between") is not None:
-        left_x, right_x = region_re["x_between"]
-        return min(left_x, right_x), max(left_x, right_x)
+    x_min_re, x_max_re = get_region_axis_bounds_re(region_re, "x")
+    if x_min_re is None or x_max_re is None:
+        raise ValueError("Region config must define x bounds")
 
-    return float(region_re["x_min"]), float(region_re["x_max"])
+    return x_min_re, x_max_re
 
 
 def find_conflicting_cellids(sample_specs):
