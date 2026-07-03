@@ -15,8 +15,10 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from src.autoencoder_data import create_or_load_log_slice_cache, resolve_cache_config
 from src.batches import create_features_in_batches
 from src.dataset_io import load_dataset
+from src.features import create_features_from_log_slice_cache
 from src.model_evaluation import create_lobe_vs_rest_labels, create_predictions_dataframe
 from src.model_split import split_by_timestep
 from src.timesteps import create_path
@@ -500,6 +502,12 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     batch_size = int(features_config.get("batch_size", 64))
     n_jobs = int(features_config.get("n_jobs", 1))
     log_eps = float(features_config.get("log_eps", 1e-30))
+    cache_config = resolve_cache_config(
+        config=features_config.get("cache", {}),
+        dataset_dir=dataset_dir,
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
 
     split_config = config.get("split", {})
     train_fraction = float(split_config.get("train_fraction", 0.6))
@@ -507,6 +515,11 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     gap_timesteps = int(split_config.get("gap_timesteps", 10))
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
+    X_log, cache_metadata = create_or_load_log_slice_cache(
+        X=X,
+        input_config=_create_feature_cache_input_config(log_eps=log_eps),
+        cache_config=cache_config,
+    )
 
     print(X.shape)
     print(y.shape)
@@ -541,8 +554,9 @@ def load_training_data(config, dataset_id, model_id, target_kind):
         raise ValueError(f"Unknown target kind: {target_kind}")
 
     print("Creating train features")
-    X_train_features = create_features_in_batches(
+    X_train_features = _create_training_feature_matrix(
         X=X,
+        X_log=X_log,
         indices=train_indices,
         downsample_factor=downsample_factor,
         batch_size=batch_size,
@@ -551,8 +565,9 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     )
 
     print("Creating validation features")
-    X_validation_features = create_features_in_batches(
+    X_validation_features = _create_training_feature_matrix(
         X=X,
+        X_log=X_log,
         indices=validation_indices,
         downsample_factor=downsample_factor,
         batch_size=batch_size,
@@ -561,8 +576,9 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     )
 
     print("Creating test features")
-    X_test_features = create_features_in_batches(
+    X_test_features = _create_training_feature_matrix(
         X=X,
+        X_log=X_log,
         indices=test_indices,
         downsample_factor=downsample_factor,
         batch_size=batch_size,
@@ -598,10 +614,88 @@ def load_training_data(config, dataset_id, model_id, target_kind):
         "batch_size": batch_size,
         "n_jobs": n_jobs,
         "log_eps": log_eps,
+        "feature_cache_metadata": cache_metadata,
         "train_fraction": train_fraction,
         "validation_fraction": validation_fraction,
         "gap_timesteps": gap_timesteps,
     }
+
+
+def _create_feature_cache_input_config(log_eps):
+    """
+    Create input settings for the shared log-slice feature cache.
+
+    Parameters
+    ----------
+    log_eps : float
+        Small positive value added before log scaling.
+
+    Returns
+    -------
+    dict
+        Input settings accepted by ``create_or_load_log_slice_cache``.
+    """
+
+    return {
+        "slice": "xz",
+        "orientation": "plot",
+        "normalization": "train_global_standard",
+        "log_eps": float(log_eps),
+        "clip_negative_to_zero": True,
+    }
+
+
+def _create_training_feature_matrix(
+    X,
+    X_log,
+    indices,
+    downsample_factor,
+    batch_size,
+    n_jobs,
+    log_eps,
+):
+    """
+    Create CNN/ML feature matrix from cache when available.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples.
+    X_log : numpy.ndarray or None
+        Optional cached log-scaled xz slices.
+    indices : array-like of int
+        Sample indices.
+    downsample_factor : int
+        Factor used to downsample the xz slice.
+    batch_size : int
+        Number of samples per feature batch.
+    n_jobs : int
+        Number of parallel workers for raw VDF feature extraction.
+    log_eps : float
+        Small positive value added before log scaling.
+
+    Returns
+    -------
+    numpy.ndarray
+        Feature matrix.
+    """
+
+    if X_log is not None:
+        return create_features_from_log_slice_cache(
+            X_log=X_log,
+            indices=indices,
+            downsample_factor=downsample_factor,
+            batch_size=batch_size,
+        )
+
+    return create_features_in_batches(
+        X=X,
+        indices=indices,
+        downsample_factor=downsample_factor,
+        batch_size=batch_size,
+        n_jobs=n_jobs,
+        log_eps=log_eps,
+    )
 
 
 def evaluate_model(model, data, report_labels=None, target_names=None):
@@ -930,6 +1024,10 @@ def create_metrics_text(
         f"Validation samples: {len(data['validation_indices'])}",
         f"Test samples: {len(data['test_indices'])}",
         f"Feature extraction jobs: {data['n_jobs']}",
+        "Feature cache enabled: "
+        f"{data.get('feature_cache_metadata', {}).get('enabled', False)}",
+        "Feature cache path: "
+        f"{data.get('feature_cache_metadata', {}).get('cache_path', 'none')}",
         "Train fraction of usable timesteps: "
         f"{data['train_fraction']}",
         "Validation fraction of usable timesteps: "

@@ -21,6 +21,11 @@ CNN_EMBEDDING_KNN_METRICS_FILENAME = "cnn_embedding_knn_metrics.csv"
 CNN_EMBEDDING_KNN_CANDIDATES_FILENAME = "cnn_embedding_knn_candidates.csv"
 CNN_EMBEDDING_KNN_SUMMARY_FILENAME = "cnn_embedding_knn_summary.txt"
 CNN_EMBEDDING_KNN_PREVIEW_FILENAME = "cnn_embedding_knn_preview.png"
+CNN_EMBEDDING_FILTER_METRICS_FILENAME = "cnn_embedding_knn_filter_metrics.csv"
+CNN_EMBEDDING_FILTER_REMOVED_FILENAME = (
+    "cnn_embedding_knn_filter_removed_samples.csv"
+)
+CNN_EMBEDDING_FILTER_SUMMARY_FILENAME = "cnn_embedding_knn_filter_summary.txt"
 
 from src.training import (
     create_metrics_text,
@@ -315,79 +320,57 @@ def train_pytorch_convolutional_neural_network_classifier(
         model_id=model_id,
         target_kind="multiclass",
     )
+    embedding_filter_source_result = _run_training_filter_cnn_embedding_knn(
+        config=config,
+        data=data,
+        class_labels=class_labels,
+        class_names=class_names,
+        class_names_by_label=class_names_by_label,
+        channels=channels,
+        adaptive_pool_shape=adaptive_pool_shape,
+        classifier_size=classifier_size,
+        dropout=dropout,
+        class_weight=class_weight,
+        weight_decay=weight_decay,
+        learning_rate=learning_rate,
+        max_epochs=max_epochs,
+        early_stopping=early_stopping,
+        patience=patience,
+        tolerance=tolerance,
+        random_seed=random_seed,
+    )
+
     training_filter_result = _apply_training_filter(
         data=data,
         config=config.get("training_filter", {}),
     )
-    y_train = _encode_labels(data["y_train"], class_labels)
-    y_validation = _encode_labels(data["y_validation"], class_labels)
-    _encode_labels(data["y_test"], class_labels)
 
-    missing_classes = set(range(len(class_labels))) - set(y_train)
-    if missing_classes:
-        missing_labels = class_labels[sorted(missing_classes)]
-        raise ValueError(
-            "Configured classes have no training samples: "
-            f"{list(missing_labels)}"
-        )
-
-    class_weights = _create_class_weights(
-        targets=y_train,
-        n_classes=len(class_labels),
-        class_weight=class_weight,
-    )
-
-    scaler = StandardScaler().fit(data["X_train_features"])
-    device = _resolve_device(model_config.get("device", "auto"))
-    deterministic = bool(model_config.get("deterministic", False))
-    _set_random_seed(random_seed, deterministic)
-
-    model_batch_size = _resolve_batch_size(
-        model_config.get("batch_size", 32),
-        len(y_train),
-    )
-    prediction_batch_size = _resolve_prediction_batch_size(
-        configured_batch_size=model_config.get("prediction_batch_size", 64),
-        model_batch_size=model_batch_size,
-        n_samples=len(y_train),
-    )
-
-    model = PyTorchCNNClassifier(
-        input_size=data["X_train_features"].shape[1],
+    training_state = _train_cnn_model_for_data(
+        data=data,
+        class_labels=class_labels,
+        class_names=class_names,
         channels=channels,
+        adaptive_pool_shape=adaptive_pool_shape,
         classifier_size=classifier_size,
         dropout=dropout,
-        class_labels=class_labels,
-        feature_mean=np.asarray(scaler.mean_, dtype=np.float32),
-        feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
-        adaptive_pool_shape=adaptive_pool_shape,
-        prediction_batch_size=prediction_batch_size,
-    ).to(device)
-
-    print("Configured classes:")
-    for label, class_name in zip(class_labels, class_names):
-        print(f"  {label}: {class_name}")
-    print(f"CNN input image: {model.image_size} x {model.image_size}")
-    print(f"Training device: {device}")
-
-    training_result = _fit_model(
-        model=model,
-        features=data["X_train_features"],
-        targets=y_train,
-        validation_features=data["X_validation_features"],
-        validation_targets=y_validation,
-        class_weights=class_weights,
-        device=device,
-        batch_size=model_batch_size,
+        class_weight=class_weight,
+        model_config=model_config,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         max_epochs=max_epochs,
         early_stopping=early_stopping,
-        tolerance=tolerance,
         patience=patience,
+        tolerance=tolerance,
         random_seed=random_seed,
+        stage_name="final",
     )
-    model.eval()
+    model = training_state["model"]
+    training_result = training_state["training_result"]
+    class_weights = training_state["class_weights"]
+    device = training_state["device"]
+    deterministic = training_state["deterministic"]
+    model_batch_size = training_state["model_batch_size"]
+    prediction_batch_size = training_state["prediction_batch_size"]
 
     results = evaluate_model(
         model=model,
@@ -426,12 +409,24 @@ def train_pytorch_convolutional_neural_network_classifier(
         class_names_by_label=class_names_by_label,
         plot_config=config.get("failure_plots", {}),
     )
-    embedding_knn_result = _run_cnn_embedding_knn_analysis(
-        model=model,
-        data=data,
-        config=config.get("cnn_embedding_knn", {}),
-        class_names_by_label=class_names_by_label,
-    )
+    if (
+        embedding_filter_source_result["generated"]
+        and bool((config.get("cnn_embedding_knn", {}) or {}).get("enabled", False))
+    ):
+        embedding_knn_result = {
+            "metric_lines": [
+                "Final CNN embedding kNN enabled: False",
+                "Final CNN embedding kNN skipped: training-filter source "
+                "metrics were already saved before filtering",
+            ]
+        }
+    else:
+        embedding_knn_result = _run_cnn_embedding_knn_analysis(
+            model=model,
+            data=data,
+            config=config.get("cnn_embedding_knn", {}),
+            class_names_by_label=class_names_by_label,
+        )
 
     checkpoint_path = (
         data["output_dir"]
@@ -468,6 +463,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Deterministic algorithms: {deterministic}",
         f"PyTorch version: {torch.__version__}",
         f"Classifier classes: {list(model.classes_)}",
+        *embedding_filter_source_result["metric_lines"],
         *training_filter_result["metric_lines"],
         f"Epochs: {training_result['n_epochs']}",
         f"Best epoch: {training_result['best_epoch']}",
@@ -599,6 +595,153 @@ def save_pytorch_cnn_checkpoint(model, checkpoint_path):
     )
 
 
+def _train_cnn_model_for_data(
+    data,
+    class_labels,
+    class_names,
+    channels,
+    adaptive_pool_shape,
+    classifier_size,
+    dropout,
+    class_weight,
+    model_config,
+    learning_rate,
+    weight_decay,
+    max_epochs,
+    early_stopping,
+    patience,
+    tolerance,
+    random_seed,
+    stage_name,
+):
+    """
+    Train a CNN model for the current in-memory training arrays.
+
+    Parameters
+    ----------
+    data : dict
+        Training data returned by ``load_training_data``.
+    class_labels : numpy.ndarray
+        Project labels in model-output order.
+    class_names : list of str
+        Class names in model-output order.
+    channels : tuple of int
+        Number of convolution channels.
+    adaptive_pool_shape : tuple of int
+        Spatial shape after adaptive pooling.
+    classifier_size : int
+        Number of hidden-layer neurons.
+    dropout : float
+        Dropout probability.
+    class_weight : str
+        Class weighting mode.
+    model_config : dict
+        CNN model configuration.
+    learning_rate : float
+        AdamW learning rate.
+    weight_decay : float
+        AdamW weight decay.
+    max_epochs : int
+        Maximum number of training epochs.
+    early_stopping : bool
+        Whether to use validation macro-F1 early stopping.
+    patience : int
+        Early-stopping patience.
+    tolerance : float
+        Minimum validation macro-F1 improvement.
+    random_seed : int
+        Random seed.
+    stage_name : str
+        Name printed before training.
+
+    Returns
+    -------
+    dict
+        Trained model and training settings.
+    """
+
+    y_train = _encode_labels(data["y_train"], class_labels)
+    y_validation = _encode_labels(data["y_validation"], class_labels)
+    _encode_labels(data["y_test"], class_labels)
+
+    missing_classes = set(range(len(class_labels))) - set(y_train)
+    if missing_classes:
+        missing_labels = class_labels[sorted(missing_classes)]
+        raise ValueError(
+            "Configured classes have no training samples: "
+            f"{list(missing_labels)}"
+        )
+
+    class_weights = _create_class_weights(
+        targets=y_train,
+        n_classes=len(class_labels),
+        class_weight=class_weight,
+    )
+
+    scaler = StandardScaler().fit(data["X_train_features"])
+    device = _resolve_device(model_config.get("device", "auto"))
+    deterministic = bool(model_config.get("deterministic", False))
+    _set_random_seed(random_seed, deterministic)
+
+    model_batch_size = _resolve_batch_size(
+        model_config.get("batch_size", 32),
+        len(y_train),
+    )
+    prediction_batch_size = _resolve_prediction_batch_size(
+        configured_batch_size=model_config.get("prediction_batch_size", 64),
+        model_batch_size=model_batch_size,
+        n_samples=len(y_train),
+    )
+
+    model = PyTorchCNNClassifier(
+        input_size=data["X_train_features"].shape[1],
+        channels=channels,
+        classifier_size=classifier_size,
+        dropout=dropout,
+        class_labels=class_labels,
+        feature_mean=np.asarray(scaler.mean_, dtype=np.float32),
+        feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
+        adaptive_pool_shape=adaptive_pool_shape,
+        prediction_batch_size=prediction_batch_size,
+    ).to(device)
+
+    print("Configured classes:")
+    for label, class_name in zip(class_labels, class_names):
+        print(f"  {label}: {class_name}")
+    print(f"CNN stage: {stage_name}")
+    print(f"CNN input image: {model.image_size} x {model.image_size}")
+    print(f"Training device: {device}")
+
+    training_result = _fit_model(
+        model=model,
+        features=data["X_train_features"],
+        targets=y_train,
+        validation_features=data["X_validation_features"],
+        validation_targets=y_validation,
+        class_weights=class_weights,
+        device=device,
+        batch_size=model_batch_size,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        max_epochs=max_epochs,
+        early_stopping=early_stopping,
+        tolerance=tolerance,
+        patience=patience,
+        random_seed=random_seed,
+    )
+    model.eval()
+
+    return {
+        "model": model,
+        "training_result": training_result,
+        "class_weights": class_weights,
+        "device": device,
+        "deterministic": deterministic,
+        "model_batch_size": model_batch_size,
+        "prediction_batch_size": prediction_batch_size,
+    }
+
+
 def _fit_model(
     model,
     features,
@@ -710,6 +853,178 @@ def _fit_model(
         "best_validation_macro_f1": best_score if early_stopping else None,
         "final_training_loss": training_loss,
     }
+
+
+def _run_training_filter_cnn_embedding_knn(
+    config,
+    data,
+    class_labels,
+    class_names,
+    class_names_by_label,
+    channels,
+    adaptive_pool_shape,
+    classifier_size,
+    dropout,
+    class_weight,
+    weight_decay,
+    learning_rate,
+    max_epochs,
+    early_stopping,
+    patience,
+    tolerance,
+    random_seed,
+):
+    """
+    Train a source CNN and save embedding kNN metrics for filtering.
+
+    Parameters
+    ----------
+    config : dict
+        Full CNN training config.
+    data : dict
+        Training data returned by ``load_training_data``.
+    class_labels : numpy.ndarray
+        Project labels in model-output order.
+    class_names : list of str
+        Class names in model-output order.
+    class_names_by_label : dict
+        Mapping from integer label to class name.
+    channels : tuple of int
+        Number of convolution channels.
+    adaptive_pool_shape : tuple of int
+        Spatial shape after adaptive pooling.
+    classifier_size : int
+        Number of hidden-layer neurons.
+    dropout : float
+        Dropout probability.
+    class_weight : str
+        Class weighting mode.
+    weight_decay : float
+        AdamW weight decay.
+    learning_rate : float
+        AdamW learning rate.
+    max_epochs : int
+        Maximum number of training epochs.
+    early_stopping : bool
+        Whether to use validation macro-F1 early stopping.
+    patience : int
+        Early-stopping patience.
+    tolerance : float
+        Minimum validation macro-F1 improvement.
+    random_seed : int
+        Random seed.
+
+    Returns
+    -------
+    dict
+        Metric lines describing source embedding generation.
+    """
+
+    filter_config = config.get("training_filter", {}) or {}
+    source = str(filter_config.get("source", "pca")).lower()
+    if (
+        not bool(filter_config.get("enabled", False))
+        or not _is_cnn_embedding_filter_source(source)
+    ):
+        return {"metric_lines": [], "generated": False}
+
+    embedding_filter_config = filter_config.get("cnn_embedding_knn", {}) or {}
+    run_source_model = bool(embedding_filter_config.get("run_source_model", True))
+    if not run_source_model:
+        return {
+            "metric_lines": [
+                "CNN embedding filter source model enabled: False",
+                "CNN embedding filter source metrics: existing file required",
+            ],
+            "generated": False,
+        }
+
+    print("Training CNN embedding kNN filter source model")
+    source_state = _train_cnn_model_for_data(
+        data=data,
+        class_labels=class_labels,
+        class_names=class_names,
+        channels=channels,
+        adaptive_pool_shape=adaptive_pool_shape,
+        classifier_size=classifier_size,
+        dropout=dropout,
+        class_weight=class_weight,
+        model_config=config["model"],
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        max_epochs=max_epochs,
+        early_stopping=early_stopping,
+        patience=patience,
+        tolerance=tolerance,
+        random_seed=random_seed,
+        stage_name="embedding_filter_source",
+    )
+    source_embedding_config = _create_training_filter_embedding_knn_config(
+        config=config,
+        filter_config=filter_config,
+    )
+    source_analysis_result = _run_cnn_embedding_knn_analysis(
+        model=source_state["model"],
+        data=data,
+        config=source_embedding_config,
+        class_names_by_label=class_names_by_label,
+    )
+
+    source_device = source_state["device"]
+    source_training_result = source_state["training_result"]
+    del source_state
+    if source_device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    return {
+        "generated": True,
+        "metric_lines": [
+            "CNN embedding filter source model enabled: True",
+            "CNN embedding filter source model trained before final filter: True",
+            "CNN embedding filter source epochs: "
+            f"{source_training_result['n_epochs']}",
+            "CNN embedding filter source best epoch: "
+            f"{source_training_result['best_epoch']}",
+            "CNN embedding filter source final training loss: "
+            f"{source_training_result['final_training_loss']}",
+            *source_analysis_result["metric_lines"],
+        ],
+    }
+
+
+def _create_training_filter_embedding_knn_config(config, filter_config):
+    """
+    Create embedding kNN config for the training-filter source model.
+
+    Parameters
+    ----------
+    config : dict
+        Full CNN training config.
+    filter_config : dict
+        Training filter config.
+
+    Returns
+    -------
+    dict
+        Config accepted by ``_run_cnn_embedding_knn_analysis``.
+    """
+
+    embedding_config = dict(config.get("cnn_embedding_knn", {}) or {})
+    embedding_filter_config = dict(filter_config.get("cnn_embedding_knn", {}) or {})
+    embedding_filter_config.pop("run_source_model", None)
+    embedding_config.update(embedding_filter_config)
+    embedding_config["enabled"] = True
+
+    for key in [
+        "candidate_classes",
+        "point_neighbor_classes",
+        "protected_classes",
+    ]:
+        if key in filter_config:
+            embedding_config[key] = filter_config[key]
+    embedding_config.setdefault("apply_splits", ["train"])
+
+    return embedding_config
 
 
 def _run_cnn_embedding_knn_analysis(model, data, config, class_names_by_label):
@@ -1416,7 +1731,7 @@ def _run_training_filter_pca(config, dataset_id, model_id):
 
     source = str(filter_config.get("source", "pca")).lower()
     if source != "pca":
-        raise ValueError("training_filter.source currently supports only 'pca'")
+        return
 
     pca_config = _create_training_filter_pca_config(
         config=config,
@@ -1577,8 +1892,15 @@ def _apply_training_filter(data, config):
         return {"metric_lines": ["Training filter enabled: False"]}
 
     source = str(config.get("source", "pca")).lower()
+    if _is_cnn_embedding_filter_source(source):
+        return _apply_cnn_embedding_knn_training_filter(
+            data=data,
+            config=config,
+        )
     if source != "pca":
-        raise ValueError("training_filter.source currently supports only 'pca'")
+        raise ValueError(
+            "training_filter.source must be 'pca' or 'cnn_embedding_knn'"
+        )
 
     dry_run = bool(config.get("dry_run", True))
     candidate_classes = _resolve_training_filter_classes(
@@ -1668,6 +1990,396 @@ def _apply_training_filter(data, config):
             train_samples_after_filter=len(data["train_indices"]),
         )
     }
+
+
+def _is_cnn_embedding_filter_source(source):
+    return str(source).lower() in {
+        "cnn_embedding_knn",
+        "cnn_embedding",
+        "embedding",
+    }
+
+
+def _apply_cnn_embedding_knn_training_filter(data, config):
+    """
+    Apply a CNN embedding kNN candidate file as a training filter.
+
+    Parameters
+    ----------
+    data : dict
+        Training data returned by ``load_training_data``.
+    config : dict
+        Training filter configuration.
+
+    Returns
+    -------
+    dict
+        Summary lines to include in model metrics.
+    """
+
+    dry_run = bool(config.get("dry_run", True))
+    candidate_classes = _resolve_training_filter_classes(
+        config.get("candidate_classes"),
+        "training_filter.candidate_classes",
+        require_nonempty=True,
+    )
+    protected_classes = _resolve_training_filter_classes(
+        config.get("protected_classes", []),
+        "training_filter.protected_classes",
+        require_nonempty=False,
+    )
+    max_removed_fraction = _resolve_max_removed_fraction(
+        config.get("max_removed_fraction_per_class", 1.0)
+    )
+
+    embedding_metrics_path = data["output_dir"] / CNN_EMBEDDING_KNN_METRICS_FILENAME
+    if not embedding_metrics_path.exists():
+        raise FileNotFoundError(
+            "CNN embedding kNN training filter requires metrics at "
+            f"{embedding_metrics_path}. Set "
+            "training_filter.cnn_embedding_knn.run_source_model: true to "
+            "create it in the same run, or create it in an earlier run."
+        )
+
+    embedding_metrics = pd.read_csv(embedding_metrics_path)
+    filter_metrics = _create_cnn_embedding_training_filter_metrics(
+        embedding_metrics=embedding_metrics,
+        data=data,
+        candidate_classes=candidate_classes,
+        protected_classes=protected_classes,
+        max_removed_fraction=max_removed_fraction,
+        dry_run=dry_run,
+    )
+
+    selected_sample_indices = filter_metrics.loc[
+        filter_metrics["cnn_embedding_filter_selected"],
+        "sample_index",
+    ].to_numpy(dtype=int)
+
+    if not dry_run and len(selected_sample_indices) > 0:
+        _remove_training_samples(data, selected_sample_indices)
+
+    output_dir = data["output_dir"]
+    metrics_path = output_dir / CNN_EMBEDDING_FILTER_METRICS_FILENAME
+    removed_path = output_dir / CNN_EMBEDDING_FILTER_REMOVED_FILENAME
+    summary_path = output_dir / CNN_EMBEDDING_FILTER_SUMMARY_FILENAME
+
+    filter_metrics.to_csv(metrics_path, index=False)
+    filter_metrics[filter_metrics["cnn_embedding_filter_selected"]].to_csv(
+        removed_path,
+        index=False,
+    )
+
+    summary_text = _create_cnn_embedding_filter_summary_text(
+        embedding_metrics_path=embedding_metrics_path,
+        metrics_path=metrics_path,
+        removed_path=removed_path,
+        dry_run=dry_run,
+        candidate_classes=candidate_classes,
+        protected_classes=protected_classes,
+        max_removed_fraction=max_removed_fraction,
+        filter_metrics=filter_metrics,
+        train_samples_after_filter=len(data["train_indices"]),
+    )
+    with open(summary_path, "w") as summary_file:
+        summary_file.write(summary_text)
+
+    selected_count = int(filter_metrics["cnn_embedding_filter_selected"].sum())
+    removed_count = int(filter_metrics["cnn_embedding_filter_removed"].sum())
+    print("CNN embedding kNN training filter")
+    print(f"  Metrics: {metrics_path}")
+    print(f"  Selected samples: {selected_count}")
+    print(f"  Removed samples: {removed_count}")
+    if dry_run:
+        print("  Dry run: training samples were not removed")
+
+    return {
+        "metric_lines": _create_cnn_embedding_filter_metric_lines(
+            embedding_metrics_path=embedding_metrics_path,
+            metrics_path=metrics_path,
+            removed_path=removed_path,
+            summary_path=summary_path,
+            dry_run=dry_run,
+            candidate_classes=candidate_classes,
+            protected_classes=protected_classes,
+            max_removed_fraction=max_removed_fraction,
+            filter_metrics=filter_metrics,
+            train_samples_after_filter=len(data["train_indices"]),
+        )
+    }
+
+
+def _create_cnn_embedding_training_filter_metrics(
+    embedding_metrics,
+    data,
+    candidate_classes,
+    protected_classes,
+    max_removed_fraction,
+    dry_run,
+):
+    """
+    Create per-training-sample CNN embedding filter decisions.
+
+    Parameters
+    ----------
+    embedding_metrics : pandas.DataFrame
+        CNN embedding per-sample metrics.
+    data : dict
+        Training data returned by ``load_training_data``.
+    candidate_classes : list of str
+        Class names that may be removed from CNN training.
+    protected_classes : list of str
+        Class names that must never be removed.
+    max_removed_fraction : float
+        Maximum selected fraction per removable class.
+    dry_run : bool
+        Whether selected samples are only reported instead of removed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Embedding metrics with CNN training-filter decision columns.
+    """
+
+    required_columns = {
+        "sample_index",
+        "split",
+        "class_name",
+        "embedding_filter_candidate",
+    }
+    missing_columns = sorted(required_columns - set(embedding_metrics.columns))
+    if missing_columns:
+        raise ValueError(
+            "CNN embedding kNN metrics are missing required columns: "
+            f"{missing_columns}"
+        )
+    if embedding_metrics["sample_index"].duplicated().any():
+        raise ValueError(
+            "CNN embedding kNN metrics contain duplicate sample_index values"
+        )
+
+    train_indices = np.asarray(data["train_indices"], dtype=int)
+    train_order = pd.DataFrame(
+        {
+            "sample_index": train_indices,
+            "cnn_train_order": np.arange(len(train_indices), dtype=int),
+            "fallback_class_name": data["metadata"]
+            .iloc[train_indices]["class_name"]
+            .to_numpy(),
+        }
+    )
+    filter_metrics = train_order.merge(
+        embedding_metrics,
+        on="sample_index",
+        how="left",
+        validate="one_to_one",
+    )
+    missing_rows = filter_metrics["split"].isna()
+    non_train_rows = (~missing_rows) & (filter_metrics["split"] != "train")
+    if non_train_rows.any():
+        bad_sample_indices = filter_metrics.loc[
+            non_train_rows,
+            "sample_index",
+        ].head(10).tolist()
+        raise ValueError(
+            "CNN embedding kNN metrics do not use the same train split as "
+            "the CNN run. First mismatched sample indices: "
+            f"{bad_sample_indices}"
+        )
+
+    filter_metrics["cnn_embedding_filter_source_missing"] = (
+        missing_rows.to_numpy(dtype=bool)
+    )
+    filter_metrics.loc[missing_rows, "split"] = "train"
+    filter_metrics["class_name"] = filter_metrics["class_name"].fillna(
+        filter_metrics["fallback_class_name"]
+    )
+    filter_metrics["embedding_filter_candidate"] = filter_metrics[
+        "embedding_filter_candidate"
+    ].fillna(False)
+
+    embedding_candidate = _coerce_boolean_column(
+        filter_metrics["embedding_filter_candidate"],
+        "embedding_filter_candidate",
+    )
+    candidate_class_mask = filter_metrics["class_name"].isin(
+        candidate_classes
+    ).to_numpy(dtype=bool)
+    protected_class_mask = filter_metrics["class_name"].isin(
+        protected_classes
+    ).to_numpy(dtype=bool)
+    eligible_mask = (
+        embedding_candidate
+        & candidate_class_mask
+        & ~protected_class_mask
+        & ~filter_metrics["cnn_embedding_filter_source_missing"].to_numpy(
+            dtype=bool
+        )
+    )
+
+    filter_metrics["cnn_embedding_filter_candidate"] = embedding_candidate
+    filter_metrics["cnn_embedding_filter_eligible"] = eligible_mask
+    filter_metrics["cnn_embedding_filter_selected"] = False
+    selected_indices = _select_pca_filter_candidates(
+        filter_metrics=filter_metrics,
+        eligible_mask=eligible_mask,
+        candidate_classes=candidate_classes,
+        max_removed_fraction=max_removed_fraction,
+    )
+    if selected_indices:
+        filter_metrics.loc[
+            selected_indices,
+            "cnn_embedding_filter_selected",
+        ] = True
+
+    filter_metrics["cnn_embedding_filter_removed"] = (
+        filter_metrics["cnn_embedding_filter_selected"] & (not dry_run)
+    )
+    filter_metrics["cnn_embedding_filter_dry_run"] = dry_run
+    filter_metrics["cnn_embedding_filter_reason"] = (
+        _create_cnn_embedding_training_filter_reasons(
+            filter_metrics=filter_metrics,
+            embedding_candidate=embedding_candidate,
+            candidate_class_mask=candidate_class_mask,
+            protected_class_mask=protected_class_mask,
+        )
+    )
+    filter_metrics = filter_metrics.drop(columns=["fallback_class_name"])
+    return filter_metrics
+
+
+def _create_cnn_embedding_training_filter_reasons(
+    filter_metrics,
+    embedding_candidate,
+    candidate_class_mask,
+    protected_class_mask,
+):
+    reasons = np.full(len(filter_metrics), "", dtype=object)
+    selected = filter_metrics["cnn_embedding_filter_selected"].to_numpy(dtype=bool)
+    eligible = filter_metrics["cnn_embedding_filter_eligible"].to_numpy(dtype=bool)
+    source_missing = filter_metrics[
+        "cnn_embedding_filter_source_missing"
+    ].to_numpy(dtype=bool)
+
+    reasons[source_missing] = "missing_embedding_metrics"
+    reasons[embedding_candidate & ~candidate_class_mask] = "not_candidate_class"
+    reasons[embedding_candidate & protected_class_mask] = "protected_class"
+    reasons[eligible & ~selected] = "class_fraction_cap"
+    reasons[selected] = "selected_by_cnn_embedding_filter"
+    return reasons
+
+
+def _create_cnn_embedding_filter_metric_lines(
+    embedding_metrics_path,
+    metrics_path,
+    removed_path,
+    summary_path,
+    dry_run,
+    candidate_classes,
+    protected_classes,
+    max_removed_fraction,
+    filter_metrics,
+    train_samples_after_filter,
+):
+    summary_counts = _summarize_cnn_embedding_filter_counts(filter_metrics)
+    lines = [
+        "Training filter enabled: True",
+        "Training filter source: cnn_embedding_knn",
+        f"Training filter dry run: {dry_run}",
+        f"CNN embedding filter source metrics: {embedding_metrics_path}",
+        "CNN embedding filter candidate column: embedding_filter_candidate",
+        f"CNN embedding filter candidate classes: {', '.join(candidate_classes)}",
+        f"CNN embedding filter protected classes: {', '.join(protected_classes)}",
+        "CNN embedding filter max removed fraction per class: "
+        f"{max_removed_fraction}",
+        f"CNN embedding filter train samples before filter: {len(filter_metrics)}",
+        "CNN embedding filter selected samples: "
+        f"{int(filter_metrics['cnn_embedding_filter_selected'].sum())}",
+        "CNN embedding filter removed samples: "
+        f"{int(filter_metrics['cnn_embedding_filter_removed'].sum())}",
+        "CNN embedding filter missing source metrics: "
+        f"{int(filter_metrics['cnn_embedding_filter_source_missing'].sum())}",
+        f"CNN embedding filter train samples after filter: {train_samples_after_filter}",
+        f"CNN embedding filter metrics: {metrics_path}",
+        f"CNN embedding filter selected-sample file: {removed_path}",
+        f"CNN embedding filter summary: {summary_path}",
+    ]
+    for _, row in summary_counts.iterrows():
+        lines.append(
+            "CNN embedding filter class "
+            f"{row['class_name']}: train={int(row['train_samples'])}, "
+            f"candidate={int(row['embedding_candidates'])}, "
+            f"eligible={int(row['eligible_candidates'])}, "
+            f"selected={int(row['selected_samples'])}, "
+            f"removed={int(row['removed_samples'])}, "
+            f"missing_source={int(row['missing_source_metrics'])}"
+        )
+    return lines
+
+
+def _create_cnn_embedding_filter_summary_text(
+    embedding_metrics_path,
+    metrics_path,
+    removed_path,
+    dry_run,
+    candidate_classes,
+    protected_classes,
+    max_removed_fraction,
+    filter_metrics,
+    train_samples_after_filter,
+):
+    summary_counts = _summarize_cnn_embedding_filter_counts(filter_metrics)
+    lines = [
+        "CNN embedding kNN training filter summary",
+        "=" * 70,
+        f"Source CNN embedding metrics: {embedding_metrics_path}",
+        f"Output metrics: {metrics_path}",
+        f"Selected-sample file: {removed_path}",
+        "Candidate column: embedding_filter_candidate",
+        f"Dry run: {dry_run}",
+        f"Candidate classes: {', '.join(candidate_classes)}",
+        f"Protected classes: {', '.join(protected_classes)}",
+        f"Max removed fraction per class: {max_removed_fraction}",
+        f"Train samples before filter: {len(filter_metrics)}",
+        "Selected samples: "
+        f"{int(filter_metrics['cnn_embedding_filter_selected'].sum())}",
+        "Removed samples: "
+        f"{int(filter_metrics['cnn_embedding_filter_removed'].sum())}",
+        "Missing source metrics: "
+        f"{int(filter_metrics['cnn_embedding_filter_source_missing'].sum())}",
+        f"Train samples after filter: {train_samples_after_filter}",
+        "",
+        "Counts by class",
+        "=" * 70,
+        summary_counts.to_string(index=False),
+        "",
+    ]
+    if dry_run:
+        lines.extend([
+            "Dry-run note",
+            "=" * 70,
+            "Selected samples were saved for inspection but not removed from CNN training.",
+            "",
+        ])
+    return "\n".join(lines)
+
+
+def _summarize_cnn_embedding_filter_counts(filter_metrics):
+    return (
+        filter_metrics.groupby("class_name", sort=True)
+        .agg(
+            train_samples=("sample_index", "size"),
+            embedding_candidates=("cnn_embedding_filter_candidate", "sum"),
+            eligible_candidates=("cnn_embedding_filter_eligible", "sum"),
+            selected_samples=("cnn_embedding_filter_selected", "sum"),
+            removed_samples=("cnn_embedding_filter_removed", "sum"),
+            missing_source_metrics=(
+                "cnn_embedding_filter_source_missing",
+                "sum",
+            ),
+        )
+        .reset_index()
+    )
 
 
 def _create_pca_filter_metrics(

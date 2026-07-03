@@ -18,6 +18,14 @@ features:
   batch_size: 512
   n_jobs: -1
   log_eps: 1e-30
+  cache:
+    enabled: true
+    dir: data/train/timesteps_{dataset_id}/cache
+    filename: autoencoder_xz_log.npy
+    metadata_filename: autoencoder_xz_log_metadata.npz
+    rebuild: false
+    batch_size: 64
+    n_jobs: 8
 
 training_filter:
   enabled: true
@@ -27,6 +35,8 @@ training_filter:
   point_neighbor_classes: [reconnection, o_point]
   protected_classes: [reconnection, o_point]
   max_removed_fraction_per_class: 0.3
+  cnn_embedding_knn:
+    run_source_model: true
   pca:
     features:
       downsample_factor: 1
@@ -35,6 +45,14 @@ training_filter:
       log_eps: 1e-30
       sample_normalization: standard
       sample_norm_eps: 1e-6
+      cache:
+        enabled: true
+        dir: data/train/timesteps_{dataset_id}/cache
+        filename: autoencoder_xz_log.npy
+        metadata_filename: autoencoder_xz_log_metadata.npz
+        rebuild: false
+        batch_size: 64
+        n_jobs: 8
     pca:
       backend: torch
       algorithm: lowrank

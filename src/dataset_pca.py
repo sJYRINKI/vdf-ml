@@ -15,8 +15,10 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 import torch
 
+from src.autoencoder_data import create_or_load_log_slice_cache, resolve_cache_config
 from src.batches import create_contiguous_slice, iter_index_batches
 from src.dataset_io import load_dataset
+from src.features import create_log_slice_cache_feature_batch
 from src.model_split import split_by_timestep
 from src.timesteps import create_timestep_path
 
@@ -128,6 +130,21 @@ def plot_dataset_pca(config, timestep, pca_id=None):
     gap_timesteps = int(split_config.get("gap_timesteps", 10))
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
+    cache_config = resolve_cache_config(
+        config=feature_config["cache"],
+        dataset_dir=dataset_dir,
+        dataset_id=timestep,
+        model_id=output_version or timestep,
+    )
+    X_log, cache_metadata = create_or_load_log_slice_cache(
+        X=X,
+        input_config=create_pca_feature_cache_input_config(
+            log_eps=feature_config["log_eps"]
+        ),
+        cache_config=cache_config,
+    )
+    feature_config["X_log"] = X_log
+    feature_config["cache_metadata"] = cache_metadata
     print_pca_progress(0.03, "dataset_loaded")
     (
         train_indices,
@@ -358,6 +375,31 @@ def resolve_feature_config(config):
         "log_eps": log_eps,
         "sample_normalization": sample_normalization,
         "sample_norm_eps": sample_norm_eps,
+        "cache": config.get("cache", {}),
+    }
+
+
+def create_pca_feature_cache_input_config(log_eps):
+    """
+    Create input settings for the shared log-slice PCA feature cache.
+
+    Parameters
+    ----------
+    log_eps : float
+        Small positive value added before log scaling.
+
+    Returns
+    -------
+    dict
+        Input settings accepted by ``create_or_load_log_slice_cache``.
+    """
+
+    return {
+        "slice": "xz",
+        "orientation": "plot",
+        "normalization": "train_global_standard",
+        "log_eps": float(log_eps),
+        "clip_negative_to_zero": True,
     }
 
 
@@ -879,6 +921,7 @@ def fit_feature_scaler(
         log_eps=feature_config["log_eps"],
         sample_normalization=feature_config["sample_normalization"],
         sample_norm_eps=feature_config["sample_norm_eps"],
+        X_log=feature_config.get("X_log"),
     ), start=1):
         scaler.partial_fit(features)
         if progress_stage is not None:
@@ -948,6 +991,7 @@ def fit_incremental_pca(
         log_eps=feature_config["log_eps"],
         sample_normalization=feature_config["sample_normalization"],
         sample_norm_eps=feature_config["sample_norm_eps"],
+        X_log=feature_config.get("X_log"),
         min_batch_size=n_components,
     ), start=1):
         scaled_features = scaler.transform(features)
@@ -2280,6 +2324,7 @@ def create_feature_matrix(
         log_eps=feature_config["log_eps"],
         sample_normalization=feature_config["sample_normalization"],
         sample_norm_eps=feature_config["sample_norm_eps"],
+        X_log=feature_config.get("X_log"),
     ), start=1):
         write_end = write_start + len(feature_batch)
         features[write_start:write_end] = feature_batch
@@ -2745,6 +2790,7 @@ def transform_indices(
         log_eps=feature_config["log_eps"],
         sample_normalization=feature_config["sample_normalization"],
         sample_norm_eps=feature_config["sample_norm_eps"],
+        X_log=feature_config.get("X_log"),
     ), start=1):
         scaled_features = scaler.transform(features)
         score_batch = pca.transform(scaled_features).astype(np.float32, copy=False)
@@ -2772,6 +2818,7 @@ def iter_feature_batches(
     log_eps,
     sample_normalization,
     sample_norm_eps,
+    X_log=None,
     min_batch_size=None,
 ):
     """
@@ -2795,6 +2842,9 @@ def iter_feature_batches(
         Per-sample normalization mode.
     sample_norm_eps : float
         Small value used to avoid division by zero during sample normalization.
+    X_log : numpy.ndarray, optional
+        Cached log-scaled plot-oriented xz slices with shape
+        ``(n_samples, 1, vz, vx)``.
     min_batch_size : int, optional
         Minimum batch size. A short final batch is merged with the previous
         batch when possible.
@@ -2811,6 +2861,16 @@ def iter_feature_batches(
         batch_size=batch_size,
         min_batch_size=min_batch_size,
     ):
+        if X_log is not None:
+            yield create_log_slice_cache_feature_batch(
+                X_log=X_log,
+                indices=batch_indices,
+                downsample_factor=downsample_factor,
+                sample_normalization=sample_normalization,
+                sample_norm_eps=sample_norm_eps,
+            )
+            continue
+
         yield create_log_xz_feature_batch(
             X=X,
             indices=batch_indices,
@@ -3635,6 +3695,10 @@ def create_pca_metrics_text(
         f"Log epsilon: {feature_config['log_eps']}",
         f"Sample normalization: {feature_config['sample_normalization']}",
         f"Sample normalization epsilon: {feature_config['sample_norm_eps']}",
+        "Feature cache enabled: "
+        f"{feature_config.get('cache_metadata', {}).get('enabled', False)}",
+        "Feature cache path: "
+        f"{feature_config.get('cache_metadata', {}).get('cache_path', 'none')}",
         f"Train fraction of usable timesteps: {split_config['train_fraction']}",
         "Validation fraction of usable timesteps: "
         f"{split_config['validation_fraction']}",

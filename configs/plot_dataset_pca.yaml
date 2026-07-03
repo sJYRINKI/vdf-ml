@@ -13,6 +13,14 @@ features:
   log_eps: 1e-30
   sample_normalization: standard
   sample_norm_eps: 1e-6
+  cache:
+    enabled: false
+    dir: data/train/timesteps_{dataset_id}/cache
+    filename: autoencoder_xz_log.npy
+    metadata_filename: autoencoder_xz_log_metadata.npz
+    rebuild: false
+    batch_size: 64
+    n_jobs: 8
 
 pca:
   backend: torch
