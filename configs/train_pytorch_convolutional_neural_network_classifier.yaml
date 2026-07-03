@@ -30,8 +30,8 @@ training_filter:
   pca:
     features:
       downsample_factor: 1
-      batch_size: 32
-      n_jobs: -1
+      batch_size: 64
+      n_jobs: 8
       log_eps: 1e-30
       sample_normalization: standard
       sample_norm_eps: 1e-6
@@ -77,6 +77,28 @@ training_filter:
       perplexity: 30
       n_neighbors: 15
       min_dist: 0.1
+
+cnn_embedding_knn:
+  enabled: false
+  k_neighbors: 25
+  embedding_batch_size: 512
+  neighbor_batch_size: 4096
+  candidate_classes: [exhaust, dayside]
+  point_neighbor_classes: [reconnection, o_point]
+  protected_classes: [reconnection, o_point]
+  apply_splits: [train]
+  min_point_neighbor_fraction: 0.5
+  min_point_neighbor_fraction_by_class:
+    exhaust: 0.4
+    dayside: 0.6
+  max_same_class_fraction: 0.60
+  max_same_class_fraction_by_class: {}
+  plot:
+    enabled: true
+    max_points_per_class: 5000
+    random_state: 1234
+    alpha: 0.6
+    point_size: 8
 
 model:
   channels: [16, 32, 64]

@@ -2,7 +2,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score
+from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -14,6 +16,11 @@ PCA_FILTER_CANDIDATE_COLUMN = "filter_preview_candidate"
 PCA_FILTER_METRICS_FILENAME = "pca_filter_metrics.csv"
 PCA_FILTER_REMOVED_FILENAME = "pca_filter_removed_samples.csv"
 PCA_FILTER_SUMMARY_FILENAME = "pca_filter_summary.txt"
+CNN_EMBEDDINGS_FILENAME = "cnn_embeddings.npz"
+CNN_EMBEDDING_KNN_METRICS_FILENAME = "cnn_embedding_knn_metrics.csv"
+CNN_EMBEDDING_KNN_CANDIDATES_FILENAME = "cnn_embedding_knn_candidates.csv"
+CNN_EMBEDDING_KNN_SUMMARY_FILENAME = "cnn_embedding_knn_summary.txt"
+CNN_EMBEDDING_KNN_PREVIEW_FILENAME = "cnn_embedding_knn_preview.png"
 
 from src.training import (
     create_metrics_text,
@@ -130,6 +137,13 @@ class PyTorchCNNClassifier(nn.Module):
     def forward(self, features):
         """Return unnormalized class scores for a feature batch."""
 
+        embeddings = self.forward_embeddings(features)
+        embeddings = self.classifier[3](embeddings)
+        return self.classifier[4](embeddings)
+
+    def forward_embeddings(self, features):
+        """Return hidden-layer embeddings for a feature batch."""
+
         features = (features - self.feature_mean) / self.feature_scale
         images = features.reshape(
             -1,
@@ -137,7 +151,10 @@ class PyTorchCNNClassifier(nn.Module):
             self.image_size,
             self.image_size,
         )
-        return self.classifier(self.convolutions(images))
+        convolution_features = self.convolutions(images)
+        flattened_features = self.classifier[0](convolution_features)
+        hidden_features = self.classifier[1](flattened_features)
+        return self.classifier[2](hidden_features)
 
     def predict(self, features):
         """Predict project class labels."""
@@ -177,6 +194,58 @@ class PyTorchCNNClassifier(nn.Module):
         if was_training:
             self.train()
         return probabilities
+
+    def transform_embeddings(self, features, batch_size=None):
+        """
+        Extract CNN hidden-layer embeddings.
+
+        Parameters
+        ----------
+        features : array-like
+            Flattened VDF xz-slice features.
+        batch_size : int, optional
+            Number of feature rows transformed at once.
+
+        Returns
+        -------
+        numpy.ndarray
+            Hidden-layer embeddings.
+        """
+
+        features = np.asarray(features, dtype=np.float32)
+        if features.ndim != 2 or features.shape[1] != self.input_size:
+            raise ValueError(
+                "Expected feature matrix with shape "
+                f"(n_samples, {self.input_size})"
+            )
+        if batch_size is None:
+            batch_size = self.prediction_batch_size
+        batch_size = int(batch_size)
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        device = self.feature_mean.device
+        was_training = self.training
+        self.eval()
+        embeddings = np.empty(
+            (len(features), self.classifier_size),
+            dtype=np.float32,
+        )
+        with torch.inference_mode():
+            for start in range(0, len(features), batch_size):
+                end = start + batch_size
+                feature_batch = torch.as_tensor(
+                    features[start:end],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                embeddings[start:end] = (
+                    self.forward_embeddings(feature_batch).cpu().numpy()
+                )
+
+        if was_training:
+            self.train()
+        return embeddings
 
 
 def train_pytorch_convolutional_neural_network_classifier(
@@ -357,6 +426,12 @@ def train_pytorch_convolutional_neural_network_classifier(
         class_names_by_label=class_names_by_label,
         plot_config=config.get("failure_plots", {}),
     )
+    embedding_knn_result = _run_cnn_embedding_knn_analysis(
+        model=model,
+        data=data,
+        config=config.get("cnn_embedding_knn", {}),
+        class_names_by_label=class_names_by_label,
+    )
 
     checkpoint_path = (
         data["output_dir"]
@@ -397,6 +472,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Epochs: {training_result['n_epochs']}",
         f"Best epoch: {training_result['best_epoch']}",
         f"Final training loss: {training_result['final_training_loss']}",
+        *embedding_knn_result["metric_lines"],
         f"Failure plots saved: {len(failure_plot_paths)}",
     ]
     if failure_plot_paths:
@@ -634,6 +710,690 @@ def _fit_model(
         "best_validation_macro_f1": best_score if early_stopping else None,
         "final_training_loss": training_loss,
     }
+
+
+def _run_cnn_embedding_knn_analysis(model, data, config, class_names_by_label):
+    """
+    Save CNN embedding kNN metrics for filter inspection.
+
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        Trained CNN classifier.
+    data : dict
+        Training data returned by ``load_training_data``.
+    config : dict
+        CNN embedding kNN configuration.
+    class_names_by_label : dict
+        Mapping from integer label to class name.
+
+    Returns
+    -------
+    dict
+        Summary lines to include in model metrics.
+    """
+
+    config = _resolve_cnn_embedding_knn_config(config)
+    if not config["enabled"]:
+        return {"metric_lines": ["CNN embedding kNN enabled: False"]}
+
+    embeddings_by_split = _extract_cnn_embeddings_by_split(
+        model=model,
+        data=data,
+        batch_size=config["embedding_batch_size"],
+    )
+    metrics = _create_cnn_embedding_metrics(
+        data=data,
+        embeddings_by_split=embeddings_by_split,
+        class_names_by_label=class_names_by_label,
+    )
+    _add_cnn_embedding_neighbor_metrics(
+        metrics=metrics,
+        embeddings_by_split=embeddings_by_split,
+        data=data,
+        class_names_by_label=class_names_by_label,
+        config=config,
+    )
+    _add_cnn_embedding_filter_preview(metrics=metrics, config=config)
+    _add_cnn_embedding_plot_coordinates(
+        metrics=metrics,
+        embeddings_by_split=embeddings_by_split,
+    )
+
+    output_dir = data["output_dir"]
+    embeddings_path = output_dir / CNN_EMBEDDINGS_FILENAME
+    metrics_path = output_dir / CNN_EMBEDDING_KNN_METRICS_FILENAME
+    candidates_path = output_dir / CNN_EMBEDDING_KNN_CANDIDATES_FILENAME
+    summary_path = output_dir / CNN_EMBEDDING_KNN_SUMMARY_FILENAME
+    preview_path = output_dir / CNN_EMBEDDING_KNN_PREVIEW_FILENAME
+
+    _save_cnn_embeddings(
+        embeddings_by_split=embeddings_by_split,
+        data=data,
+        output_path=embeddings_path,
+    )
+    metrics.to_csv(metrics_path, index=False)
+    metrics[metrics["embedding_filter_candidate"]].to_csv(
+        candidates_path,
+        index=False,
+    )
+    summary_text = _create_cnn_embedding_knn_summary_text(
+        metrics=metrics,
+        config=config,
+        embeddings_path=embeddings_path,
+        metrics_path=metrics_path,
+        candidates_path=candidates_path,
+        preview_path=preview_path,
+    )
+    with open(summary_path, "w") as summary_file:
+        summary_file.write(summary_text)
+
+    preview_saved = False
+    if config["plot_enabled"]:
+        preview_saved = _plot_cnn_embedding_knn_preview(
+            metrics=metrics,
+            output_path=preview_path,
+            config=config,
+        )
+
+    candidate_count = int(metrics["embedding_filter_candidate"].sum())
+    print("CNN embedding kNN")
+    print(f"  Metrics: {metrics_path}")
+    print(f"  Candidates: {candidate_count}")
+    if preview_saved:
+        print(f"  Preview: {preview_path}")
+
+    return {
+        "metric_lines": _create_cnn_embedding_knn_metric_lines(
+            metrics=metrics,
+            config=config,
+            embeddings_path=embeddings_path,
+            metrics_path=metrics_path,
+            candidates_path=candidates_path,
+            summary_path=summary_path,
+            preview_path=preview_path if preview_saved else None,
+        )
+    }
+
+
+def _resolve_cnn_embedding_knn_config(config):
+    config = config or {}
+    candidate_classes = _resolve_training_filter_classes(
+        config.get("candidate_classes", ["exhaust", "dayside"]),
+        "cnn_embedding_knn.candidate_classes",
+        require_nonempty=True,
+    )
+    point_neighbor_classes = _resolve_training_filter_classes(
+        config.get("point_neighbor_classes", ["reconnection", "o_point"]),
+        "cnn_embedding_knn.point_neighbor_classes",
+        require_nonempty=True,
+    )
+    protected_classes = _resolve_training_filter_classes(
+        config.get("protected_classes", point_neighbor_classes),
+        "cnn_embedding_knn.protected_classes",
+        require_nonempty=False,
+    )
+    apply_splits = _resolve_training_filter_classes(
+        config.get("apply_splits", ["train"]),
+        "cnn_embedding_knn.apply_splits",
+        require_nonempty=True,
+    )
+    min_point_neighbor_fraction = float(
+        config.get("min_point_neighbor_fraction", 0.5)
+    )
+    min_point_neighbor_fraction_by_class = _resolve_class_thresholds(
+        config.get("min_point_neighbor_fraction_by_class", {})
+    )
+    max_same_class_fraction = config.get("max_same_class_fraction")
+    if max_same_class_fraction is not None:
+        max_same_class_fraction = float(max_same_class_fraction)
+    max_same_class_fraction_by_class = _resolve_class_thresholds(
+        config.get("max_same_class_fraction_by_class", {})
+    )
+    k_neighbors = int(config.get("k_neighbors", 25))
+    embedding_batch_size = int(config.get("embedding_batch_size", 512))
+    neighbor_batch_size = int(config.get("neighbor_batch_size", 4096))
+    plot_config = config.get("plot", {}) or {}
+    max_points_per_class = int(plot_config.get("max_points_per_class", 5000))
+    alpha = float(plot_config.get("alpha", 0.6))
+    point_size = float(plot_config.get("point_size", 8.0))
+
+    if k_neighbors <= 0:
+        raise ValueError("cnn_embedding_knn.k_neighbors must be positive")
+    if embedding_batch_size <= 0:
+        raise ValueError("cnn_embedding_knn.embedding_batch_size must be positive")
+    if neighbor_batch_size <= 0:
+        raise ValueError("cnn_embedding_knn.neighbor_batch_size must be positive")
+    if not 0.0 <= min_point_neighbor_fraction <= 1.0:
+        raise ValueError(
+            "cnn_embedding_knn.min_point_neighbor_fraction must be between zero and one"
+        )
+    if max_same_class_fraction is not None and not (
+        0.0 <= max_same_class_fraction <= 1.0
+    ):
+        raise ValueError(
+            "cnn_embedding_knn.max_same_class_fraction must be between zero and one"
+        )
+    if max_points_per_class <= 0:
+        raise ValueError(
+            "cnn_embedding_knn.plot.max_points_per_class must be positive"
+        )
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError("cnn_embedding_knn.plot.alpha must be between zero and one")
+    if point_size <= 0.0:
+        raise ValueError("cnn_embedding_knn.plot.point_size must be positive")
+
+    return {
+        "enabled": bool(config.get("enabled", False)),
+        "k_neighbors": k_neighbors,
+        "embedding_batch_size": embedding_batch_size,
+        "neighbor_batch_size": neighbor_batch_size,
+        "candidate_classes": candidate_classes,
+        "point_neighbor_classes": point_neighbor_classes,
+        "protected_classes": protected_classes,
+        "apply_splits": apply_splits,
+        "min_point_neighbor_fraction": min_point_neighbor_fraction,
+        "min_point_neighbor_fraction_by_class": (
+            min_point_neighbor_fraction_by_class
+        ),
+        "max_same_class_fraction": max_same_class_fraction,
+        "max_same_class_fraction_by_class": max_same_class_fraction_by_class,
+        "plot_enabled": bool(plot_config.get("enabled", True)),
+        "max_points_per_class": max_points_per_class,
+        "plot_random_state": int(plot_config.get("random_state", 1234)),
+        "alpha": alpha,
+        "point_size": point_size,
+    }
+
+
+def _extract_cnn_embeddings_by_split(model, data, batch_size):
+    return {
+        "train": model.transform_embeddings(
+            data["X_train_features"],
+            batch_size=batch_size,
+        ),
+        "validation": model.transform_embeddings(
+            data["X_validation_features"],
+            batch_size=batch_size,
+        ),
+        "test": model.transform_embeddings(
+            data["X_test_features"],
+            batch_size=batch_size,
+        ),
+    }
+
+
+def _create_cnn_embedding_metrics(
+    data,
+    embeddings_by_split,
+    class_names_by_label,
+):
+    rows = []
+    split_items = [
+        ("train", data["train_indices"], data["y_train"]),
+        ("validation", data["validation_indices"], data["y_validation"]),
+        ("test", data["test_indices"], data["y_test"]),
+    ]
+    for split_name, indices, labels in split_items:
+        split_rows = data["metadata"].iloc[indices].copy()
+        if "sample_index" not in split_rows.columns:
+            split_rows.insert(0, "sample_index", np.asarray(indices, dtype=int))
+        split_rows["split"] = split_name
+        split_rows["label"] = np.asarray(labels, dtype=int)
+        if "class_name" not in split_rows.columns:
+            split_rows["class_name"] = split_rows["label"].map(class_names_by_label)
+        split_rows["embedding_norm"] = np.linalg.norm(
+            embeddings_by_split[split_name],
+            axis=1,
+        )
+        rows.append(split_rows)
+
+    return pd.concat(rows, ignore_index=True)
+
+
+def _add_cnn_embedding_neighbor_metrics(
+    metrics,
+    embeddings_by_split,
+    data,
+    class_names_by_label,
+    config,
+):
+    train_embeddings = embeddings_by_split["train"]
+    train_labels = np.asarray(data["y_train"], dtype=int)
+    metrics["same_class_fraction"] = np.nan
+    metrics["point_neighbor_fraction"] = np.nan
+    metrics["embedding_borderline_score"] = np.nan
+    metrics["nearest_other_class"] = ""
+    metrics["nearest_point_class"] = ""
+
+    if len(train_embeddings) < 2:
+        return
+
+    point_labels = _labels_for_class_names(
+        class_names_by_label=class_names_by_label,
+        class_names=config["point_neighbor_classes"],
+    )
+    k_neighbors = min(config["k_neighbors"], len(train_embeddings) - 1)
+    neighbor_model = NearestNeighbors(n_neighbors=k_neighbors + 1)
+    neighbor_model.fit(train_embeddings)
+
+    split_offsets = _create_split_offsets(metrics)
+    for split_name, embeddings in embeddings_by_split.items():
+        start, stop = split_offsets[split_name]
+        query_labels = metrics.loc[start:stop - 1, "label"].to_numpy(dtype=int)
+        query_train_positions = None
+        if split_name == "train":
+            query_train_positions = np.arange(len(embeddings), dtype=int)
+
+        (
+            same_class_fraction,
+            point_neighbor_fraction,
+            nearest_other_class,
+            nearest_point_class,
+        ) = _compute_embedding_knn_metrics(
+            neighbor_model=neighbor_model,
+            query_embeddings=embeddings,
+            query_labels=query_labels,
+            train_labels=train_labels,
+            point_labels=point_labels,
+            class_names_by_label=class_names_by_label,
+            k_neighbors=k_neighbors,
+            batch_size=config["neighbor_batch_size"],
+            query_train_positions=query_train_positions,
+        )
+
+        metrics.loc[start:stop - 1, "same_class_fraction"] = same_class_fraction
+        metrics.loc[start:stop - 1, "point_neighbor_fraction"] = (
+            point_neighbor_fraction
+        )
+        metrics.loc[start:stop - 1, "embedding_borderline_score"] = (
+            point_neighbor_fraction - same_class_fraction
+        )
+        metrics.loc[start:stop - 1, "nearest_other_class"] = nearest_other_class
+        metrics.loc[start:stop - 1, "nearest_point_class"] = nearest_point_class
+
+
+def _compute_embedding_knn_metrics(
+    neighbor_model,
+    query_embeddings,
+    query_labels,
+    train_labels,
+    point_labels,
+    class_names_by_label,
+    k_neighbors,
+    batch_size,
+    query_train_positions=None,
+):
+    same_class_fraction = np.empty(len(query_embeddings), dtype=np.float32)
+    point_neighbor_fraction = np.empty(len(query_embeddings), dtype=np.float32)
+    nearest_other_class = np.empty(len(query_embeddings), dtype=object)
+    nearest_point_class = np.empty(len(query_embeddings), dtype=object)
+    point_labels = set(int(label) for label in point_labels)
+
+    for batch_start in range(0, len(query_embeddings), batch_size):
+        batch_end = min(batch_start + batch_size, len(query_embeddings))
+        _, neighbor_indices = neighbor_model.kneighbors(
+            query_embeddings[batch_start:batch_end],
+            return_distance=True,
+        )
+        for local_index, raw_neighbors in enumerate(neighbor_indices):
+            query_index = batch_start + local_index
+            neighbors = raw_neighbors
+            if query_train_positions is not None:
+                train_position = int(query_train_positions[query_index])
+                neighbors = neighbors[neighbors != train_position]
+            neighbors = neighbors[:k_neighbors]
+            neighbor_labels = train_labels[neighbors]
+            query_label = int(query_labels[query_index])
+            point_mask = np.isin(neighbor_labels, list(point_labels))
+
+            same_class_fraction[query_index] = np.mean(
+                neighbor_labels == query_label
+            )
+            point_neighbor_fraction[query_index] = np.mean(point_mask)
+            nearest_other_class[query_index] = _nearest_class_name(
+                labels=neighbor_labels[neighbor_labels != query_label],
+                class_names_by_label=class_names_by_label,
+            )
+            nearest_point_class[query_index] = _nearest_class_name(
+                labels=neighbor_labels[point_mask],
+                class_names_by_label=class_names_by_label,
+            )
+
+    return (
+        same_class_fraction,
+        point_neighbor_fraction,
+        nearest_other_class,
+        nearest_point_class,
+    )
+
+
+def _add_cnn_embedding_filter_preview(metrics, config):
+    point_thresholds = _thresholds_for_rows(
+        rows=metrics,
+        default_threshold=config["min_point_neighbor_fraction"],
+        class_thresholds=config["min_point_neighbor_fraction_by_class"],
+    )
+    candidate_mask = (
+        metrics["split"].isin(config["apply_splits"])
+        & metrics["class_name"].isin(config["candidate_classes"])
+        & ~metrics["class_name"].isin(config["protected_classes"])
+        & metrics["point_neighbor_fraction"].ge(point_thresholds)
+    )
+
+    if _has_embedding_same_class_filter(config):
+        same_thresholds = _thresholds_for_rows(
+            rows=metrics,
+            default_threshold=config["max_same_class_fraction"],
+            class_thresholds=config["max_same_class_fraction_by_class"],
+        )
+        candidate_mask = candidate_mask & metrics["same_class_fraction"].le(
+            same_thresholds
+        )
+
+    metrics["embedding_filter_candidate"] = candidate_mask.to_numpy(dtype=bool)
+    metrics["embedding_filter_reason"] = ""
+    if metrics["embedding_filter_candidate"].any():
+        metrics.loc[
+            metrics["embedding_filter_candidate"],
+            "embedding_filter_reason",
+        ] = _create_embedding_filter_reasons(
+            rows=metrics[metrics["embedding_filter_candidate"]],
+            config=config,
+        )
+
+
+def _add_cnn_embedding_plot_coordinates(metrics, embeddings_by_split):
+    embeddings = np.concatenate(
+        [embeddings_by_split[split_name] for split_name in embeddings_by_split],
+        axis=0,
+    )
+    if embeddings.shape[1] >= 2 and len(embeddings) >= 2:
+        coordinates = PCA(n_components=2).fit_transform(embeddings)
+    else:
+        coordinates = np.zeros((len(embeddings), 2), dtype=np.float32)
+
+    metrics["embedding_plot_0"] = coordinates[:, 0].astype(np.float32, copy=False)
+    metrics["embedding_plot_1"] = coordinates[:, 1].astype(np.float32, copy=False)
+
+
+def _save_cnn_embeddings(embeddings_by_split, data, output_path):
+    embeddings = np.concatenate(
+        [embeddings_by_split[split_name] for split_name in embeddings_by_split],
+        axis=0,
+    )
+    sample_indices = np.concatenate(
+        [
+            np.asarray(data[f"{split_name}_indices"], dtype=int)
+            for split_name in embeddings_by_split
+        ]
+    )
+    labels = np.concatenate(
+        [
+            np.asarray(data[f"y_{split_name}"], dtype=int)
+            for split_name in embeddings_by_split
+        ]
+    )
+    splits = np.concatenate(
+        [
+            np.full(len(embeddings_by_split[split_name]), split_name)
+            for split_name in embeddings_by_split
+        ]
+    )
+    np.savez(
+        output_path,
+        embeddings=embeddings.astype(np.float32, copy=False),
+        sample_indices=sample_indices,
+        labels=labels,
+        splits=splits,
+    )
+
+
+def _plot_cnn_embedding_knn_preview(metrics, output_path, config):
+    plot_rows = _subsample_embedding_plot_rows(
+        metrics=metrics,
+        max_points_per_class=config["max_points_per_class"],
+        random_state=config["plot_random_state"],
+    )
+    candidate_rows = metrics[metrics["embedding_filter_candidate"]]
+    plot_rows = pd.concat([plot_rows, candidate_rows], ignore_index=True)
+    plot_rows = plot_rows.drop_duplicates(subset=["sample_index", "split"])
+    if plot_rows.empty:
+        return False
+
+    import matplotlib.pyplot as plt
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(9, 7))
+    for class_name, class_rows in plot_rows.groupby("class_name", sort=True):
+        ax.scatter(
+            class_rows["embedding_plot_0"],
+            class_rows["embedding_plot_1"],
+            s=config["point_size"],
+            alpha=config["alpha"],
+            label=class_name,
+        )
+
+    point_rows = plot_rows[
+        plot_rows["class_name"].isin(config["point_neighbor_classes"])
+    ]
+    if not point_rows.empty:
+        ax.scatter(
+            point_rows["embedding_plot_0"],
+            point_rows["embedding_plot_1"],
+            s=config["point_size"] * 4,
+            facecolors="none",
+            edgecolors="black",
+            linewidths=0.8,
+            label="point-neighbor classes",
+        )
+
+    candidate_rows = plot_rows[plot_rows["embedding_filter_candidate"]]
+    if not candidate_rows.empty:
+        ax.scatter(
+            candidate_rows["embedding_plot_0"],
+            candidate_rows["embedding_plot_1"],
+            s=config["point_size"] * 7,
+            marker="x",
+            c="red",
+            linewidths=1.0,
+            label="embedding preview candidates",
+        )
+
+    ax.set_title("CNN embedding kNN preview")
+    ax.set_xlabel("Embedding PCA 1")
+    ax.set_ylabel("Embedding PCA 2")
+    ax.legend(loc="best", fontsize="small")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return True
+
+
+def _subsample_embedding_plot_rows(metrics, max_points_per_class, random_state):
+    sampled_rows = []
+    rng = np.random.default_rng(random_state)
+    for _, class_rows in metrics.groupby("class_name", sort=True):
+        if len(class_rows) <= max_points_per_class:
+            sampled_rows.append(class_rows)
+            continue
+        selected_positions = rng.choice(
+            len(class_rows),
+            size=max_points_per_class,
+            replace=False,
+        )
+        sampled_rows.append(class_rows.iloc[np.sort(selected_positions)])
+    if not sampled_rows:
+        return metrics.iloc[0:0].copy()
+    return pd.concat(sampled_rows, ignore_index=True)
+
+
+def _create_cnn_embedding_knn_metric_lines(
+    metrics,
+    config,
+    embeddings_path,
+    metrics_path,
+    candidates_path,
+    summary_path,
+    preview_path,
+):
+    lines = [
+        "CNN embedding kNN enabled: True",
+        f"CNN embedding kNN neighbors: {config['k_neighbors']}",
+        f"CNN embedding candidate classes: {', '.join(config['candidate_classes'])}",
+        "CNN embedding point-neighbor classes: "
+        f"{', '.join(config['point_neighbor_classes'])}",
+        f"CNN embedding protected classes: {', '.join(config['protected_classes'])}",
+        f"CNN embedding apply splits: {', '.join(config['apply_splits'])}",
+        "CNN embedding candidates: "
+        f"{int(metrics['embedding_filter_candidate'].sum())}",
+        f"CNN embeddings: {embeddings_path}",
+        f"CNN embedding kNN metrics: {metrics_path}",
+        f"CNN embedding kNN candidates: {candidates_path}",
+        f"CNN embedding kNN summary: {summary_path}",
+    ]
+    if preview_path is not None:
+        lines.append(f"CNN embedding kNN preview: {preview_path}")
+    for _, row in _summarize_embedding_candidate_counts(metrics).iterrows():
+        lines.append(
+            "CNN embedding kNN class "
+            f"{row['split']} {row['class_name']}: "
+            f"count={int(row['count'])}, "
+            f"candidates={int(row['candidates'])}, "
+            f"mean_same={row['mean_same_class_fraction']:.6g}, "
+            f"mean_point={row['mean_point_neighbor_fraction']:.6g}"
+        )
+    return lines
+
+
+def _create_cnn_embedding_knn_summary_text(
+    metrics,
+    config,
+    embeddings_path,
+    metrics_path,
+    candidates_path,
+    preview_path,
+):
+    summary_counts = _summarize_embedding_candidate_counts(metrics)
+    lines = [
+        "CNN embedding kNN metrics",
+        "=" * 70,
+        "Preview only: these candidates are not removed by this stage.",
+        f"Neighbors: {config['k_neighbors']}",
+        f"Candidate classes: {', '.join(config['candidate_classes'])}",
+        f"Point-neighbor classes: {', '.join(config['point_neighbor_classes'])}",
+        f"Protected classes: {', '.join(config['protected_classes'])}",
+        f"Apply splits: {', '.join(config['apply_splits'])}",
+        f"Minimum point-neighbor fraction: {config['min_point_neighbor_fraction']}",
+        "Class-specific point thresholds: "
+        f"{config['min_point_neighbor_fraction_by_class']}",
+        f"Maximum same-class fraction: {config['max_same_class_fraction']}",
+        "Class-specific same-class thresholds: "
+        f"{config['max_same_class_fraction_by_class']}",
+        f"Embeddings: {embeddings_path}",
+        f"Metrics: {metrics_path}",
+        f"Candidates: {candidates_path}",
+        f"Preview plot: {preview_path}",
+        "",
+        "Counts by split and class",
+        "=" * 70,
+        summary_counts.to_string(index=False),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _summarize_embedding_candidate_counts(metrics):
+    return (
+        metrics.groupby(["split", "class_name"], sort=True)
+        .agg(
+            count=("sample_index", "size"),
+            candidates=("embedding_filter_candidate", "sum"),
+            mean_same_class_fraction=("same_class_fraction", "mean"),
+            mean_point_neighbor_fraction=("point_neighbor_fraction", "mean"),
+        )
+        .reset_index()
+    )
+
+
+def _labels_for_class_names(class_names_by_label, class_names):
+    name_to_label = {
+        str(class_name): int(label)
+        for label, class_name in class_names_by_label.items()
+    }
+    return [
+        name_to_label[class_name]
+        for class_name in class_names
+        if class_name in name_to_label
+    ]
+
+
+def _nearest_class_name(labels, class_names_by_label):
+    if len(labels) == 0:
+        return ""
+    return class_names_by_label.get(int(labels[0]), "")
+
+
+def _create_split_offsets(rows):
+    offsets = {}
+    start = 0
+    for split_name, split_rows in rows.groupby("split", sort=False):
+        stop = start + len(split_rows)
+        offsets[str(split_name)] = (start, stop)
+        start = stop
+    return offsets
+
+
+def _thresholds_for_rows(rows, default_threshold, class_thresholds):
+    if default_threshold is None:
+        thresholds = np.ones(len(rows), dtype=np.float32)
+    else:
+        thresholds = np.full(len(rows), float(default_threshold), dtype=np.float32)
+
+    for class_name, threshold in class_thresholds.items():
+        thresholds[rows["class_name"].to_numpy() == class_name] = float(threshold)
+    return thresholds
+
+
+def _has_embedding_same_class_filter(config):
+    return (
+        config["max_same_class_fraction"] is not None
+        or bool(config["max_same_class_fraction_by_class"])
+    )
+
+
+def _create_embedding_filter_reasons(rows, config):
+    reasons = []
+    for _, row in rows.iterrows():
+        class_name = row["class_name"]
+        point_threshold = config["min_point_neighbor_fraction_by_class"].get(
+            class_name,
+            config["min_point_neighbor_fraction"],
+        )
+        parts = [f"point_neighbor_fraction>={point_threshold:g}"]
+        if _has_embedding_same_class_filter(config):
+            same_threshold = config["max_same_class_fraction_by_class"].get(
+                class_name,
+                config["max_same_class_fraction"],
+            )
+            if same_threshold is not None:
+                parts.append(f"same_class_fraction<={same_threshold:g}")
+        reasons.append(";".join(parts))
+    return reasons
+
+
+def _resolve_class_thresholds(thresholds):
+    if thresholds is None:
+        return {}
+    if not isinstance(thresholds, dict):
+        raise ValueError("class-specific thresholds must be a mapping")
+    parsed_thresholds = {
+        str(class_name): float(threshold)
+        for class_name, threshold in thresholds.items()
+    }
+    if any(threshold < 0.0 or threshold > 1.0 for threshold in parsed_thresholds.values()):
+        raise ValueError("class-specific threshold values must be between zero and one")
+    return parsed_thresholds
 
 
 def _run_training_filter_pca(config, dataset_id, model_id):
