@@ -151,6 +151,63 @@ def load_autoencoder_training_data(config, dataset_id, model_id):
     }
 
 
+def create_log_slice_cache_for_dataset(config, dataset_id, model_id=None):
+    """
+    Create or reuse the log-scaled xz-slice cache for a dataset.
+
+    Parameters
+    ----------
+    config : dict
+        Cache creation config.
+    dataset_id : str
+        Dataset identifier.
+    model_id : str, optional
+        Model identifier used only for path templates.
+
+    Returns
+    -------
+    dict
+        Dataset path, cache settings, and cache metadata.
+    """
+
+    if model_id is None:
+        model_id = dataset_id
+
+    dataset_dir = create_path(
+        path_template=config["dataset_dir"],
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
+    input_config = resolve_input_config(config.get("input", {}))
+    cache_config = resolve_cache_config(
+        config=config.get("cache", {}),
+        dataset_dir=dataset_dir,
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
+    if not cache_config["enabled"]:
+        raise ValueError("cache.enabled must be true to create a cache")
+
+    X, _, _ = load_dataset(dataset_dir, mmap=True)
+    X_log, cache_metadata = create_or_load_log_slice_cache(
+        X=X,
+        input_config=input_config,
+        cache_config=cache_config,
+    )
+
+    return {
+        "dataset_dir": Path(dataset_dir),
+        "raw_vdf_shape": tuple(int(value) for value in X.shape),
+        "cache_config": cache_config,
+        "cache_metadata": cache_metadata,
+        "cache_shape": (
+            None
+            if X_log is None
+            else tuple(int(value) for value in X_log.shape)
+        ),
+    }
+
+
 def resolve_cache_config(config, dataset_dir, dataset_id, model_id):
     """
     Resolve VDF log-slice cache settings.

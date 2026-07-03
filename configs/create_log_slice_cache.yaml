@@ -1,0 +1,17 @@
+dataset_dir: data/train/timesteps_{dataset_id}
+
+input:
+  slice: xz
+  orientation: plot
+  log_eps: 1e-30
+  clip_negative_to_zero: true
+  normalization: train_global_standard
+
+cache:
+  enabled: true
+  dir: data/train/timesteps_{dataset_id}/cache
+  filename: autoencoder_xz_log.npy
+  metadata_filename: autoencoder_xz_log_metadata.npz
+  rebuild: false
+  batch_size: 128
+  n_jobs: 16
