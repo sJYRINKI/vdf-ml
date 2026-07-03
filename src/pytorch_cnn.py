@@ -1,4 +1,6 @@
+from pathlib import Path
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import f1_score
 from sklearn.preprocessing import StandardScaler
@@ -8,6 +10,11 @@ import os
 
 os.environ["PTNOLATEX"] = "1"
 
+PCA_FILTER_CANDIDATE_COLUMN = "filter_preview_candidate"
+PCA_FILTER_METRICS_FILENAME = "pca_filter_metrics.csv"
+PCA_FILTER_REMOVED_FILENAME = "pca_filter_removed_samples.csv"
+PCA_FILTER_SUMMARY_FILENAME = "pca_filter_summary.txt"
+
 from src.training import (
     create_metrics_text,
     create_predictions,
@@ -15,6 +22,7 @@ from src.training import (
     load_training_data,
     save_training_artifacts,
 )
+from src.dataset_pca import plot_dataset_pca
 
 
 class PyTorchCNNClassifier(nn.Module):
@@ -226,11 +234,21 @@ def train_pytorch_convolutional_neural_network_classifier(
     if max_epochs <= 0 or patience <= 0 or tolerance < 0.0:
         raise ValueError("Invalid epoch or early-stopping configuration")
 
+    _run_training_filter_pca(
+        config=config,
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
+
     data = load_training_data(
         config=config,
         dataset_id=dataset_id,
         model_id=model_id,
         target_kind="multiclass",
+    )
+    training_filter_result = _apply_training_filter(
+        data=data,
+        config=config.get("training_filter", {}),
     )
     y_train = _encode_labels(data["y_train"], class_labels)
     y_validation = _encode_labels(data["y_validation"], class_labels)
@@ -375,6 +393,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Deterministic algorithms: {deterministic}",
         f"PyTorch version: {torch.__version__}",
         f"Classifier classes: {list(model.classes_)}",
+        *training_filter_result["metric_lines"],
         f"Epochs: {training_result['n_epochs']}",
         f"Best epoch: {training_result['best_epoch']}",
         f"Final training loss: {training_result['final_training_loss']}",
@@ -615,6 +634,613 @@ def _fit_model(
         "best_validation_macro_f1": best_score if early_stopping else None,
         "final_training_loss": training_loss,
     }
+
+
+def _run_training_filter_pca(config, dataset_id, model_id):
+    """
+    Run PCA metrics needed by the optional training filter.
+
+    Parameters
+    ----------
+    config : dict
+        Full CNN training config.
+    dataset_id : str
+        Dataset identifier.
+    model_id : str
+        Model identifier also used as the PCA output version.
+    """
+
+    filter_config = config.get("training_filter", {}) or {}
+    if not bool(filter_config.get("enabled", False)):
+        return
+
+    source = str(filter_config.get("source", "pca")).lower()
+    if source != "pca":
+        raise ValueError("training_filter.source currently supports only 'pca'")
+
+    pca_config = _create_training_filter_pca_config(
+        config=config,
+        filter_config=filter_config,
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
+    print("Running PCA for CNN training filter")
+    plot_dataset_pca(
+        config=pca_config,
+        timestep=dataset_id,
+        pca_id=None,
+    )
+
+
+def _create_training_filter_pca_config(config, filter_config, dataset_id, model_id):
+    """
+    Create a PCA config from the CNN training-filter settings.
+
+    Parameters
+    ----------
+    config : dict
+        Full CNN training config.
+    filter_config : dict
+        Training filter config.
+    dataset_id : str
+        Dataset identifier.
+    model_id : str
+        Model identifier.
+
+    Returns
+    -------
+    dict
+        Config accepted by ``plot_dataset_pca``.
+    """
+
+    dataset_dir = _format_training_path(
+        path_template=config["dataset_dir"],
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
+    model_output_dir = _format_training_path(
+        path_template=config["output_dir"],
+        dataset_id=dataset_id,
+        model_id=model_id,
+    )
+    pca_filter_config = filter_config.get("pca", {}) or {}
+    pca_filter_preview_config = dict(
+        pca_filter_config.get("filter_preview", {}) or {}
+    )
+    pca_filter_preview_config.setdefault("enabled", True)
+    pca_filter_preview_config.setdefault(
+        "candidate_classes",
+        filter_config.get("candidate_classes", ["exhaust", "dayside"]),
+    )
+    pca_filter_preview_config.setdefault(
+        "point_neighbor_classes",
+        filter_config.get(
+            "point_neighbor_classes",
+            filter_config.get("protected_classes", ["reconnection", "o_point"]),
+        ),
+    )
+    pca_filter_preview_config.setdefault(
+        "protected_classes",
+        filter_config.get("protected_classes", ["reconnection", "o_point"]),
+    )
+    pca_filter_preview_config.setdefault("apply_splits", ["train"])
+
+    return {
+        "dataset_dir": str(dataset_dir),
+        "output_dir": str(model_output_dir / "pca"),
+        "split": {
+            "train_fraction": config.get("split", {}).get("train_fraction", 0.6),
+            "validation_fraction": config.get("split", {}).get(
+                "validation_fraction",
+                0.2,
+            ),
+            "gap_timesteps": config.get("split", {}).get("gap_timesteps", 10),
+        },
+        "features": pca_filter_config.get("features", {}),
+        "pca": pca_filter_config.get("pca", {}),
+        "pca_fit": pca_filter_config.get("pca_fit", {}),
+        "neighbor_metrics": pca_filter_config.get("neighbor_metrics", {}),
+        "filter_preview": pca_filter_preview_config,
+        "plot": pca_filter_config.get("plot", {"enabled": False}),
+        "embedding_plot": pca_filter_config.get(
+            "embedding_plot",
+            {"enabled": False},
+        ),
+    }
+
+
+def _format_training_path(path_template, dataset_id, model_id):
+    """
+    Format a path template with common training identifiers.
+
+    Parameters
+    ----------
+    path_template : str
+        Path template.
+    dataset_id : str
+        Dataset identifier.
+    model_id : str
+        Model identifier.
+
+    Returns
+    -------
+    pathlib.Path
+        Formatted path.
+    """
+
+    return Path(
+        str(path_template).format(
+            dataset_id=dataset_id,
+            model_id=model_id,
+            timestep=dataset_id,
+        )
+    )
+
+
+def _create_pca_metrics_path(output_dir):
+    """
+    Create the model-local PCA sample-metrics path.
+
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path
+        CNN model output directory.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to PCA sample metrics.
+    """
+
+    return Path(output_dir) / "pca" / "pca_sample_metrics.csv"
+
+
+def _apply_training_filter(data, config):
+    """
+    Apply optional non-destructive filtering to CNN training arrays.
+
+    Parameters
+    ----------
+    data : dict
+        Training data returned by ``load_training_data``.
+    config : dict
+        Training filter configuration.
+
+    Returns
+    -------
+    dict
+        Summary lines to include in model metrics.
+    """
+
+    config = config or {}
+    if not bool(config.get("enabled", False)):
+        return {"metric_lines": ["Training filter enabled: False"]}
+
+    source = str(config.get("source", "pca")).lower()
+    if source != "pca":
+        raise ValueError("training_filter.source currently supports only 'pca'")
+
+    dry_run = bool(config.get("dry_run", True))
+    candidate_classes = _resolve_training_filter_classes(
+        config.get("candidate_classes"),
+        "training_filter.candidate_classes",
+        require_nonempty=True,
+    )
+    protected_classes = _resolve_training_filter_classes(
+        config.get("protected_classes", []),
+        "training_filter.protected_classes",
+        require_nonempty=False,
+    )
+    max_removed_fraction = _resolve_max_removed_fraction(
+        config.get("max_removed_fraction_per_class", 1.0)
+    )
+
+    pca_metrics_path = _create_pca_metrics_path(output_dir=data["output_dir"])
+    if not pca_metrics_path.exists():
+        raise FileNotFoundError(
+            "PCA training filter requires metrics at "
+            f"{pca_metrics_path}"
+        )
+
+    pca_metrics = pd.read_csv(pca_metrics_path)
+    filter_metrics = _create_pca_filter_metrics(
+        pca_metrics=pca_metrics,
+        train_indices=data["train_indices"],
+        candidate_classes=candidate_classes,
+        protected_classes=protected_classes,
+        max_removed_fraction=max_removed_fraction,
+        dry_run=dry_run,
+    )
+
+    selected_sample_indices = filter_metrics.loc[
+        filter_metrics["pca_filter_selected"],
+        "sample_index",
+    ].to_numpy(dtype=int)
+
+    if not dry_run and len(selected_sample_indices) > 0:
+        _remove_training_samples(data, selected_sample_indices)
+
+    output_dir = data["output_dir"]
+    metrics_path = output_dir / PCA_FILTER_METRICS_FILENAME
+    removed_path = output_dir / PCA_FILTER_REMOVED_FILENAME
+    summary_path = output_dir / PCA_FILTER_SUMMARY_FILENAME
+
+    filter_metrics.to_csv(metrics_path, index=False)
+    filter_metrics[filter_metrics["pca_filter_selected"]].to_csv(
+        removed_path,
+        index=False,
+    )
+
+    summary_text = _create_pca_filter_summary_text(
+        pca_metrics_path=pca_metrics_path,
+        metrics_path=metrics_path,
+        removed_path=removed_path,
+        dry_run=dry_run,
+        candidate_classes=candidate_classes,
+        protected_classes=protected_classes,
+        max_removed_fraction=max_removed_fraction,
+        filter_metrics=filter_metrics,
+        train_samples_after_filter=len(data["train_indices"]),
+    )
+    with open(summary_path, "w") as summary_file:
+        summary_file.write(summary_text)
+
+    selected_count = int(filter_metrics["pca_filter_selected"].sum())
+    removed_count = int(filter_metrics["pca_filter_removed"].sum())
+    print("PCA training filter")
+    print(f"  Metrics: {metrics_path}")
+    print(f"  Selected samples: {selected_count}")
+    print(f"  Removed samples: {removed_count}")
+    if dry_run:
+        print("  Dry run: training samples were not removed")
+
+    return {
+        "metric_lines": _create_pca_filter_metric_lines(
+            pca_metrics_path=pca_metrics_path,
+            metrics_path=metrics_path,
+            removed_path=removed_path,
+            summary_path=summary_path,
+            dry_run=dry_run,
+            candidate_classes=candidate_classes,
+            protected_classes=protected_classes,
+            max_removed_fraction=max_removed_fraction,
+            filter_metrics=filter_metrics,
+            train_samples_after_filter=len(data["train_indices"]),
+        )
+    }
+
+
+def _create_pca_filter_metrics(
+    pca_metrics,
+    train_indices,
+    candidate_classes,
+    protected_classes,
+    max_removed_fraction,
+    dry_run,
+):
+    """
+    Create per-training-sample PCA filter decisions.
+
+    Parameters
+    ----------
+    pca_metrics : pandas.DataFrame
+        PCA per-sample metrics.
+    train_indices : numpy.ndarray
+        Original dataset sample indices in the CNN training split.
+    candidate_classes : list of str
+        Class names that may be removed from CNN training.
+    protected_classes : list of str
+        Class names that must never be removed.
+    max_removed_fraction : float
+        Maximum selected fraction per removable class.
+    dry_run : bool
+        Whether selected samples are only reported instead of removed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        PCA metrics with CNN training-filter decision columns.
+    """
+
+    required_columns = {
+        "sample_index",
+        "split",
+        "class_name",
+        PCA_FILTER_CANDIDATE_COLUMN,
+    }
+    missing_columns = sorted(required_columns - set(pca_metrics.columns))
+    if missing_columns:
+        raise ValueError(
+            "PCA filter metrics are missing required columns: "
+            f"{missing_columns}"
+        )
+    if pca_metrics["sample_index"].duplicated().any():
+        raise ValueError("PCA filter metrics contain duplicate sample_index values")
+
+    train_order = pd.DataFrame(
+        {
+            "sample_index": np.asarray(train_indices, dtype=int),
+            "cnn_train_order": np.arange(len(train_indices), dtype=int),
+        }
+    )
+    filter_metrics = train_order.merge(
+        pca_metrics,
+        on="sample_index",
+        how="left",
+        validate="one_to_one",
+    )
+    missing_rows = filter_metrics["split"].isna()
+    if missing_rows.any():
+        missing_sample_indices = filter_metrics.loc[
+            missing_rows,
+            "sample_index",
+        ].head(10).tolist()
+        raise ValueError(
+            "PCA filter metrics do not cover all CNN training samples. "
+            f"First missing sample indices: {missing_sample_indices}"
+        )
+
+    non_train_rows = filter_metrics["split"] != "train"
+    if non_train_rows.any():
+        bad_sample_indices = filter_metrics.loc[
+            non_train_rows,
+            "sample_index",
+        ].head(10).tolist()
+        raise ValueError(
+            "PCA filter metrics do not use the same train split as the CNN run. "
+            f"First mismatched sample indices: {bad_sample_indices}"
+        )
+
+    pca_candidate = _coerce_boolean_column(
+        filter_metrics[PCA_FILTER_CANDIDATE_COLUMN],
+        PCA_FILTER_CANDIDATE_COLUMN,
+    )
+    candidate_class_mask = filter_metrics["class_name"].isin(
+        candidate_classes
+    ).to_numpy(dtype=bool)
+    protected_class_mask = filter_metrics["class_name"].isin(
+        protected_classes
+    ).to_numpy(dtype=bool)
+    eligible_mask = pca_candidate & candidate_class_mask & ~protected_class_mask
+
+    filter_metrics["pca_filter_candidate"] = pca_candidate
+    filter_metrics["pca_filter_eligible"] = eligible_mask
+    filter_metrics["pca_filter_selected"] = False
+    selected_indices = _select_pca_filter_candidates(
+        filter_metrics=filter_metrics,
+        eligible_mask=eligible_mask,
+        candidate_classes=candidate_classes,
+        max_removed_fraction=max_removed_fraction,
+    )
+    if selected_indices:
+        filter_metrics.loc[selected_indices, "pca_filter_selected"] = True
+
+    filter_metrics["pca_filter_removed"] = (
+        filter_metrics["pca_filter_selected"] & (not dry_run)
+    )
+    filter_metrics["pca_filter_dry_run"] = dry_run
+    filter_metrics["pca_filter_reason"] = _create_pca_filter_reasons(
+        filter_metrics=filter_metrics,
+        pca_candidate=pca_candidate,
+        candidate_class_mask=candidate_class_mask,
+        protected_class_mask=protected_class_mask,
+    )
+    return filter_metrics
+
+
+def _select_pca_filter_candidates(
+    filter_metrics,
+    eligible_mask,
+    candidate_classes,
+    max_removed_fraction,
+):
+    selected_indices = []
+    for class_name in candidate_classes:
+        class_mask = (
+            filter_metrics["class_name"] == class_name
+        ).to_numpy(dtype=bool)
+        class_rows = filter_metrics[class_mask]
+        class_candidates = filter_metrics[class_mask & eligible_mask]
+        class_limit = int(np.floor(max_removed_fraction * len(class_rows)))
+        if class_limit <= 0 or class_candidates.empty:
+            continue
+
+        ranked_candidates = _rank_pca_filter_candidates(class_candidates)
+        selected_indices.extend(
+            ranked_candidates.index[: min(class_limit, len(ranked_candidates))]
+        )
+
+    return selected_indices
+
+
+def _rank_pca_filter_candidates(rows):
+    sort_columns = []
+    ascending = []
+    if "point_neighbor_fraction" in rows.columns:
+        sort_columns.append("point_neighbor_fraction")
+        ascending.append(False)
+    if "same_class_fraction" in rows.columns:
+        sort_columns.append("same_class_fraction")
+        ascending.append(True)
+    sort_columns.append("sample_index")
+    ascending.append(True)
+    return rows.sort_values(
+        sort_columns,
+        ascending=ascending,
+        na_position="last",
+    )
+
+
+def _remove_training_samples(data, selected_sample_indices):
+    selected_sample_indices = np.asarray(selected_sample_indices, dtype=int)
+    keep_mask = ~np.isin(
+        np.asarray(data["train_indices"], dtype=int),
+        selected_sample_indices,
+    )
+    data["X_train_features"] = data["X_train_features"][keep_mask]
+    data["y_train"] = data["y_train"][keep_mask]
+    data["train_indices"] = data["train_indices"][keep_mask]
+
+
+def _create_pca_filter_reasons(
+    filter_metrics,
+    pca_candidate,
+    candidate_class_mask,
+    protected_class_mask,
+):
+    reasons = np.full(len(filter_metrics), "", dtype=object)
+    selected = filter_metrics["pca_filter_selected"].to_numpy(dtype=bool)
+    eligible = filter_metrics["pca_filter_eligible"].to_numpy(dtype=bool)
+
+    reasons[pca_candidate & ~candidate_class_mask] = "not_candidate_class"
+    reasons[pca_candidate & protected_class_mask] = "protected_class"
+    reasons[eligible & ~selected] = "class_fraction_cap"
+    reasons[selected] = "selected_by_pca_filter"
+    return reasons
+
+
+def _create_pca_filter_metric_lines(
+    pca_metrics_path,
+    metrics_path,
+    removed_path,
+    summary_path,
+    dry_run,
+    candidate_classes,
+    protected_classes,
+    max_removed_fraction,
+    filter_metrics,
+    train_samples_after_filter,
+):
+    summary_counts = _summarize_pca_filter_counts(filter_metrics)
+    lines = [
+        "Training filter enabled: True",
+        "Training filter source: pca",
+        f"Training filter dry run: {dry_run}",
+        f"PCA filter source metrics: {pca_metrics_path}",
+        f"PCA filter candidate column: {PCA_FILTER_CANDIDATE_COLUMN}",
+        f"PCA filter candidate classes: {', '.join(candidate_classes)}",
+        f"PCA filter protected classes: {', '.join(protected_classes)}",
+        f"PCA filter max removed fraction per class: {max_removed_fraction}",
+        f"PCA filter train samples before filter: {len(filter_metrics)}",
+        f"PCA filter selected samples: {int(filter_metrics['pca_filter_selected'].sum())}",
+        f"PCA filter removed samples: {int(filter_metrics['pca_filter_removed'].sum())}",
+        f"PCA filter train samples after filter: {train_samples_after_filter}",
+        f"PCA filter metrics: {metrics_path}",
+        f"PCA filter selected-sample file: {removed_path}",
+        f"PCA filter summary: {summary_path}",
+    ]
+    for _, row in summary_counts.iterrows():
+        lines.append(
+            "PCA filter class "
+            f"{row['class_name']}: train={int(row['train_samples'])}, "
+            f"candidate={int(row['pca_candidates'])}, "
+            f"eligible={int(row['eligible_candidates'])}, "
+            f"selected={int(row['selected_samples'])}, "
+            f"removed={int(row['removed_samples'])}"
+        )
+    return lines
+
+
+def _create_pca_filter_summary_text(
+    pca_metrics_path,
+    metrics_path,
+    removed_path,
+    dry_run,
+    candidate_classes,
+    protected_classes,
+    max_removed_fraction,
+    filter_metrics,
+    train_samples_after_filter,
+):
+    summary_counts = _summarize_pca_filter_counts(filter_metrics)
+    lines = [
+        "PCA training filter summary",
+        "=" * 70,
+        f"Source PCA metrics: {pca_metrics_path}",
+        f"Output metrics: {metrics_path}",
+        f"Selected-sample file: {removed_path}",
+        f"Candidate column: {PCA_FILTER_CANDIDATE_COLUMN}",
+        f"Dry run: {dry_run}",
+        f"Candidate classes: {', '.join(candidate_classes)}",
+        f"Protected classes: {', '.join(protected_classes)}",
+        f"Max removed fraction per class: {max_removed_fraction}",
+        f"Train samples before filter: {len(filter_metrics)}",
+        f"Selected samples: {int(filter_metrics['pca_filter_selected'].sum())}",
+        f"Removed samples: {int(filter_metrics['pca_filter_removed'].sum())}",
+        f"Train samples after filter: {train_samples_after_filter}",
+        "",
+        "Counts by class",
+        "=" * 70,
+        summary_counts.to_string(index=False),
+        "",
+    ]
+    if dry_run:
+        lines.extend([
+            "Dry-run note",
+            "=" * 70,
+            "Selected samples were saved for inspection but not removed from CNN training.",
+            "",
+        ])
+    return "\n".join(lines)
+
+
+def _summarize_pca_filter_counts(filter_metrics):
+    return (
+        filter_metrics.groupby("class_name", sort=True)
+        .agg(
+            train_samples=("sample_index", "size"),
+            pca_candidates=("pca_filter_candidate", "sum"),
+            eligible_candidates=("pca_filter_eligible", "sum"),
+            selected_samples=("pca_filter_selected", "sum"),
+            removed_samples=("pca_filter_removed", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def _resolve_training_filter_classes(
+    configured_classes,
+    config_name,
+    require_nonempty,
+):
+    if configured_classes is None:
+        classes = []
+    elif isinstance(configured_classes, str):
+        classes = [configured_classes]
+    else:
+        classes = [str(class_name) for class_name in configured_classes]
+
+    if require_nonempty and not classes:
+        raise ValueError(f"{config_name} must not be empty")
+    return classes
+
+
+def _resolve_max_removed_fraction(configured_fraction):
+    max_removed_fraction = float(configured_fraction)
+    if not 0.0 <= max_removed_fraction <= 1.0:
+        raise ValueError(
+            "training_filter.max_removed_fraction_per_class must be "
+            "between zero and one"
+        )
+    return max_removed_fraction
+
+
+def _coerce_boolean_column(values, column_name):
+    if pd.api.types.is_bool_dtype(values):
+        return values.to_numpy(dtype=bool)
+
+    normalized = values.astype(str).str.strip().str.lower()
+    true_values = {"true", "1", "yes", "y"}
+    false_values = {"false", "0", "no", "n"}
+    valid_values = true_values | false_values
+    invalid = ~normalized.isin(valid_values)
+    if invalid.any():
+        invalid_values = values[invalid].head(10).tolist()
+        raise ValueError(
+            f"Column {column_name} contains non-boolean values: "
+            f"{invalid_values}"
+        )
+    return normalized.isin(true_values).to_numpy(dtype=bool)
 
 
 def _encode_labels(labels, class_labels):

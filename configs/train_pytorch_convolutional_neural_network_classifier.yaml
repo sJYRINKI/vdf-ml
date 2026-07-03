@@ -19,6 +19,65 @@ features:
   n_jobs: -1
   log_eps: 1e-30
 
+training_filter:
+  enabled: true
+  source: pca
+  dry_run: false
+  candidate_classes: [exhaust, dayside]
+  point_neighbor_classes: [reconnection, o_point]
+  protected_classes: [reconnection, o_point]
+  max_removed_fraction_per_class: 0.3
+  pca:
+    features:
+      downsample_factor: 1
+      batch_size: 32
+      n_jobs: -1
+      log_eps: 1e-30
+      sample_normalization: standard
+      sample_norm_eps: 1e-6
+    pca:
+      backend: torch
+      algorithm: lowrank
+      n_components: 64
+      device: auto
+      oversamples: 16
+      niter: 2
+      random_state: 1234
+    pca_fit:
+      balanced: true
+      samples_per_class: min
+      class_names: [exhaust, dayside, o_point, reconnection]
+      replace: false
+      random_state: 1234
+    neighbor_metrics:
+      enabled: true
+      k_neighbors: 25
+      batch_size: 16384
+      low_purity_thresholds: [0.5, 0.65, 0.8]
+    filter_preview:
+      enabled: true
+      min_point_neighbor_fraction: 0.5
+      min_point_neighbor_fraction_by_class:
+        exhaust: 0.4
+        dayside: 0.6
+      max_same_class_fraction: 0.60
+      max_same_class_fraction_by_class: {}
+    plot:
+      enabled: false
+      max_points_per_class: 5000
+      random_state: 1234
+      alpha: 0.6
+      point_size: 8
+    embedding_plot:
+      enabled: false
+      method: tsne
+      splits: [train]
+      max_points_per_class: 1000
+      random_state: 1234
+      perplexity: 30
+      n_neighbors: 15
+      min_dist: 0.1
+
 model:
   channels: [16, 32, 64]
   adaptive_pool_shape: [4, 4]
