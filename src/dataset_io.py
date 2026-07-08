@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 
 
-def create_dataset_output_dir(output_dir, start_timestep, n_timestep):
+def create_dataset_output_dir(
+    output_dir,
+    start_timestep,
+    n_timestep,
+    name_suffix=None,
+):
     """
     Create the output directory for dataset.
 
@@ -14,8 +19,10 @@ def create_dataset_output_dir(output_dir, start_timestep, n_timestep):
         Base directory where dataset folder are saved.
     start_timestep : int
         First timestep in the dataset.
-    n_timesteps : int
+    n_timestep : int
         Number of timesteps in dataset.
+    name_suffix : str, optional
+        Extra suffix appended to the dataset directory name.
 
     Returns
     -------
@@ -23,7 +30,17 @@ def create_dataset_output_dir(output_dir, start_timestep, n_timestep):
         Directory path for dataset output.
     """
 
-    outdir = Path(output_dir) / f"timesteps_{int(start_timestep)}_{int(n_timestep)}"
+    dirname = f"timesteps_{int(start_timestep)}_{int(n_timestep)}"
+    if name_suffix is not None:
+        name_suffix = str(name_suffix).strip()
+        if name_suffix:
+            if "/" in name_suffix or "\\" in name_suffix:
+                raise ValueError("Dataset name suffix must not contain path separators")
+            if any(character.isspace() for character in name_suffix):
+                raise ValueError("Dataset name suffix must not contain whitespace")
+            dirname = f"{dirname}_{name_suffix}"
+
+    outdir = Path(output_dir) / dirname
     outdir.mkdir(parents=True, exist_ok=True)
 
     return outdir

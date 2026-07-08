@@ -23,7 +23,96 @@ from src.dataset_io import (
 from src.timesteps import create_timestep_list
 
 
-def create_dataset(config, start_timestep, n_timesteps, dataset_kind):
+POINT_SELECTION_METHOD_ALIASES = {
+    "manual": "manual",
+    "physical": "physical",
+    "consensus": "consensus",
+    "union": "union_physical_priority",
+    "union_physical_priority": "union_physical_priority",
+}
+
+POINT_SELECTION_METHOD_SUFFIXES = {
+    "manual": "manual",
+    "physical": "physical",
+    "consensus": "consensus",
+    "union_physical_priority": "union",
+}
+
+
+def apply_dataset_creation_overrides(
+    config,
+    x_selection_method=None,
+    o_selection_method=None,
+):
+    """
+    Apply command-line dataset creation overrides to config.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset creation config modified in place.
+    x_selection_method : str, optional
+        X-point selection method override.
+    o_selection_method : str, optional
+        O-point selection method override.
+
+    Returns
+    -------
+    str or None
+        Dataset name suffix for the applied overrides.
+    """
+
+    points_config = config.setdefault("points", {})
+    suffix_parts = []
+
+    if x_selection_method is not None:
+        method = normalize_point_selection_method(x_selection_method)
+        points_config.setdefault("x_selection", {})["method"] = method
+        suffix_parts.append(f"x_{POINT_SELECTION_METHOD_SUFFIXES[method]}")
+
+    if o_selection_method is not None:
+        method = normalize_point_selection_method(o_selection_method)
+        points_config.setdefault("o_selection", {})["method"] = method
+        suffix_parts.append(f"o_{POINT_SELECTION_METHOD_SUFFIXES[method]}")
+
+    if not suffix_parts:
+        return None
+
+    return "_".join(suffix_parts)
+
+
+def normalize_point_selection_method(selection_method):
+    """
+    Normalize a point-selection method name.
+
+    Parameters
+    ----------
+    selection_method : str
+        User-facing point-selection method name.
+
+    Returns
+    -------
+    str
+        Internal point-selection method name.
+    """
+
+    selection_method = str(selection_method).lower()
+    if selection_method not in POINT_SELECTION_METHOD_ALIASES:
+        raise ValueError(
+            f"Unsupported point-selection method: {selection_method}. "
+            f"Expected one of {sorted(POINT_SELECTION_METHOD_ALIASES)}."
+        )
+
+    return POINT_SELECTION_METHOD_ALIASES[selection_method]
+
+
+def create_dataset(
+    config,
+    start_timestep,
+    n_timesteps,
+    dataset_kind,
+    output_suffix=None,
+):
     """
     Create and save a labeled VDF dataset.
 
@@ -37,6 +126,8 @@ def create_dataset(config, start_timestep, n_timesteps, dataset_kind):
         Number of consecutive timesteps to process.
     dataset_kind : {"train", "test"}
         Output dataset split name.
+    output_suffix : str, optional
+        Extra suffix appended to the dataset directory name.
     """
 
     total_start = time.perf_counter()
@@ -52,6 +143,7 @@ def create_dataset(config, start_timestep, n_timesteps, dataset_kind):
         output_dir=output_dir,
         start_timestep=start_timestep,
         n_timestep=n_timesteps,
+        name_suffix=output_suffix,
     )
 
     print(f"Dataset kind: {dataset_kind}")

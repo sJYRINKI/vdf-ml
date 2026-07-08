@@ -126,6 +126,11 @@ model:
   #class_weight: sqrt_balanced
   class_weight: none
   #class_weight: balanced
+  class_weights: {}
+  sampler:
+    enabled: false
+    mode: none
+    class_weights: {}
   weight_decay: 0.0001
   batch_size: 256
   learning_rate: 0.0003

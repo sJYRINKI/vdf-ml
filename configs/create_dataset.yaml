@@ -13,8 +13,8 @@ labels:
   dayside: 4
 
 creation:
-  planning_n_jobs: 16
-  extraction_n_jobs: 16
+  planning_n_jobs: 64
+  extraction_n_jobs: 64
 
 points:
   x_class_name: reconnection

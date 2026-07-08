@@ -10,10 +10,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
-from src.dataset_pca import plot_dataset_pca
+from src.dataset_pca import apply_dataset_pca_preset, plot_dataset_pca
 
 
-def main(config_path, timestep, pca_id=None):
+def main(config_path, timestep, pca_id=None, pca_preset=None):
     """
     Create PCA plots and metrics for a saved VDF dataset.
 
@@ -25,9 +25,12 @@ def main(config_path, timestep, pca_id=None):
         Dataset timestep identifier.
     pca_id : str, optional
         PCA output version identifier.
+    pca_preset : {"basic", "best"}, optional
+        Named command-line PCA experiment preset.
     """
 
     config = load_config(config_path)
+    apply_dataset_pca_preset(config=config, pca_preset=pca_preset)
     plot_dataset_pca(
         config=config,
         timestep=timestep,
@@ -54,10 +57,17 @@ if __name__ == "__main__":
         default=None,
         help="PCA output version identifier, for example v0.01.",
     )
+    parser.add_argument(
+        "--pca-preset",
+        choices=["basic", "best"],
+        default=None,
+        help="Optional PCA experiment preset applied after loading the YAML config.",
+    )
     args = parser.parse_args()
 
     main(
         config_path=args.config,
         timestep=args.timestep,
         pca_id=args.pca_id,
+        pca_preset=args.pca_preset,
     )

@@ -79,6 +79,97 @@ def print_batch_progress(stage, batch_number, n_batches, start, end):
     )
 
 
+def apply_dataset_pca_preset(config, pca_preset=None):
+    """
+    Apply a named PCA experiment preset to config.
+
+    Parameters
+    ----------
+    config : dict
+        PCA plotting config that is modified in place.
+    pca_preset : {"basic", "best"}, optional
+        Named command-line preset to apply.
+
+    Returns
+    -------
+    dict
+        Modified PCA plotting config.
+    """
+
+    if pca_preset is None:
+        return config
+
+    pca_preset = str(pca_preset).lower()
+    if pca_preset not in {"basic", "best"}:
+        raise ValueError("pca_preset must be 'basic' or 'best'")
+
+    features = config.setdefault("features", {})
+    pca_config = config.setdefault("pca", {})
+    pca_fit = config.setdefault("pca_fit", {})
+    filter_preview = config.setdefault("filter_preview", {})
+    embedding_plot = config.setdefault("embedding_plot", {})
+    cache = features.setdefault("cache", {})
+
+    cache["enabled"] = True
+    pca_config.update(
+        {
+            "backend": "torch",
+            "algorithm": "lowrank",
+            "n_components": 64,
+            "device": "auto",
+            "oversamples": 16,
+            "niter": 2,
+            "random_state": 1234,
+        }
+    )
+
+    if pca_preset == "basic":
+        features["sample_normalization"] = "none"
+        pca_fit.update(
+            {
+                "balanced": False,
+                "samples_per_class": "min",
+                "class_names": "all",
+                "replace": False,
+                "random_state": 1234,
+            }
+        )
+        filter_preview.update(
+            {
+                "min_point_neighbor_fraction": 0.5,
+                "min_point_neighbor_fraction_by_class": {},
+                "max_same_class_fraction": None,
+                "max_same_class_fraction_by_class": {},
+            }
+        )
+        embedding_plot["enabled"] = True
+        return config
+
+    features["sample_normalization"] = "standard"
+    pca_fit.update(
+        {
+            "balanced": True,
+            "samples_per_class": "min",
+            "class_names": ["exhaust", "dayside", "o_point", "reconnection"],
+            "replace": False,
+            "random_state": 1234,
+        }
+    )
+    filter_preview.update(
+        {
+            "min_point_neighbor_fraction": 0.5,
+            "min_point_neighbor_fraction_by_class": {
+                "exhaust": 0.4,
+                "dayside": 0.6,
+            },
+            "max_same_class_fraction": 0.60,
+            "max_same_class_fraction_by_class": {},
+        }
+    )
+    embedding_plot["enabled"] = True
+    return config
+
+
 def plot_dataset_pca(config, timestep, pca_id=None):
     """
     Create PCA plots and metrics for a saved VDF dataset.

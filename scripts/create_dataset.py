@@ -8,10 +8,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.config import load_config
-from src.dataset_creation import create_dataset
+from src.dataset_creation import apply_dataset_creation_overrides, create_dataset
 
 
-def main(config_path, start_timestep, n_timesteps, dataset_kind):
+def main(
+    config_path,
+    start_timestep,
+    n_timesteps,
+    dataset_kind,
+    x_selection_method=None,
+    o_selection_method=None,
+):
     """
     Create and save a labeled VDF dataset.
 
@@ -25,14 +32,24 @@ def main(config_path, start_timestep, n_timesteps, dataset_kind):
         Number of consecutive timesteps to process.
     dataset_kind : {"train", "test"}
         Output dataset split name.
+    x_selection_method : str, optional
+        X-point selection method override.
+    o_selection_method : str, optional
+        O-point selection method override.
     """
 
     config = load_config(config_path)
+    output_suffix = apply_dataset_creation_overrides(
+        config=config,
+        x_selection_method=x_selection_method,
+        o_selection_method=o_selection_method,
+    )
     create_dataset(
         config=config,
         start_timestep=start_timestep,
         n_timesteps=n_timesteps,
         dataset_kind=dataset_kind,
+        output_suffix=output_suffix,
     )
 
 
@@ -67,6 +84,30 @@ if __name__=="__main__":
         required=True,
         help="Save the complete dataset under the configured train or test directory."
     )
+    parser.add_argument(
+        "--x-selection-method",
+        choices=[
+            "manual",
+            "physical",
+            "union",
+            "union_physical_priority",
+            "consensus",
+        ],
+        default=None,
+        help="Optional X/reconnection point-selection method override.",
+    )
+    parser.add_argument(
+        "--o-selection-method",
+        choices=[
+            "manual",
+            "physical",
+            "union",
+            "union_physical_priority",
+            "consensus",
+        ],
+        default=None,
+        help="Optional O-point selection method override.",
+    )
 
     args = parser.parse_args()
 
@@ -75,4 +116,6 @@ if __name__=="__main__":
         start_timestep=args.start_timestep,
         n_timesteps=args.n_timesteps,
         dataset_kind=args.dataset_kind,
+        x_selection_method=args.x_selection_method,
+        o_selection_method=args.o_selection_method,
     )

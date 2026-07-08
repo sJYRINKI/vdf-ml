@@ -7,7 +7,7 @@ from sklearn.metrics import f1_score
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 import os
 
 os.environ["PTNOLATEX"] = "1"
@@ -35,6 +35,254 @@ from src.training import (
     save_training_artifacts,
 )
 from src.dataset_pca import plot_dataset_pca
+
+
+def apply_pytorch_cnn_training_filter_override(
+    config,
+    training_filter=None,
+    dry_run=None,
+    run_source_model=None,
+    class_weight=None,
+    class_weight_by_class=None,
+    sampler=None,
+    sampler_weight_by_class=None,
+    embedding_k_neighbors=None,
+    max_removed_fraction_per_class=None,
+    min_point_neighbor_fraction=None,
+    min_point_neighbor_fraction_by_class=None,
+    max_same_class_fraction=None,
+    max_same_class_fraction_by_class=None,
+):
+    """
+    Apply optional command-line training-filter overrides.
+
+    Parameters
+    ----------
+    config : dict
+        CNN training config to update in place.
+    training_filter : {"none", "pca", "cnn_embedding_knn"}, optional
+        Filter mode override. If omitted, the config is unchanged.
+    dry_run : bool, optional
+        Optional training-filter dry-run override.
+    run_source_model : bool, optional
+        Optional CNN embedding source-model override.
+    class_weight : str, optional
+        Optional model class-weight override.
+    class_weight_by_class : sequence of str, optional
+        Optional manual class weights as ``class=value``.
+    sampler : str, optional
+        Optional training sampler override.
+    sampler_weight_by_class : sequence of str, optional
+        Optional manual sampler weights as ``class=value``.
+    embedding_k_neighbors : int, optional
+        Optional CNN embedding kNN neighbor-count override.
+    max_removed_fraction_per_class : float, optional
+        Optional maximum removed fraction per class.
+    min_point_neighbor_fraction : float, optional
+        Optional point-neighbor fraction threshold for filter candidates.
+    min_point_neighbor_fraction_by_class : sequence of str, optional
+        Optional class-specific point-neighbor thresholds as ``class=value``.
+    max_same_class_fraction : float, optional
+        Optional same-class fraction threshold for filter candidates.
+    max_same_class_fraction_by_class : sequence of str, optional
+        Optional class-specific same-class thresholds as ``class=value``.
+    """
+
+    if class_weight is not None:
+        model_config = config.setdefault("model", {})
+        model_config["class_weight"] = class_weight
+
+    if class_weight_by_class:
+        model_config = config.setdefault("model", {})
+        model_config["class_weights"] = _parse_threshold_overrides(
+            class_weight_by_class,
+            option_name="class_weight_by_class",
+        )
+
+    if sampler is not None:
+        sampler_name = str(sampler).lower()
+        model_config = config.setdefault("model", {})
+        sampler_config = model_config.setdefault("sampler", {})
+        if sampler_name in {"none", "false", "off", "disabled"}:
+            sampler_config["enabled"] = False
+            sampler_config["mode"] = "none"
+        elif sampler_name in {"balanced", "sqrt_balanced", "manual"}:
+            sampler_config["enabled"] = True
+            sampler_config["mode"] = sampler_name
+        else:
+            raise ValueError(
+                "sampler must be one of: none, balanced, "
+                "sqrt_balanced, manual"
+            )
+
+    if sampler_weight_by_class:
+        model_config = config.setdefault("model", {})
+        sampler_config = model_config.setdefault("sampler", {})
+        sampler_config["class_weights"] = _parse_threshold_overrides(
+            sampler_weight_by_class,
+            option_name="sampler_weight_by_class",
+        )
+
+    if embedding_k_neighbors is not None:
+        k_neighbors = int(embedding_k_neighbors)
+        if k_neighbors <= 0:
+            raise ValueError("embedding_k_neighbors must be positive")
+        embedding_config = config.setdefault("cnn_embedding_knn", {})
+        embedding_config["k_neighbors"] = k_neighbors
+        filter_config = config.setdefault("training_filter", {})
+        filter_embedding_config = filter_config.setdefault("cnn_embedding_knn", {})
+        filter_embedding_config["k_neighbors"] = k_neighbors
+
+    if training_filter is not None:
+        training_filter = str(training_filter).lower()
+        filter_config = config.setdefault("training_filter", {})
+        if training_filter in {"none", "false", "off", "disabled"}:
+            filter_config["enabled"] = False
+        elif training_filter == "pca":
+            filter_config["enabled"] = True
+            filter_config["source"] = "pca"
+        elif training_filter in {
+            "cnn_embedding_knn",
+            "cnn-embedding-knn",
+            "cnn_embedding",
+            "embedding",
+        }:
+            filter_config["enabled"] = True
+            filter_config["source"] = "cnn_embedding_knn"
+        else:
+            raise ValueError(
+                "training_filter must be one of: none, pca, cnn_embedding_knn"
+            )
+
+    if dry_run is not None:
+        filter_config = config.setdefault("training_filter", {})
+        filter_config["dry_run"] = bool(dry_run)
+
+    if run_source_model is not None:
+        filter_config = config.setdefault("training_filter", {})
+        embedding_config = filter_config.setdefault("cnn_embedding_knn", {})
+        embedding_config["run_source_model"] = bool(run_source_model)
+
+    if max_removed_fraction_per_class is not None:
+        filter_config = config.setdefault("training_filter", {})
+        filter_config["max_removed_fraction_per_class"] = float(
+            max_removed_fraction_per_class
+        )
+
+    _apply_filter_threshold_overrides(
+        config=config,
+        min_point_neighbor_fraction=min_point_neighbor_fraction,
+        min_point_neighbor_fraction_by_class=min_point_neighbor_fraction_by_class,
+        max_same_class_fraction=max_same_class_fraction,
+        max_same_class_fraction_by_class=max_same_class_fraction_by_class,
+    )
+
+
+def _apply_filter_threshold_overrides(
+    config,
+    min_point_neighbor_fraction=None,
+    min_point_neighbor_fraction_by_class=None,
+    max_same_class_fraction=None,
+    max_same_class_fraction_by_class=None,
+):
+    """
+    Apply optional threshold overrides to PCA and CNN embedding filters.
+
+    Parameters
+    ----------
+    config : dict
+        CNN training config to update in place.
+    min_point_neighbor_fraction : float, optional
+        Optional point-neighbor fraction threshold.
+    min_point_neighbor_fraction_by_class : sequence of str, optional
+        Optional class-specific point-neighbor thresholds as ``class=value``.
+    max_same_class_fraction : float, optional
+        Optional same-class fraction threshold.
+    max_same_class_fraction_by_class : sequence of str, optional
+        Optional class-specific same-class thresholds as ``class=value``.
+    """
+
+    point_thresholds = _parse_threshold_overrides(
+        min_point_neighbor_fraction_by_class,
+        option_name="min_point_neighbor_fraction_by_class",
+    )
+    same_thresholds = _parse_threshold_overrides(
+        max_same_class_fraction_by_class,
+        option_name="max_same_class_fraction_by_class",
+    )
+
+    has_overrides = any(
+        [
+            min_point_neighbor_fraction is not None,
+            bool(point_thresholds),
+            max_same_class_fraction is not None,
+            bool(same_thresholds),
+        ]
+    )
+    if not has_overrides:
+        return
+
+    filter_config = config.setdefault("training_filter", {})
+    pca_config = filter_config.setdefault("pca", {})
+    pca_preview_config = pca_config.setdefault("filter_preview", {})
+    embedding_config = filter_config.setdefault("cnn_embedding_knn", {})
+
+    target_configs = [pca_preview_config, embedding_config]
+    for target_config in target_configs:
+        if min_point_neighbor_fraction is not None:
+            target_config["min_point_neighbor_fraction"] = float(
+                min_point_neighbor_fraction
+            )
+        if max_same_class_fraction is not None:
+            target_config["max_same_class_fraction"] = float(
+                max_same_class_fraction
+            )
+        if point_thresholds:
+            thresholds = dict(
+                target_config.get("min_point_neighbor_fraction_by_class", {})
+                or {}
+            )
+            thresholds.update(point_thresholds)
+            target_config["min_point_neighbor_fraction_by_class"] = thresholds
+        if same_thresholds:
+            thresholds = dict(
+                target_config.get("max_same_class_fraction_by_class", {}) or {}
+            )
+            thresholds.update(same_thresholds)
+            target_config["max_same_class_fraction_by_class"] = thresholds
+
+
+def _parse_threshold_overrides(values, option_name):
+    """
+    Parse class-specific threshold overrides.
+
+    Parameters
+    ----------
+    values : sequence of str
+        Threshold values as ``class=value``.
+    option_name : str
+        Option name used in error messages.
+
+    Returns
+    -------
+    dict
+        Parsed class-specific thresholds.
+    """
+
+    if not values:
+        return {}
+
+    thresholds = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"{option_name} values must use class=value")
+        class_name, threshold = value.split("=", 1)
+        class_name = class_name.strip()
+        if not class_name:
+            raise ValueError(f"{option_name} class name must not be empty")
+        thresholds[class_name] = float(threshold)
+
+    return thresholds
 
 
 class PyTorchCNNClassifier(nn.Module):
@@ -367,6 +615,7 @@ def train_pytorch_convolutional_neural_network_classifier(
     model = training_state["model"]
     training_result = training_state["training_result"]
     class_weights = training_state["class_weights"]
+    sampler_info = training_state["sampler_info"]
     device = training_state["device"]
     deterministic = training_state["deterministic"]
     model_batch_size = training_state["model_batch_size"]
@@ -401,6 +650,13 @@ def train_pytorch_convolutional_neural_network_classifier(
     )
     predictions["predicted_class_name"] = predictions["predicted_label"].map(
         class_names_by_label
+    )
+    _add_prediction_probabilities(
+        predictions=predictions,
+        model=model,
+        data=data,
+        class_labels=class_labels,
+        class_names_by_label=class_names_by_label,
     )
 
     failure_plot_paths = _plot_failure_cases(
@@ -446,6 +702,8 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Classifier size: {classifier_size}",
         f"Dropout: {dropout}",
         f"Class weight: {class_weight}",
+        f"Sampler enabled: {sampler_info['enabled']}",
+        f"Sampler mode: {sampler_info['mode']}",
         "Activation: relu",
         "Pooling: average",
         "Optimizer: AdamW",
@@ -475,6 +733,10 @@ def train_pytorch_convolutional_neural_network_classifier(
         metric_lines.append(f"Failure plot directory: {data['output_dir'] / 'failure_plots'}")
     if class_weights is not None:
         metric_lines.append(f"Class weights: {class_weights.tolist()}")
+    if sampler_info["class_weights"] is not None:
+        metric_lines.append(
+            f"Sampler class weights: {sampler_info['class_weights'].tolist()}"
+        )
     if training_result["best_validation_macro_f1"] is not None:
         metric_lines.append(
             "Best validation macro F1: "
@@ -511,6 +773,61 @@ def train_pytorch_convolutional_neural_network_classifier(
     print(checkpoint_path)
     print(data["output_dir"] / "metrics.txt")
     print(predictions)
+
+
+def _add_prediction_probabilities(
+    predictions,
+    model,
+    data,
+    class_labels,
+    class_names_by_label,
+):
+    """
+    Add class probability columns to the prediction table.
+
+    Parameters
+    ----------
+    predictions : pandas.DataFrame
+        Prediction rows in train, validation, and test order.
+    model : PyTorchCNNClassifier
+        Trained CNN classifier.
+    data : dict
+        Training data returned by ``load_training_data``.
+    class_labels : numpy.ndarray
+        Project labels in model-output order.
+    class_names_by_label : dict
+        Mapping from integer label to class name.
+    """
+
+    probabilities = np.concatenate(
+        [
+            model.predict_proba(data["X_train_features"]),
+            model.predict_proba(data["X_validation_features"]),
+            model.predict_proba(data["X_test_features"]),
+        ],
+        axis=0,
+    )
+    if len(probabilities) != len(predictions):
+        raise ValueError("Prediction probability count does not match predictions")
+
+    label_to_column = {}
+    for column_index, label in enumerate(class_labels):
+        class_name = class_names_by_label[int(label)]
+        column_name = f"probability_{class_name}"
+        predictions[column_name] = probabilities[:, column_index]
+        label_to_column[int(label)] = column_index
+
+    true_columns = predictions["true_label"].map(label_to_column).to_numpy(dtype=int)
+    predicted_columns = predictions["predicted_label"].map(label_to_column).to_numpy(
+        dtype=int
+    )
+    row_indices = np.arange(len(predictions))
+    predictions["true_class_probability"] = probabilities[row_indices, true_columns]
+    predictions["predicted_class_probability"] = probabilities[
+        row_indices,
+        predicted_columns,
+    ]
+    predictions["max_class_probability"] = probabilities.max(axis=1)
 
 
 def load_pytorch_cnn_checkpoint(
@@ -676,6 +993,14 @@ def _train_cnn_model_for_data(
         targets=y_train,
         n_classes=len(class_labels),
         class_weight=class_weight,
+        class_names=class_names,
+        configured_class_weights=model_config.get("class_weights", {}),
+    )
+    sampler, sampler_info = _create_training_sampler(
+        targets=y_train,
+        class_names=class_names,
+        sampler_config=model_config.get("sampler", {}),
+        random_seed=random_seed,
     )
 
     scaler = StandardScaler().fit(data["X_train_features"])
@@ -719,6 +1044,7 @@ def _train_cnn_model_for_data(
         validation_features=data["X_validation_features"],
         validation_targets=y_validation,
         class_weights=class_weights,
+        sampler=sampler,
         device=device,
         batch_size=model_batch_size,
         learning_rate=learning_rate,
@@ -735,6 +1061,7 @@ def _train_cnn_model_for_data(
         "model": model,
         "training_result": training_result,
         "class_weights": class_weights,
+        "sampler_info": sampler_info,
         "device": device,
         "deterministic": deterministic,
         "model_batch_size": model_batch_size,
@@ -749,6 +1076,7 @@ def _fit_model(
     validation_features,
     validation_targets,
     class_weights,
+    sampler,
     device,
     batch_size,
     learning_rate,
@@ -767,10 +1095,13 @@ def _fit_model(
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=0,
         pin_memory=device.type == "cuda",
-        generator=torch.Generator().manual_seed(random_seed),
+        generator=None if sampler is not None else torch.Generator().manual_seed(
+            random_seed
+        ),
     )
 
     optimizer = torch.optim.AdamW(
@@ -2832,11 +3163,21 @@ def _resolve_class_weight(configured_class_weight):
         return "sqrt_balanced"
     if class_weight in {"true", "yes", "balanced", "weight", "weights", "weighted"}:
         return "balanced"
+    if class_weight in {"manual", "custom"}:
+        return "manual"
 
-    raise ValueError("class_weight must be 'none', 'sqrt_balanced', or 'balanced'")
+    raise ValueError(
+        "class_weight must be 'none', 'sqrt_balanced', 'balanced', or 'manual'"
+    )
 
 
-def _create_class_weights(targets, n_classes, class_weight):
+def _create_class_weights(
+    targets,
+    n_classes,
+    class_weight,
+    class_names,
+    configured_class_weights,
+):
     if class_weight == "none":
         return None
 
@@ -2844,11 +3185,95 @@ def _create_class_weights(targets, n_classes, class_weight):
     if np.any(class_counts == 0.0):
         raise ValueError("Cannot create class weights for empty classes")
 
-    weights = len(targets) / (n_classes * class_counts)
-    if class_weight == "sqrt_balanced":
-        weights = np.sqrt(weights)
+    if class_weight == "manual":
+        weights = _create_manual_class_weight_array(
+            class_names=class_names,
+            configured_class_weights=configured_class_weights,
+            config_name="model.class_weights",
+        )
+    else:
+        weights = len(targets) / (n_classes * class_counts)
+        if class_weight == "sqrt_balanced":
+            weights = np.sqrt(weights)
 
     return weights.astype(np.float32)
+
+
+def _create_training_sampler(targets, class_names, sampler_config, random_seed):
+    sampler_config = sampler_config or {}
+    enabled = bool(sampler_config.get("enabled", False))
+    mode = str(sampler_config.get("mode", "none")).lower()
+    if not enabled or mode in {"none", "false", "off", "disabled"}:
+        return None, {
+            "enabled": False,
+            "mode": "none",
+            "class_weights": None,
+        }
+
+    if mode not in {"balanced", "sqrt_balanced", "manual"}:
+        raise ValueError(
+            "model.sampler.mode must be 'balanced', 'sqrt_balanced', or 'manual'"
+        )
+
+    class_counts = np.bincount(targets, minlength=len(class_names)).astype(float)
+    if np.any(class_counts == 0.0):
+        raise ValueError("Cannot create sampler weights for empty classes")
+
+    if mode == "manual":
+        class_weights = _create_manual_class_weight_array(
+            class_names=class_names,
+            configured_class_weights=sampler_config.get("class_weights", {}),
+            config_name="model.sampler.class_weights",
+        )
+    else:
+        class_weights = len(targets) / (len(class_names) * class_counts)
+        if mode == "sqrt_balanced":
+            class_weights = np.sqrt(class_weights)
+
+    sample_weights = class_weights[np.asarray(targets, dtype=int)]
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(targets),
+        replacement=bool(sampler_config.get("replacement", True)),
+        generator=torch.Generator().manual_seed(random_seed),
+    )
+    return sampler, {
+        "enabled": True,
+        "mode": mode,
+        "class_weights": class_weights.astype(np.float32),
+    }
+
+
+def _create_manual_class_weight_array(
+    class_names,
+    configured_class_weights,
+    config_name,
+):
+    if not configured_class_weights:
+        raise ValueError(f"{config_name} must be set when using manual weights")
+
+    configured_class_weights = {
+        str(class_name): float(weight)
+        for class_name, weight in configured_class_weights.items()
+    }
+    missing_classes = [
+        class_name
+        for class_name in class_names
+        if class_name not in configured_class_weights
+    ]
+    if missing_classes:
+        raise ValueError(
+            f"{config_name} missing weights for classes: {missing_classes}"
+        )
+
+    weights = np.asarray(
+        [configured_class_weights[class_name] for class_name in class_names],
+        dtype=float,
+    )
+    if np.any(weights <= 0.0):
+        raise ValueError(f"{config_name} values must be positive")
+
+    return weights
 
 
 def _resolve_batch_size(configured_batch_size, n_samples):
