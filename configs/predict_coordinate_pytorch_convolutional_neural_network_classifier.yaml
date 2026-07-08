@@ -1,7 +1,10 @@
-file_template: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+file_source: 2d
+file_templates:
+  2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+  3d_egi: /wrk-vakka/group/spacephysics/vlasiator/3D/EGI/bulk/dense_cold_hall1e5_afterRestart374/bulk1.{timestep:07d}.vlsv
 
 model_dir: data/models/pytorch_convolutional_neural_network_classifier/{model_id}
-output_dir: data/predictions/pytorch_convolutional_neural_network_classifier/{model_id}/timesteps_{timestep}
+output_dir: data/predictions/pytorch_convolutional_neural_network_classifier/{model_id}/{file_source}/timesteps_{timestep}
 
 labels:
   lobe: 0
@@ -9,6 +12,9 @@ labels:
   o_point: 2
   reconnection: 3
   dayside: 4
+
+prediction:
+  n_jobs: 1
 
 plot:
   vdflim: 2000000.0

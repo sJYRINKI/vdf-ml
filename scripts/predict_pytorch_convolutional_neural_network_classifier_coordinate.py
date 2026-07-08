@@ -12,7 +12,7 @@ from src.coordinate_prediction import predict_coordinate
 from src.model_io import load_pytorch_convolutional_neural_network_classifier_model
 
 
-def main(config_path, timestep, model_id, coord_re):
+def main(config_path, timestep, model_id, coord_re, file_source=None):
     """
     Predict one VDF from coordinates with a PyTorch CNN.
 
@@ -26,6 +26,8 @@ def main(config_path, timestep, model_id, coord_re):
         Trained model identifier.
     coord_re : array-like of float
         Coordinate in Earth radii, given as ``[x, y, z]``.
+    file_source : str, optional
+        Name of file template source to use.
     """
 
     config = load_config(config_path)
@@ -35,6 +37,7 @@ def main(config_path, timestep, model_id, coord_re):
         model_id=model_id,
         coord_re=coord_re,
         load_model=load_pytorch_convolutional_neural_network_classifier_model,
+        file_source=file_source,
     )
 
     print(f"Saved plot: {result['output_plot_path']}")
@@ -70,6 +73,11 @@ if __name__ == "__main__":
         metavar=("X_RE", "Y_RE", "Z_RE"),
         help="Coordinate in Earth radii.",
     )
+    parser.add_argument(
+        "--file-source",
+        default=None,
+        help="File source from config file_templates, for example 2d or 3d_egi.",
+    )
     args = parser.parse_args()
 
     main(
@@ -77,4 +85,5 @@ if __name__ == "__main__":
         timestep=args.timestep,
         model_id=args.model_id,
         coord_re=args.coord_re,
+        file_source=args.file_source,
     )

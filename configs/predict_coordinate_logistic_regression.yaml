@@ -1,11 +1,17 @@
-file_template: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+file_source: 2d
+file_templates:
+  2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+  3d_egi: /wrk-vakka/group/spacephysics/vlasiator/3D/EGI/bulk/dense_cold_hall1e5_afterRestart374/bulk1.{timestep:07d}.vlsv
 
 model_dir: data/models/logistic_regression/{model_id}
-output_dir: data/predictions/logistic_regression/{model_id}/timesteps_{timestep}
+output_dir: data/predictions/logistic_regression/{model_id}/{file_source}/timesteps_{timestep}
 
 labels:
   rest: 0
   lobe: 1
+
+prediction:
+  n_jobs: 1
 
 plot:
   vdflim: 2000000.0
