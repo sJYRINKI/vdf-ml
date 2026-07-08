@@ -14,6 +14,7 @@ from src.dataset_io import load_dataset
 from src.dataset_plot import (
     add_dataset_sampling_plot_config,
     create_colormap_plot_jobs,
+    create_or_load_plot_xz_slice_cache,
     iter_vdf_plot_jobs,
     plot_labeled_colormap,
     plot_vdf_sample_from_dataset,
@@ -39,6 +40,7 @@ def main(config_path, timestep):
 
     vdflim = float(plot_config.get("vdflim", 2e6))
     n_jobs = int(plot_config.get("n_jobs", 1))
+    cache_config = plot_config.get("cache", {})
     colormap_config = plot_config.get("colormap", {})
     colormap_config = add_dataset_sampling_plot_config(
         colormap_config=colormap_config,
@@ -46,6 +48,12 @@ def main(config_path, timestep):
     )
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
+    X_plot = create_or_load_plot_xz_slice_cache(
+        X=X,
+        dataset_dir=dataset_dir,
+        dataset_id=timestep,
+        cache_config=cache_config,
+    )
 
     colormap_jobs = create_colormap_plot_jobs(
         metadata=metadata,
@@ -65,6 +73,7 @@ def main(config_path, timestep):
         metadata=metadata,
         output_dir=output_dir,
         vdflim=vdflim,
+        X_plot=X_plot,
     )
     run_plot_jobs(
         plot_function=plot_vdf_sample_from_dataset,

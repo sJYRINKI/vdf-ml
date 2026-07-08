@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 from joblib import Parallel, delayed
 import analysator as pt
@@ -20,6 +21,7 @@ from src.colormap_helpers import (
     scatter_all_vdf_cells,
     scatter_label_points,
 )
+from src.timesteps import create_path
 from src.vdf_helpers import get_vdf_plot_axes_parameters, get_vdf_plot_threshold
 
 
@@ -115,7 +117,7 @@ def create_colormap_plot_jobs(metadata, output_dir, colormap_config):
     return colormap_jobs
 
 
-def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
+def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim, X_plot=None):
     """
     Yield lightweight plot jobs for saved VDF samples.
 
@@ -131,6 +133,10 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
         Base plot output directory for the dataset.
     vdflim : float
         Velocity axis limit in m/s for VDF plots.
+    X_plot : numpy.ndarray, optional
+        Memory-mapped cache of physical plot-oriented xz slices with shape
+        ``(n_samples, vz, vx)``. If omitted, plots are made from full VDFs in
+        ``X``.
 
     Yields
     ------
@@ -139,6 +145,11 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
     """
 
     X_path = get_memmap_path(X, "X")
+    X_plot_path = (
+        None
+        if X_plot is None
+        else get_memmap_path(X_plot, "X_plot")
+    )
     class_frame_counts = {}
     plot_axes_cache = {}
     plot_threshold_cache = {}
@@ -170,6 +181,7 @@ def iter_vdf_plot_jobs(X, y, metadata, output_dir, vdflim):
 
         yield {
             "X_path": X_path,
+            "X_plot_path": X_plot_path,
             "sample_index": int(sample_index),
             "y_label": int(y[sample_index]),
             "metadata_row": metadata_row,
@@ -358,8 +370,389 @@ def load_memmap_array(array_path):
     return array
 
 
+def create_or_load_plot_xz_slice_cache(X, dataset_dir, dataset_id, cache_config):
+    """
+    Create or load cached physical plot-oriented xz VDF slices.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples with shape ``(n_samples, vx, vy, vz)``.
+    dataset_dir : str or pathlib.Path
+        Dataset directory containing ``X.npy``.
+    dataset_id : str
+        Dataset identifier used in cache path templates.
+    cache_config : dict
+        Plot cache settings.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Memory-mapped xz-slice cache, or ``None`` when caching is disabled.
+    """
+
+    cache_config = resolve_plot_xz_slice_cache_config(
+        cache_config=cache_config,
+        dataset_dir=dataset_dir,
+        dataset_id=dataset_id,
+    )
+    if not cache_config["enabled"]:
+        return None
+
+    cache_path = cache_config["cache_path"]
+    metadata_path = cache_config["metadata_path"]
+
+    if (
+            not cache_config["rebuild"]
+            and is_plot_xz_slice_cache_valid(
+                X=X,
+                cache_path=cache_path,
+                metadata_path=metadata_path,
+            )
+    ):
+        print(f"Using plot xz-slice cache: {cache_path}")
+        return np.load(cache_path, mmap_mode="r")
+
+    create_plot_xz_slice_cache(
+        X=X,
+        cache_config=cache_config,
+    )
+
+    return np.load(cache_path, mmap_mode="r")
+
+
+def resolve_plot_xz_slice_cache_config(cache_config, dataset_dir, dataset_id):
+    """
+    Resolve plot xz-slice cache paths and settings.
+
+    Parameters
+    ----------
+    cache_config : dict
+        Raw cache settings from plotting config.
+    dataset_dir : str or pathlib.Path
+        Dataset directory containing ``X.npy``.
+    dataset_id : str
+        Dataset identifier used in cache path templates.
+
+    Returns
+    -------
+    dict
+        Resolved cache settings.
+    """
+
+    cache_config = cache_config or {}
+    dataset_dir = Path(dataset_dir)
+    enabled = bool(cache_config.get("enabled", False))
+
+    cache_dir_template = cache_config.get("dir")
+    if cache_dir_template is None:
+        cache_dir = dataset_dir / "cache"
+    else:
+        cache_dir = create_path(
+            path_template=cache_dir_template,
+            timestep=dataset_id,
+            dataset_id=dataset_id,
+        )
+
+    batch_size = int(cache_config.get("batch_size", 128))
+    n_jobs = int(cache_config.get("n_jobs", 1))
+
+    if batch_size <= 0:
+        raise ValueError("plot.cache.batch_size must be positive")
+
+    if n_jobs == 0:
+        raise ValueError("plot.cache.n_jobs must be non-zero")
+
+    return {
+        "enabled": enabled,
+        "cache_dir": Path(cache_dir),
+        "cache_path": Path(cache_dir) / cache_config.get(
+            "filename",
+            "plot_xz_slice.npy",
+        ),
+        "metadata_path": Path(cache_dir) / cache_config.get(
+            "metadata_filename",
+            "plot_xz_slice_metadata.npz",
+        ),
+        "rebuild": bool(cache_config.get("rebuild", False)),
+        "batch_size": batch_size,
+        "n_jobs": n_jobs,
+    }
+
+
+def create_plot_xz_slice_cache(X, cache_config):
+    """
+    Create a memory-mapped cache of physical plot-oriented xz VDF slices.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples with shape ``(n_samples, vx, vy, vz)``.
+    cache_config : dict
+        Resolved cache settings.
+
+    Returns
+    -------
+    dict
+        Cache metadata.
+    """
+
+    cache_path = cache_config["cache_path"]
+    metadata_path = cache_config["metadata_path"]
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cache_shape = (int(X.shape[0]), *infer_plot_xz_slice_shape(X))
+    X_plot = np.lib.format.open_memmap(
+        cache_path,
+        mode="w+",
+        dtype=np.float32,
+        shape=cache_shape,
+    )
+
+    start = time.perf_counter()
+    sample_indices = np.arange(int(X.shape[0]), dtype=int)
+    batches = list(
+        iter_index_batches(
+            sample_indices,
+            batch_size=cache_config["batch_size"],
+        )
+    )
+
+    print(f"Creating plot xz-slice cache: {cache_path}")
+    print(f"Cache shape: {cache_shape}")
+    print(f"Cache jobs: {cache_config['n_jobs']}")
+
+    if cache_config["n_jobs"] == 1:
+        for batch_indices in batches:
+            write_plot_xz_slice_cache_batch(
+                X=X,
+                X_plot=X_plot,
+                batch_indices=batch_indices,
+            )
+    else:
+        Parallel(
+            n_jobs=cache_config["n_jobs"],
+            prefer="threads",
+            require="sharedmem",
+        )(
+            delayed(write_plot_xz_slice_cache_batch)(
+                X=X,
+                X_plot=X_plot,
+                batch_indices=batch_indices,
+            )
+            for batch_indices in batches
+        )
+
+    X_plot.flush()
+    elapsed = time.perf_counter() - start
+    metadata = {
+        "enabled": True,
+        "cache_path": str(cache_path),
+        "metadata_path": str(metadata_path),
+        "raw_vdf_shape": tuple(int(value) for value in X.shape),
+        "cache_shape": tuple(int(value) for value in cache_shape),
+        "slice": "xz",
+        "orientation": "plot",
+        "physical_units": "vdf",
+        "elapsed_seconds": float(elapsed),
+    }
+    save_plot_xz_slice_cache_metadata(
+        metadata_path=metadata_path,
+        metadata=metadata,
+    )
+
+    print(f"Created plot xz-slice cache in {elapsed:.2f} s")
+
+    return metadata
+
+
+def iter_index_batches(indices, batch_size):
+    """
+    Iterate fixed-size index batches.
+
+    Parameters
+    ----------
+    indices : array-like of int
+        Indices to split.
+    batch_size : int
+        Number of indices per batch.
+
+    Yields
+    ------
+    numpy.ndarray
+        Index batch.
+    """
+
+    indices = np.asarray(indices, dtype=int)
+
+    for start in range(0, len(indices), int(batch_size)):
+        yield indices[start:start + int(batch_size)]
+
+
+def write_plot_xz_slice_cache_batch(X, X_plot, batch_indices):
+    """
+    Write one batch of physical plot-oriented xz slices into the cache.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples with shape ``(n_samples, vx, vy, vz)``.
+    X_plot : numpy.ndarray
+        Plot xz-slice cache.
+    batch_indices : array-like of int
+        Sample indices to write.
+    """
+
+    for sample_index in batch_indices:
+        X_plot[int(sample_index)] = extract_plot_xz_slice_from_dataset(
+            X=X,
+            sample_index=int(sample_index),
+        )
+
+
+def extract_plot_xz_slice_from_dataset(X, sample_index):
+    """
+    Extract the plot-oriented middle xz slice from a saved sample.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples with shape ``(n_samples, vx, vy, vz)``.
+    sample_index : int
+        Dataset sample index.
+
+    Returns
+    -------
+    numpy.ndarray
+        Plot-oriented xz slice with shape ``(vz, vx)``.
+    """
+
+    mid_y = X.shape[2] // 2
+    return np.asarray(X[int(sample_index), :, mid_y, :].T, dtype=np.float32)
+
+
+def infer_plot_xz_slice_shape(X):
+    """
+    Infer plot-oriented xz-slice shape from a VDF dataset.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples with shape ``(n_samples, vx, vy, vz)``.
+
+    Returns
+    -------
+    tuple of int
+        Plot-oriented xz-slice shape ``(vz, vx)``.
+    """
+
+    return int(X.shape[3]), int(X.shape[1])
+
+
+def is_plot_xz_slice_cache_valid(X, cache_path, metadata_path):
+    """
+    Return whether an existing plot xz-slice cache matches the dataset.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        VDF samples with shape ``(n_samples, vx, vy, vz)``.
+    cache_path : str or pathlib.Path
+        Cache array path.
+    metadata_path : str or pathlib.Path
+        Cache metadata path.
+
+    Returns
+    -------
+    bool
+        Whether the cache can be reused.
+    """
+
+    cache_path = Path(cache_path)
+    metadata_path = Path(metadata_path)
+    if not cache_path.exists() or not metadata_path.exists():
+        return False
+
+    try:
+        X_plot = np.load(cache_path, mmap_mode="r")
+        metadata = load_plot_xz_slice_cache_metadata(metadata_path)
+    except Exception:
+        return False
+
+    expected_shape = (int(X.shape[0]), *infer_plot_xz_slice_shape(X))
+
+    return (
+        tuple(X_plot.shape) == expected_shape
+        and tuple(metadata.get("raw_vdf_shape", ())) == tuple(X.shape)
+        and tuple(metadata.get("cache_shape", ())) == expected_shape
+        and metadata.get("slice") == "xz"
+        and metadata.get("orientation") == "plot"
+        and metadata.get("physical_units") == "vdf"
+    )
+
+
+def save_plot_xz_slice_cache_metadata(metadata_path, metadata):
+    """
+    Save plot xz-slice cache metadata.
+
+    Parameters
+    ----------
+    metadata_path : str or pathlib.Path
+        Cache metadata path.
+    metadata : dict
+        Cache metadata.
+    """
+
+    metadata_path = Path(metadata_path)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        metadata_path,
+        enabled=np.asarray(metadata["enabled"]),
+        cache_path=np.asarray(metadata["cache_path"]),
+        metadata_path=np.asarray(metadata["metadata_path"]),
+        raw_vdf_shape=np.asarray(metadata["raw_vdf_shape"], dtype=int),
+        cache_shape=np.asarray(metadata["cache_shape"], dtype=int),
+        slice=np.asarray(metadata["slice"]),
+        orientation=np.asarray(metadata["orientation"]),
+        physical_units=np.asarray(metadata["physical_units"]),
+        elapsed_seconds=np.asarray(metadata["elapsed_seconds"]),
+    )
+
+
+def load_plot_xz_slice_cache_metadata(metadata_path):
+    """
+    Load plot xz-slice cache metadata.
+
+    Parameters
+    ----------
+    metadata_path : str or pathlib.Path
+        Cache metadata path.
+
+    Returns
+    -------
+    dict
+        Cache metadata.
+    """
+
+    with np.load(metadata_path, allow_pickle=False) as metadata:
+        return {
+            "enabled": bool(metadata["enabled"].item()),
+            "cache_path": str(metadata["cache_path"].item()),
+            "metadata_path": str(metadata["metadata_path"].item()),
+            "raw_vdf_shape": tuple(
+                int(value) for value in metadata["raw_vdf_shape"]
+            ),
+            "cache_shape": tuple(int(value) for value in metadata["cache_shape"]),
+            "slice": str(metadata["slice"].item()),
+            "orientation": str(metadata["orientation"].item()),
+            "physical_units": str(metadata["physical_units"].item()),
+            "elapsed_seconds": float(metadata["elapsed_seconds"].item()),
+        }
+
+
 def plot_vdf_sample_from_dataset(
         X_path,
+        X_plot_path,
         sample_index,
         y_label,
         metadata_row,
@@ -376,6 +769,9 @@ def plot_vdf_sample_from_dataset(
     ----------
     X_path : str
         Path to the saved VDF ``.npy`` array.
+    X_plot_path : str or None
+        Path to cached plot-oriented xz slices. If ``None``, the full VDF is
+        read from ``X_path``.
     sample_index : int
         Sample index to plot.
     y_label : int
@@ -394,6 +790,20 @@ def plot_vdf_sample_from_dataset(
         Visible velocity limit in m/s.
     """
 
+    if X_plot_path is not None:
+        X_plot = load_memmap_array(X_plot_path)
+        plot_vdf_xz_slice_from_physical_xz(
+            vdf_xz_slice=X_plot[int(sample_index)],
+            y_label=y_label,
+            metadata_row=metadata_row,
+            extent=extent,
+            output_path=output_path,
+            dv=dv,
+            threshold=threshold,
+            vdflim=vdflim,
+        )
+        return
+
     X = load_memmap_array(X_path)
     plot_vdf_xz_slice(
         vdf=X[int(sample_index)],
@@ -405,6 +815,64 @@ def plot_vdf_sample_from_dataset(
         threshold=threshold,
         vdflim=vdflim,
     )
+
+
+def plot_vdf_xz_slice_from_physical_xz(
+        vdf_xz_slice,
+        y_label,
+        metadata_row,
+        extent,
+        output_path,
+        dv,
+        threshold,
+        vdflim=2e6,
+):
+    """
+    Plot and save one cached physical xz VDF slice.
+
+    Parameters
+    ----------
+    vdf_xz_slice : numpy.ndarray
+        Plot-oriented physical xz slice with shape ``(vz, vx)``.
+    y_label : int
+        Integer label.
+    metadata_row : dict
+        Metadata row for the sample.
+    extent : array-like of float
+        Velocity mesh extent ``[vxmin, vymin, vzmin, vxmax, vymax, vzmax]``.
+    output_path : str
+        Output PNG path.
+    dv : float
+        Velocity grid cell size in m/s.
+    threshold : float
+        VDF threshold before multiplying by ``dv``.
+    vdflim : float, optional
+        Visible velocity limit in m/s.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax1 = plt.subplots(figsize=(7, 6))
+    im = _plot_physical_xz_slice_on_axis(
+        ax=ax1,
+        vdf_xz_slice=vdf_xz_slice,
+        y_label=y_label,
+        metadata_row=metadata_row,
+        extent=extent,
+        dv=dv,
+        threshold=threshold,
+        vdflim=vdflim,
+    )
+
+    if im is None:
+        plt.close(fig)
+        return
+
+    fig.colorbar(im, ax=ax1, label="f(v)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def plot_vdf_xz_slice(
@@ -812,6 +1280,64 @@ def _plot_vdf_xz_slice_on_axis(
     )
 
 
+def _plot_physical_xz_slice_on_axis(
+        ax,
+        vdf_xz_slice,
+        y_label,
+        metadata_row,
+        extent,
+        dv,
+        threshold,
+        vdflim=2e6,
+):
+    """
+    Plot one cached physical xz VDF slice on an existing matplotlib axis.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis where the VDF slice is drawn.
+    vdf_xz_slice : numpy.ndarray
+        Plot-oriented physical xz slice with shape ``(vz, vx)``.
+    y_label : int
+        Integer label.
+    metadata_row : dict or pandas.Series
+        Metadata row for the sample.
+    extent : array-like of float
+        Velocity mesh extent ``[vxmin, vymin, vzmin, vxmax, vymax, vzmax]``.
+    dv : float
+        Velocity grid cell size in m/s.
+    threshold : float
+        VDF threshold before multiplying by ``dv``.
+    vdflim : float, optional
+        Visible velocity limit in m/s.
+
+    Returns
+    -------
+    matplotlib.image.AxesImage or None
+        Image object for colorbar creation, or ``None`` for empty samples.
+    """
+
+    vdf_plot = _prepare_physical_xz_plot(
+        vdf_xz_slice=vdf_xz_slice,
+        metadata_row=metadata_row,
+        dv=dv,
+        threshold=threshold,
+    )
+
+    if vdf_plot is None:
+        return None
+
+    return _plot_prepared_vdf_xz_slice_on_axis(
+        ax=ax,
+        vdf_plot=vdf_plot,
+        y_label=y_label,
+        metadata_row=metadata_row,
+        extent=extent,
+        vdflim=vdflim,
+    )
+
+
 def _prepare_vdf_xz_plot(vdf, metadata_row, dv, threshold):
     """
     Create a thresholded xz VDF slice for plotting.
@@ -834,10 +1360,58 @@ def _prepare_vdf_xz_plot(vdf, metadata_row, dv, threshold):
         sample has no positive values.
     """
 
+    return _prepare_physical_xz_plot(
+        vdf_xz_slice=extract_plot_xz_slice(vdf),
+        metadata_row=metadata_row,
+        dv=dv,
+        threshold=threshold,
+    )
+
+
+def extract_plot_xz_slice(vdf):
+    """
+    Extract the plot-oriented middle xz slice from one dense VDF.
+
+    Parameters
+    ----------
+    vdf : numpy.ndarray
+        Dense VDF array with shape ``(vx, vy, vz)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Plot-oriented xz slice with shape ``(vz, vx)``.
+    """
+
     vdf_swapped = np.swapaxes(vdf, 2, 0)
     mid = vdf_swapped.shape[1] // 2
 
-    vdf_plot_raw = vdf_swapped[:, mid, :] * dv
+    return np.asarray(vdf_swapped[:, mid, :], dtype=np.float32)
+
+
+def _prepare_physical_xz_plot(vdf_xz_slice, metadata_row, dv, threshold):
+    """
+    Create a thresholded xz VDF plot slice from a physical xz slice.
+
+    Parameters
+    ----------
+    vdf_xz_slice : numpy.ndarray
+        Plot-oriented physical xz slice with shape ``(vz, vx)``.
+    metadata_row : dict or pandas.Series
+        Metadata row for the sample.
+    dv : float
+        Velocity grid cell size in m/s.
+    threshold : float
+        VDF threshold before multiplying by ``dv``.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray or None
+        Thresholded xz VDF slice multiplied by ``dv``, or ``None`` when the
+        sample has no positive values.
+    """
+
+    vdf_plot_raw = np.asarray(vdf_xz_slice, dtype=np.float32) * dv
     vdf_plot = np.where(vdf_plot_raw < threshold * dv, 0, vdf_plot_raw)
     vdf_plot = np.ma.masked_less_equal(vdf_plot, 0)
 

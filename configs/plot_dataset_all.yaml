@@ -5,6 +5,14 @@ dataset_config: configs/create_dataset.yaml
 plot:
   n_jobs: 64
   vdflim: 2000000.0
+  cache:
+    enabled: true
+    dir: data/train/timesteps_{timestep}/cache
+    filename: plot_xz_slice.npy
+    metadata_filename: plot_xz_slice_metadata.npz
+    rebuild: false
+    batch_size: 256
+    n_jobs: 16
   colormap:
     boxre: [-30, 15, -9, 9]
     vmin: -1500000.0
