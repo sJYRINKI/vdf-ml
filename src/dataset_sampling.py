@@ -3,6 +3,7 @@ import time
 import numpy as np
 import analysator as pt
 
+from src.dataset_metadata import create_vdf_spatial_metadata
 from src.timesteps import create_timestep_path
 from src.vdf_extract import VdfExtractor
 from src.point_labels import create_point_labeled_coords, iter_labeled_coords
@@ -145,6 +146,10 @@ def create_timestep_sample_specs(
     rejected_cellids = {int(cid) for cid in (rejected_cellids or set())}
     if vdf_cellids is None or vdf_coords_re is None:
         vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
+    vdf_coord_by_cellid = {
+        int(cid): tuple(float(value) for value in coord_re)
+        for cid, coord_re in zip(vdf_cellids, vdf_coords_re)
+    }
 
     sample_specs = []
     seen_class_cellids = set()
@@ -190,6 +195,7 @@ def create_timestep_sample_specs(
                 "label": int(label),
                 "class_name": class_name,
                 "coord_re": coord_re,
+                "vdf_coord_re": vdf_coord_by_cellid[int(cid)],
                 "neighbor_position": neighbor_position,
                 "timestep": int(timestep),
             }
@@ -215,6 +221,7 @@ def create_timestep_sample_specs(
             rejected_cellids=rejected_cellids,
             vdf_cellids=vdf_cellids,
             vdf_coords_re=vdf_coords_re,
+            vdf_coord_by_cellid=vdf_coord_by_cellid,
         )
     )
 
@@ -235,6 +242,7 @@ def create_background_region_sample_specs(
     cell_has_vdf_func=None,
     vdf_cellids=None,
     vdf_coords_re=None,
+    vdf_coord_by_cellid=None,
 ):
     """
     Create background samples from configured spatial regions.
@@ -267,6 +275,8 @@ def create_background_region_sample_specs(
         Spatial cell IDs with VDF data.
     vdf_coords_re : numpy.ndarray, optional
         VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+    vdf_coord_by_cellid : dict, optional
+        Mapping from VDF cell IDs to cell-center coordinates in Earth radii.
 
     Returns
     -------
@@ -282,12 +292,14 @@ def create_background_region_sample_specs(
     excluded_cellids.update(int(cid) for cid in (rejected_cellids or set()))
     seen_background_class_cellids = set()
     sample_specs = []
-    coord_by_cellid = {}
-    if vdf_cellids is not None and vdf_coords_re is not None:
-        coord_by_cellid = {
-            int(cid): np.asarray(coord_re, dtype=float)
-            for cid, coord_re in zip(vdf_cellids, vdf_coords_re)
-        }
+    if vdf_coord_by_cellid is None:
+        if vdf_cellids is not None and vdf_coords_re is not None:
+            vdf_coord_by_cellid = {
+                int(cid): tuple(float(value) for value in coord_re)
+                for cid, coord_re in zip(vdf_cellids, vdf_coords_re)
+            }
+        else:
+            vdf_coord_by_cellid = {}
 
     points_config = config.get("points", {})
     for region_name, region_re in iter_enabled_regions_re(
@@ -322,7 +334,7 @@ def create_background_region_sample_specs(
                 continue
 
             seen_background_class_cellids.add(background_class_cellid)
-            coord_re = coord_by_cellid.get(cid)
+            coord_re = vdf_coord_by_cellid.get(cid)
             if coord_re is None:
                 coord_re = (
                     np.asarray(reader.get_cell_coordinates(cid), dtype=float)
@@ -336,6 +348,7 @@ def create_background_region_sample_specs(
                     "label": label,
                     "class_name": class_name,
                     "coord_re": coord_re,
+                    "vdf_coord_re": coord_re,
                     "neighbor_position": f"{region_name}_region",
                     "region_name": region_name,
                     "timestep": int(timestep),
@@ -680,7 +693,9 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
     Parameters
     ----------
     sample_spec : dict
-        Sample specification used for extraction.
+        Sample specification used for extraction. Must contain the VDF-cell
+        center as ``vdf_coord_re``. X/O-point samples must also contain
+        ``point_kind`` and the three ``source_point_*_re`` coordinates.
     cid : int
         Spatial cell ID used for extraction.
     coord_re : array-like of float
@@ -691,7 +706,8 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
     Returns
     -------
     dict
-        Metadata fields for the extracted sample.
+        Metadata fields for the extracted sample, including the VDF-cell
+        center and the applicable X- or O-point distance in Earth radii.
     """
 
     metadata_row = {
@@ -706,6 +722,21 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
         "z_re": float(coord_re[2]),
         "file_location": str(file_location),
     }
+    point_kind = sample_spec.get("point_kind")
+    if point_kind is not None:
+        point_kind = str(point_kind).strip().lower()
+    source_point_coord_re = None
+    if point_kind in {"x", "o"}:
+        source_point_coord_re = (
+            sample_spec["source_point_x_re"],
+            sample_spec["source_point_y_re"],
+            sample_spec["source_point_z_re"],
+        )
+    spatial_metadata = create_vdf_spatial_metadata(
+        vdf_coord_re=sample_spec["vdf_coord_re"],
+        point_kind=point_kind,
+        source_point_coord_re=source_point_coord_re,
+    )
     internal_keys = {
         "file_location",
         "simulation_time",
@@ -713,6 +744,7 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
         "label",
         "class_name",
         "coord_re",
+        "vdf_coord_re",
         "neighbor_position",
         "timestep",
     }
@@ -720,6 +752,8 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
     for key, value in sample_spec.items():
         if key not in internal_keys:
             metadata_row[key] = value
+
+    metadata_row.update(spatial_metadata)
 
     return metadata_row
 

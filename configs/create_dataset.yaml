@@ -17,7 +17,7 @@ creation:
   extraction_n_jobs: 64
 
 points:
-  x_class_name: reconnection
+  x_class_name: x_point
   o_class_name: o_point
   point_region_names: [tail, dayside]
   background_region_names: [tail, dayside]

@@ -1,7 +1,7 @@
 file_source: 2d
 file_templates:
   2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
-  3d: /wrk-vakka/group/spacephysics/vlasiator/3D/EGI/bulk/dense_cold_hall1e5_afterRestart374/bulk1.{timestep:07d}.vlsv
+  3d: /wrk-vakka/group/spacephysics/vlasiator/3D/DCB/bulk/bulk.{timestep:07d}.vlsv
 
 model_dir: data/models/pytorch_convolutional_neural_network_classifier/{model_id}
 output_dir: data/predictions/pytorch_convolutional_neural_network_classifier/{model_id}/{file_source}_xm20_m12_y8_z1/timestep_{timestep}

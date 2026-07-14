@@ -14,6 +14,6 @@ plot:
     batch_size: 256
     n_jobs: 16
   colormap:
-    boxre: [-30, 15, -9, 9]
+    boxre: [-30, 15, -13, 13]
     vmin: -1500000.0
     vmax: 1500000.0
