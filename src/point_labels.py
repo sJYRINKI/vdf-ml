@@ -20,19 +20,24 @@ def create_labeled_coords_for_timestep(config, timestep):
     -------
     tuple
         Pair of ``(timestep, label_data)``. ``label_data`` contains
-        ``labeled_coords`` and point-conflict ``rejected_cellids``.
+        ``labeled_coords``, point-conflict ``rejected_cellids``, and the raw
+        X/O point records used for nearest-point geometry.
     """
 
     timestep_labeled_coords = list(iter_labeled_coords(config))
-    point_labeled_coords, rejected_cellids = create_point_labeled_coords(
+    point_label_data = create_point_label_data(
         config=config,
         timestep=timestep,
     )
+    point_labeled_coords = point_label_data["point_labeled_coords"]
+    rejected_cellids = point_label_data["rejected_cellids"]
     timestep_labeled_coords.extend(point_labeled_coords)
 
     return int(timestep), {
         "labeled_coords": timestep_labeled_coords,
         "rejected_cellids": rejected_cellids,
+        "raw_x_point_records": point_label_data["raw_x_point_records"],
+        "raw_o_point_records": point_label_data["raw_o_point_records"],
     }
 
 
@@ -137,6 +142,41 @@ def create_point_labeled_coords(config, timestep, reader=None):
         VDF cell IDs rejected because X and O points mapped to the same cell.
     """
 
+    point_label_data = create_point_label_data(
+        config=config,
+        timestep=timestep,
+        reader=reader,
+    )
+    return (
+        point_label_data["point_labeled_coords"],
+        point_label_data["rejected_cellids"],
+    )
+
+
+def create_point_label_data(config, timestep, reader=None):
+    """
+    Create accepted point labels while retaining all detected point records.
+
+    The raw records are the direct output of ``find_point_records``. They are
+    retained before X/O records that map to the same VDF cell are removed, so
+    downstream code can use every detected point for nearest-point geometry.
+
+    Parameters
+    ----------
+    config : dict
+        Dataset config dictionary.
+    timestep : int
+        Timestep to process.
+    reader : analysator.vlsvfile.VlsvReader, optional
+        Existing reader for the timestep bulk file.
+
+    Returns
+    -------
+    dict
+        Accepted labeled point records, rejected VDF cell IDs, and raw X/O
+        point records from topology detection.
+    """
+
     points_config = config.get("points")
     labels = config["labels"]
 
@@ -155,7 +195,7 @@ def create_point_labeled_coords(config, timestep, reader=None):
         )
         reader = pt.vlsvfile.VlsvReader(str(bulk_file_location))
 
-    x_point_records, o_point_records = find_point_records(
+    raw_x_point_records, raw_o_point_records = find_point_records(
         reader=reader,
         flux_file_location=flux_file_location,
         points_config=points_config,
@@ -163,23 +203,30 @@ def create_point_labeled_coords(config, timestep, reader=None):
 
     x_point_records, o_point_records, rejected_cellids = remove_shared_cellid_points(
         reader=reader,
-        x_point_records=x_point_records,
-        o_point_records=o_point_records,
+        x_point_records=raw_x_point_records,
+        o_point_records=raw_o_point_records,
     )
 
     point_labeled_coords = []
 
     for point_record in x_point_records:
-        point_record["class_name"] = x_class_name
-        point_record["label"] = int(labels[x_class_name])
-        point_labeled_coords.append(point_record)
+        labeled_record = dict(point_record)
+        labeled_record["class_name"] = x_class_name
+        labeled_record["label"] = int(labels[x_class_name])
+        point_labeled_coords.append(labeled_record)
 
     for point_record in o_point_records:
-        point_record["class_name"] = o_class_name
-        point_record["label"] = int(labels[o_class_name])
-        point_labeled_coords.append(point_record)
+        labeled_record = dict(point_record)
+        labeled_record["class_name"] = o_class_name
+        labeled_record["label"] = int(labels[o_class_name])
+        point_labeled_coords.append(labeled_record)
 
-    return point_labeled_coords, rejected_cellids
+    return {
+        "point_labeled_coords": point_labeled_coords,
+        "rejected_cellids": rejected_cellids,
+        "raw_x_point_records": raw_x_point_records,
+        "raw_o_point_records": raw_o_point_records,
+    }
 
 
 def remove_shared_cellid_points(reader, x_point_records, o_point_records):

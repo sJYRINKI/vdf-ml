@@ -698,7 +698,13 @@ def _create_training_feature_matrix(
     )
 
 
-def evaluate_model(model, data, report_labels=None, target_names=None):
+def evaluate_model(
+    model,
+    data,
+    report_labels=None,
+    target_names=None,
+    predict_kwargs_by_split=None,
+):
     """
     Evaluate a fitted model on train, validation, and test splits.
 
@@ -712,6 +718,8 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
         Labels to include in reports.
     target_names : list of str, optional
         Class names for reports.
+    predict_kwargs_by_split : dict, optional
+        Extra keyword arguments passed to ``model.predict`` for each split.
 
     Returns
     -------
@@ -719,9 +727,19 @@ def evaluate_model(model, data, report_labels=None, target_names=None):
         Predictions, metrics, reports, and confusion matrix text.
     """
 
-    y_train_pred = model.predict(data["X_train_features"])
-    y_validation_pred = model.predict(data["X_validation_features"])
-    y_test_pred = model.predict(data["X_test_features"])
+    predict_kwargs_by_split = predict_kwargs_by_split or {}
+    y_train_pred = model.predict(
+        data["X_train_features"],
+        **predict_kwargs_by_split.get("train", {}),
+    )
+    y_validation_pred = model.predict(
+        data["X_validation_features"],
+        **predict_kwargs_by_split.get("validation", {}),
+    )
+    y_test_pred = model.predict(
+        data["X_test_features"],
+        **predict_kwargs_by_split.get("test", {}),
+    )
 
     train_accuracy = accuracy_score(data["y_train"], y_train_pred)
     validation_accuracy = accuracy_score(

@@ -4,11 +4,17 @@ import numpy as np
 import analysator as pt
 from joblib import Parallel, delayed
 
+from src.dataset_metadata import (
+    POINT_REFERENCE_METADATA_COLUMNS,
+    create_point_reference_metadata_arrays,
+)
 from src.dataset_plot import plot_vdf_xz_slice
 from src.features import create_features
+from src.point_topology import find_point_records
 from src.timesteps import create_path, create_timestep_list
 from src.vdf_extract import VdfExtractor, extract_vdf
 from src.vdf_helpers import (
+    R_EARTH,
     create_coordinate_name,
     create_region_mask_re,
     get_cellid_with_vdf,
@@ -99,12 +105,30 @@ def predict_coordinate(
         downsample_factor=downsample_factor,
         log_eps=log_eps,
     )
-    predicted_label = int(model.predict(features)[0])
-    score_name, prediction_score = get_prediction_score(
+    vdf_coord_re = (
+        np.asarray(reader.get_cell_coordinates(int(cid)), dtype=float)
+        / R_EARTH
+    )
+    context_kwargs, point_reference_metadata = create_point_context_inputs(
+        config=config,
+        timestep=timestep,
+        file_source=resolved_file_source,
+        reader=reader,
+        vdf_coords_re=vdf_coord_re.reshape(1, 3),
+        model=model,
+    )
+    (
+        predicted_labels,
+        score_name,
+        prediction_scores,
+        _,
+    ) = predict_batch_with_scores(
         model=model,
         features=features,
-        predicted_label=predicted_label,
+        prediction_kwargs=context_kwargs,
     )
+    predicted_label = int(predicted_labels[0])
+    prediction_score = float(prediction_scores[0])
     predicted_class_name = label_to_class[predicted_label]
 
     extent, dv, threshold = get_vdf_plot_parameters_from_file(
@@ -118,9 +142,14 @@ def predict_coordinate(
         "x_re": float(coord_re[0]),
         "y_re": float(coord_re[1]),
         "z_re": float(coord_re[2]),
+        "vdf_x_re": float(vdf_coord_re[0]),
+        "vdf_y_re": float(vdf_coord_re[1]),
+        "vdf_z_re": float(vdf_coord_re[2]),
         "file_source": resolved_file_source,
         "file_location": str(file_location),
     }
+    for column, values in point_reference_metadata.items():
+        metadata_row[column] = values[0]
 
     coord_name = create_coordinate_name(coord_re)
     output_plot_path = output_dir / f"prediction_{coord_name}_xz.png"
@@ -137,7 +166,7 @@ def predict_coordinate(
         decision_score=prediction_score,
     )
 
-    return {
+    result = {
         "output_plot_path": output_plot_path,
         "predicted_label": predicted_label,
         "predicted_class_name": predicted_class_name,
@@ -145,6 +174,12 @@ def predict_coordinate(
         "prediction_score": prediction_score,
         "model_classes": model.classes_,
     }
+    if point_reference_metadata:
+        result["point_reference_metadata"] = {
+            column: values[0]
+            for column, values in point_reference_metadata.items()
+        }
+    return result
 
 
 def predict_region_timesteps(
@@ -288,6 +323,18 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
     cellids = cellids[region_mask]
     coords_re = coords_re[region_mask]
 
+    context_kwargs = {}
+    point_reference_metadata = {}
+    if len(cellids) > 0:
+        context_kwargs, point_reference_metadata = create_point_context_inputs(
+            config=config,
+            timestep=timestep,
+            file_source=resolved_file_source,
+            reader=reader,
+            vdf_coords_re=coords_re,
+            model=model,
+        )
+
     output_path = output_dir / f"predictions_timestep_{timestep}.csv"
     if hasattr(model, "predict_proba"):
         class_probability_fields = create_class_probability_fields(
@@ -309,7 +356,10 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
         "score_name",
         "prediction_score",
         "max_class_probability",
-    ] + class_probability_fields
+    ]
+    if model_uses_point_context(model):
+        fieldnames.extend(POINT_REFERENCE_METADATA_COLUMNS)
+    fieldnames.extend(class_probability_fields)
 
     with output_path.open("w", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=fieldnames)
@@ -335,13 +385,19 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
                     log_eps=log_eps,
                     n_jobs=feature_n_jobs,
                 )
-                predicted_labels = model.predict(features)
-                score_name, prediction_scores, probabilities = (
-                    get_batch_prediction_scores(
-                        model=model,
-                        features=features,
-                        predicted_labels=predicted_labels,
-                    )
+                batch_context_kwargs = {
+                    name: values[start:end]
+                    for name, values in context_kwargs.items()
+                }
+                (
+                    predicted_labels,
+                    score_name,
+                    prediction_scores,
+                    probabilities,
+                ) = predict_batch_with_scores(
+                    model=model,
+                    features=features,
+                    prediction_kwargs=batch_context_kwargs,
                 )
 
                 writer.writerows(
@@ -356,6 +412,10 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
                         probabilities=probabilities,
                         class_labels=model.classes_,
                         label_to_class=label_to_class,
+                        point_reference_metadata={
+                            column: values[start:end]
+                            for column, values in point_reference_metadata.items()
+                        },
                     )
                 )
 
@@ -366,6 +426,222 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
         "output_path": output_path,
         "n_selected_cells": int(len(cellids)),
     }
+
+
+def model_uses_point_context(model):
+    """
+    Return whether a model requires point-distance or point-vector inputs.
+
+    Parameters
+    ----------
+    model : object
+        Loaded classifier.
+
+    Returns
+    -------
+    bool
+        Whether point-context inputs are required during prediction.
+    """
+
+    if hasattr(model, "requires_point_context"):
+        return bool(model.requires_point_context)
+
+    return bool(
+        tuple(getattr(model, "distance_feature_names", ()))
+        or tuple(getattr(model, "vector_feature_names", ()))
+    )
+
+
+def create_point_context_inputs(
+    config,
+    timestep,
+    file_source,
+    reader,
+    vdf_coords_re,
+    model,
+):
+    """
+    Create all-nearest point geometry required by a trained model.
+
+    Parameters
+    ----------
+    config : dict
+        Prediction config containing matching flux templates and point-search
+        settings.
+    timestep : int
+        Timestep being predicted.
+    file_source : str
+        Selected bulk-file source name.
+    reader : analysator.vlsvfile.VlsvReader
+        Open reader for the matching bulk file.
+    vdf_coords_re : numpy.ndarray
+        VDF-cell-center coordinates with shape ``(n_samples, 3)``.
+    model : object
+        Loaded classifier.
+
+    Returns
+    -------
+    prediction_kwargs : dict
+        Distance/vector matrices keyed by model prediction argument name.
+    point_reference_metadata : dict
+        All-nearest metadata arrays in sample order.
+    """
+
+    if not model_uses_point_context(model):
+        return {}, {}
+
+    distance_feature_names = tuple(
+        getattr(model, "distance_feature_names", ())
+    )
+    vector_feature_names = tuple(
+        getattr(model, "vector_feature_names", ())
+    )
+    if not distance_feature_names and not vector_feature_names:
+        return {}, {}
+
+    points_config = config.get("points")
+    if not isinstance(points_config, dict):
+        raise ValueError(
+            "Topology-enabled prediction requires a points configuration"
+        )
+    flux_file_template = resolve_flux_file_template(
+        config=config,
+        file_source=file_source,
+    )
+    flux_file_location = create_path(
+        path_template=flux_file_template,
+        timestep=int(timestep),
+    )
+    if not flux_file_location.is_file():
+        raise FileNotFoundError(flux_file_location)
+
+    x_point_records, o_point_records = find_point_records(
+        reader=reader,
+        flux_file_location=flux_file_location,
+        points_config=points_config,
+    )
+    point_reference_metadata = create_point_reference_metadata_arrays(
+        vdf_coords_re=vdf_coords_re,
+        x_point_coords_re=[
+            point_record["coord_re"]
+            for point_record in x_point_records
+        ],
+        o_point_coords_re=[
+            point_record["coord_re"]
+            for point_record in o_point_records
+        ],
+    )
+
+    prediction_kwargs = {}
+    for argument_name, feature_names in (
+        ("distance_features", distance_feature_names),
+        ("vector_features", vector_feature_names),
+    ):
+        if not feature_names:
+            continue
+        missing_columns = sorted(
+            set(feature_names) - set(point_reference_metadata)
+        )
+        if missing_columns:
+            raise ValueError(
+                f"Model point-context columns are unavailable: {missing_columns}"
+            )
+        prediction_kwargs[argument_name] = np.column_stack(
+            [
+                point_reference_metadata[column]
+                for column in feature_names
+            ]
+        ).astype(np.float32, copy=False)
+
+    return prediction_kwargs, point_reference_metadata
+
+
+def resolve_flux_file_template(config, file_source):
+    """
+    Return the flux-file template for one prediction source.
+
+    Parameters
+    ----------
+    config : dict
+        Prediction config containing one flux template or a mapping of flux
+        templates by file source.
+    file_source : str
+        Selected bulk-file source name.
+
+    Returns
+    -------
+    str
+        Flux-file path template for the selected source.
+    """
+
+    flux_file_templates = config.get("flux_file_templates")
+    if flux_file_templates is not None:
+        if file_source not in flux_file_templates:
+            raise ValueError(
+                "Topology-enabled prediction has no flux template for "
+                f"file_source {file_source!r}"
+            )
+        return flux_file_templates[file_source]
+
+    flux_file_template = config.get("flux_file_template")
+    if flux_file_template is None:
+        raise ValueError(
+            "Topology-enabled prediction requires flux_file_templates or "
+            "flux_file_template"
+        )
+    return flux_file_template
+
+
+def predict_batch_with_scores(model, features, prediction_kwargs=None):
+    """
+    Predict one batch and avoid duplicate probability forward passes.
+
+    Parameters
+    ----------
+    model : object
+        Classifier with ``predict`` and optional ``predict_proba`` methods.
+    features : numpy.ndarray
+        VDF feature matrix for one prediction batch.
+    prediction_kwargs : dict, optional
+        Additional model inputs such as distance and vector matrices.
+
+    Returns
+    -------
+    predicted_labels : numpy.ndarray
+        Predicted project labels.
+    score_name : str
+        Human-readable prediction score name.
+    prediction_scores : numpy.ndarray
+        Predicted-class scores for each sample.
+    probabilities : numpy.ndarray or None
+        Class probabilities when supported by the model.
+    """
+
+    prediction_kwargs = prediction_kwargs or {}
+    if hasattr(model, "predict_proba"):
+        probabilities = np.asarray(
+            model.predict_proba(features, **prediction_kwargs)
+        )
+        class_indices = np.argmax(probabilities, axis=1)
+        predicted_labels = np.asarray(model.classes_)[class_indices]
+        prediction_scores = probabilities[
+            np.arange(len(predicted_labels)),
+            class_indices,
+        ]
+        return (
+            predicted_labels,
+            "Predicted probability",
+            prediction_scores.astype(float),
+            probabilities,
+        )
+
+    predicted_labels = model.predict(features, **prediction_kwargs)
+    score_name, prediction_scores, probabilities = get_batch_prediction_scores(
+        model=model,
+        features=features,
+        predicted_labels=predicted_labels,
+    )
+    return predicted_labels, score_name, prediction_scores, probabilities
 
 
 def resolve_file_source_and_template(config, file_source=None):
@@ -541,6 +817,7 @@ def create_region_prediction_rows(
     probabilities,
     class_labels,
     label_to_class,
+    point_reference_metadata=None,
 ):
     """
     Create CSV rows for one region-prediction batch.
@@ -567,6 +844,8 @@ def create_region_prediction_rows(
         Model class labels in probability-column order.
     label_to_class : dict
         Mapping from integer label to class name.
+    point_reference_metadata : dict, optional
+        Point-distance and vector arrays for the batch.
 
     Returns
     -------
@@ -574,6 +853,7 @@ def create_region_prediction_rows(
         CSV rows.
     """
 
+    point_reference_metadata = point_reference_metadata or {}
     rows = []
     for index, cid in enumerate(cellids):
         predicted_label = int(predicted_labels[index])
@@ -601,6 +881,9 @@ def create_region_prediction_rows(
                 row[f"prob_{class_name}"] = float(
                     probabilities[index, class_index]
                 )
+
+        for column, values in point_reference_metadata.items():
+            row[column] = float(values[index])
 
         rows.append(row)
 

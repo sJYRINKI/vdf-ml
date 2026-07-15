@@ -8,10 +8,10 @@ from src.vdf_helpers import R_EARTH, get_vdf_cellid_set
 
 
 SOURCE_POINT_STYLES = {
-    "reconnection": {
+    "x_point": {
         "color": "blue",
         "marker": "x",
-        "label": "reconnection",
+        "label": "X point",
         "s": 10,
     },
     "o_point": {

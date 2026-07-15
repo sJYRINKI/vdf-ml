@@ -94,7 +94,7 @@ if __name__=="__main__":
             "consensus",
         ],
         default=None,
-        help="Optional X/reconnection point-selection method override.",
+        help="Optional X-point selection method override.",
     )
     parser.add_argument(
         "--o-selection-method",

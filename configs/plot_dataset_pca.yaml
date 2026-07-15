@@ -22,6 +22,22 @@ features:
     batch_size: 64
     n_jobs: 8
 
+spatial_features:
+  distance:
+    enabled: true
+    weight: 1.0
+    columns:
+      - distance_to_x_point_re
+      - distance_to_o_point_re
+  vector:
+    enabled: true
+    weight: 1.0
+    columns:
+      - vdf_to_x_point_dx_re
+      - vdf_to_x_point_dz_re
+      - vdf_to_o_point_dx_re
+      - vdf_to_o_point_dz_re
+
 pca:
   backend: torch
   algorithm: lowrank
@@ -35,7 +51,7 @@ pca_fit:
   balanced: true
   samples_per_class: min
   #class_names: all
-  class_names: [exhaust, dayside, o_point, reconnection]
+  class_names: [exhaust, dayside, o_point, x_point]
   replace: false
   random_state: 1234
 
@@ -48,8 +64,8 @@ neighbor_metrics:
 filter_preview:
   enabled: true
   candidate_classes: [exhaust, dayside]
-  point_neighbor_classes: [reconnection, o_point]
-  protected_classes: [reconnection, o_point]
+  point_neighbor_classes: [x_point, o_point]
+  protected_classes: [x_point, o_point]
   apply_splits: [train]
   min_point_neighbor_fraction: 0.5
   min_point_neighbor_fraction_by_class:

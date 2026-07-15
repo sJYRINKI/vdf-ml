@@ -7,6 +7,7 @@ from sklearn.metrics import f1_score
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 import os
 
@@ -27,6 +28,17 @@ CNN_EMBEDDING_FILTER_REMOVED_FILENAME = (
 )
 CNN_EMBEDDING_FILTER_SUMMARY_FILENAME = "cnn_embedding_knn_filter_summary.txt"
 
+DEFAULT_DISTANCE_FEATURE_COLUMNS = (
+    "distance_to_x_point_re",
+    "distance_to_o_point_re",
+)
+DEFAULT_VECTOR_FEATURE_COLUMNS = (
+    "vdf_to_x_point_dx_re",
+    "vdf_to_x_point_dz_re",
+    "vdf_to_o_point_dx_re",
+    "vdf_to_o_point_dz_re",
+)
+
 from src.training import (
     create_metrics_text,
     create_predictions,
@@ -42,6 +54,7 @@ def apply_pytorch_cnn_training_filter_override(
     training_filter=None,
     dry_run=None,
     run_source_model=None,
+    topology_mode=None,
     class_weight=None,
     class_weight_by_class=None,
     sampler=None,
@@ -66,6 +79,9 @@ def apply_pytorch_cnn_training_filter_override(
         Optional training-filter dry-run override.
     run_source_model : bool, optional
         Optional CNN embedding source-model override.
+    topology_mode : {"none", "input", "auxiliary"}, optional
+        Optional topology-mode override. The ``none`` mode also disables the
+        distance and vector branches.
     class_weight : str, optional
         Optional model class-weight override.
     class_weight_by_class : sequence of str, optional
@@ -87,6 +103,18 @@ def apply_pytorch_cnn_training_filter_override(
     max_same_class_fraction_by_class : sequence of str, optional
         Optional class-specific same-class thresholds as ``class=value``.
     """
+
+    if topology_mode is not None:
+        topology_mode = str(topology_mode).strip().lower()
+        if topology_mode not in {"none", "input", "auxiliary"}:
+            raise ValueError(
+                "topology_mode must be one of: none, input, auxiliary"
+            )
+        model_config = config.setdefault("model", {})
+        model_config["topology_mode"] = topology_mode
+        if topology_mode == "none":
+            model_config.setdefault("distance_branch", {})["enabled"] = False
+            model_config.setdefault("vector_branch", {})["enabled"] = False
 
     if class_weight is not None:
         model_config = config.setdefault("model", {})
@@ -309,6 +337,35 @@ class PyTorchCNNClassifier(nn.Module):
         Spatial output shape of the final adaptive average pooling layer.
     prediction_batch_size : int, optional
         Number of feature rows predicted at once.
+    distance_feature_names : sequence of str, optional
+        Ordered point-distance feature names.
+    distance_hidden_size : int, optional
+        Number of neurons in the distance branch.
+    distance_loss_weight : float, optional
+        Weight of the auxiliary distance-regression loss.
+    distance_feature_impute : array-like of float, optional
+        Training-only median values used to impute distance features.
+    distance_feature_mean : array-like of float, optional
+        Training distance-feature means used for standardization.
+    distance_feature_scale : array-like of float, optional
+        Training distance-feature scales used for standardization.
+    vector_feature_names : sequence of str, optional
+        Ordered point-vector feature names.
+    vector_hidden_size : int, optional
+        Number of neurons in the point-vector branch.
+    vector_loss_weight : float, optional
+        Weight of the auxiliary vector-regression loss.
+    vector_feature_impute : array-like of float, optional
+        Training-only median values used to impute vector features.
+    vector_feature_mean : array-like of float, optional
+        Training vector-feature means used for standardization.
+    vector_feature_scale : array-like of float, optional
+        Training vector-feature scales used for standardization.
+    fusion_size : int, optional
+        Number of neurons in the fused hidden layer.
+    topology_mode : {"input", "auxiliary", "none"}, optional
+        Whether topology is a legacy prediction input, an auxiliary training
+        target, or disabled.
     """
 
     def __init__(
@@ -322,6 +379,20 @@ class PyTorchCNNClassifier(nn.Module):
         feature_scale,
         adaptive_pool_shape=(4, 4),
         prediction_batch_size=64,
+        distance_feature_names=(),
+        distance_hidden_size=8,
+        distance_loss_weight=0.0,
+        distance_feature_impute=None,
+        distance_feature_mean=None,
+        distance_feature_scale=None,
+        vector_feature_names=(),
+        vector_hidden_size=8,
+        vector_loss_weight=0.0,
+        vector_feature_impute=None,
+        vector_feature_mean=None,
+        vector_feature_scale=None,
+        fusion_size=None,
+        topology_mode="input",
     ):
         super().__init__()
 
@@ -335,6 +406,35 @@ class PyTorchCNNClassifier(nn.Module):
             adaptive_pool_shape
         )
         self.prediction_batch_size = int(prediction_batch_size)
+        self.distance_feature_names = tuple(
+            str(name) for name in distance_feature_names
+        )
+        self.vector_feature_names = tuple(
+            str(name) for name in vector_feature_names
+        )
+        self.distance_input_size = len(self.distance_feature_names)
+        self.vector_input_size = len(self.vector_feature_names)
+        self.distance_hidden_size = int(distance_hidden_size)
+        self.vector_hidden_size = int(vector_hidden_size)
+        self.distance_loss_weight = float(distance_loss_weight)
+        self.vector_loss_weight = float(vector_loss_weight)
+        self.topology_enabled = bool(
+            self.distance_input_size or self.vector_input_size
+        )
+        topology_mode = str(topology_mode).strip().lower()
+        if topology_mode not in {"input", "auxiliary", "none"}:
+            raise ValueError(
+                "topology_mode must be 'input', 'auxiliary', or 'none'"
+            )
+        if self.topology_enabled and topology_mode == "none":
+            raise ValueError("topology_mode cannot be none with topology features")
+        self.topology_mode = topology_mode if self.topology_enabled else "none"
+        self.context_enabled = self.topology_mode == "input"
+        self.auxiliary_topology_enabled = self.topology_mode == "auxiliary"
+        self.requires_point_context = self.context_enabled
+        self.fusion_size = int(
+            self.classifier_size if fusion_size is None else fusion_size
+        )
 
         if self.image_size ** 2 != self.input_size:
             raise ValueError("CNN input features must form a square image")
@@ -346,6 +446,32 @@ class PyTorchCNNClassifier(nn.Module):
             raise ValueError("dropout must be between zero and one")
         if self.prediction_batch_size <= 0:
             raise ValueError("prediction_batch_size must be positive")
+        if (
+            len(self.distance_feature_names) != len(set(self.distance_feature_names))
+            or any(not name for name in self.distance_feature_names)
+        ):
+            raise ValueError("distance_feature_names must be unique and non-empty")
+        if (
+            len(self.vector_feature_names) != len(set(self.vector_feature_names))
+            or any(not name for name in self.vector_feature_names)
+        ):
+            raise ValueError("vector_feature_names must be unique and non-empty")
+        if self.distance_input_size and self.distance_hidden_size <= 0:
+            raise ValueError("distance_hidden_size must be positive")
+        if self.vector_input_size and self.vector_hidden_size <= 0:
+            raise ValueError("vector_hidden_size must be positive")
+        if (
+            not np.isfinite(self.distance_loss_weight)
+            or self.distance_loss_weight < 0.0
+        ):
+            raise ValueError("distance_loss_weight must be finite and non-negative")
+        if (
+            not np.isfinite(self.vector_loss_weight)
+            or self.vector_loss_weight < 0.0
+        ):
+            raise ValueError("vector_loss_weight must be finite and non-negative")
+        if self.context_enabled and self.fusion_size <= 0:
+            raise ValueError("fusion_size must be positive")
 
         self.register_buffer(
             "feature_mean",
@@ -355,6 +481,32 @@ class PyTorchCNNClassifier(nn.Module):
             "feature_scale",
             torch.as_tensor(feature_scale, dtype=torch.float32),
         )
+
+        if self.distance_input_size:
+            self._register_context_preprocessing_buffers(
+                prefix="distance",
+                impute=distance_feature_impute,
+                mean=distance_feature_mean,
+                scale=distance_feature_scale,
+                input_size=self.distance_input_size,
+            )
+        else:
+            self.distance_feature_impute = None
+            self.distance_feature_mean = None
+            self.distance_feature_scale = None
+
+        if self.vector_input_size:
+            self._register_context_preprocessing_buffers(
+                prefix="vector",
+                impute=vector_feature_impute,
+                mean=vector_feature_mean,
+                scale=vector_feature_scale,
+                input_size=self.vector_input_size,
+            )
+        else:
+            self.vector_feature_impute = None
+            self.vector_feature_mean = None
+            self.vector_feature_scale = None
 
         convolution_layers = []
         input_channels = 1
@@ -376,26 +528,269 @@ class PyTorchCNNClassifier(nn.Module):
         convolution_layers.append(nn.AdaptiveAvgPool2d(self.adaptive_pool_shape))
         self.convolutions = nn.Sequential(*convolution_layers)
         pooled_height, pooled_width = self.adaptive_pool_shape
-        self.classifier = nn.Sequential(
+        classifier_layers = [
             nn.Flatten(),
             nn.Linear(
                 self.channels[-1] * pooled_height * pooled_width,
                 self.classifier_size,
             ),
             nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.classifier_size, len(self.classes_)),
+        ]
+        if not self.context_enabled:
+            classifier_layers.extend(
+                [
+                    nn.Dropout(self.dropout),
+                    nn.Linear(self.classifier_size, len(self.classes_)),
+                ]
+            )
+        self.classifier = nn.Sequential(*classifier_layers)
+
+        self.distance_branch = None
+        if self.distance_input_size:
+            if self.context_enabled:
+                self.distance_branch = nn.Sequential(
+                    nn.Linear(self.distance_input_size, self.distance_hidden_size),
+                    nn.ReLU(),
+                )
+            else:
+                self.distance_branch = nn.Sequential(
+                    nn.Linear(self.classifier_size, self.distance_hidden_size),
+                    nn.ReLU(),
+                    nn.Linear(self.distance_hidden_size, self.distance_input_size),
+                )
+
+        self.vector_branch = None
+        if self.vector_input_size:
+            if self.context_enabled:
+                self.vector_branch = nn.Sequential(
+                    nn.Linear(self.vector_input_size, self.vector_hidden_size),
+                    nn.ReLU(),
+                )
+            else:
+                self.vector_branch = nn.Sequential(
+                    nn.Linear(self.classifier_size, self.vector_hidden_size),
+                    nn.ReLU(),
+                    nn.Linear(self.vector_hidden_size, self.vector_input_size),
+                )
+
+        self.fusion = None
+        if self.context_enabled:
+            fused_input_size = self.classifier_size
+            if self.distance_input_size:
+                fused_input_size += self.distance_hidden_size
+            if self.vector_input_size:
+                fused_input_size += self.vector_hidden_size
+            self.fusion = nn.Sequential(
+                nn.Linear(fused_input_size, self.fusion_size),
+                nn.ReLU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.fusion_size, len(self.classes_)),
+            )
+
+    def _register_context_preprocessing_buffers(
+        self,
+        prefix,
+        impute,
+        mean,
+        scale,
+        input_size,
+    ):
+        """
+        Register preprocessing values for one optional topology branch.
+
+        Parameters
+        ----------
+        prefix : str
+            Branch name used in the registered buffer names.
+        impute : array-like of float or torch.Tensor or None
+            Training-only median values used to replace missing features.
+        mean : array-like of float or torch.Tensor or None
+            Training-feature means used for standardization.
+        scale : array-like of float or torch.Tensor or None
+            Training-feature scales used for standardization.
+        input_size : int
+            Number of configured topology values in the branch.
+        """
+
+        values_by_name = {
+            "impute": impute,
+            "mean": mean,
+            "scale": scale,
+        }
+        defaults = {
+            "impute": np.zeros(input_size, dtype=np.float32),
+            "mean": np.zeros(input_size, dtype=np.float32),
+            "scale": np.ones(input_size, dtype=np.float32),
+        }
+        for value_name, values in values_by_name.items():
+            if values is None:
+                values = defaults[value_name]
+            if isinstance(values, torch.Tensor):
+                values = values.detach().cpu().numpy()
+            values = np.asarray(values, dtype=np.float32)
+            if values.shape != (input_size,):
+                raise ValueError(
+                    f"{prefix}_feature_{value_name} must have shape "
+                    f"({input_size},)"
+                )
+            if not np.isfinite(values).all():
+                raise ValueError(
+                    f"{prefix}_feature_{value_name} must be finite"
+                )
+            if value_name == "scale" and np.any(values <= 0.0):
+                raise ValueError(f"{prefix}_feature_scale must be positive")
+            self.register_buffer(
+                f"{prefix}_feature_{value_name}",
+                torch.as_tensor(values, dtype=torch.float32),
+            )
+
+    def forward(self, features, distance_features=None, vector_features=None):
+        """
+        Return unnormalized class scores for a feature batch.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Flattened VDF xz-slice features with shape
+            ``(n_samples, input_size)``.
+        distance_features : torch.Tensor, optional
+            Legacy topology-input distances in ``distance_feature_names``
+            order. Auxiliary models do not use them for classification.
+        vector_features : torch.Tensor, optional
+            Legacy topology-input vectors in ``vector_feature_names`` order.
+            Auxiliary models do not use them for classification.
+
+        Returns
+        -------
+        torch.Tensor
+            Unnormalized class scores with one row per sample.
+        """
+
+        embeddings = self.forward_embeddings(
+            features,
+            distance_features=distance_features,
+            vector_features=vector_features,
         )
+        if self.context_enabled:
+            embeddings = self.fusion[2](embeddings)
+            return self.fusion[3](embeddings)
 
-    def forward(self, features):
-        """Return unnormalized class scores for a feature batch."""
-
-        embeddings = self.forward_embeddings(features)
         embeddings = self.classifier[3](embeddings)
         return self.classifier[4](embeddings)
 
-    def forward_embeddings(self, features):
-        """Return hidden-layer embeddings for a feature batch."""
+    def forward_training_outputs(
+        self,
+        features,
+        distance_features=None,
+        vector_features=None,
+    ):
+        """
+        Return class scores and optional auxiliary topology predictions.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Flattened VDF xz-slice features with shape
+            ``(n_samples, input_size)``.
+        distance_features : torch.Tensor, optional
+            Legacy point-distance inputs for a format-version 2 model.
+        vector_features : torch.Tensor, optional
+            Legacy point-vector inputs for a format-version 2 model.
+
+        Returns
+        -------
+        class_scores : torch.Tensor
+            Unnormalized class scores with one row per sample.
+        distance_predictions : torch.Tensor or None
+            Standardized distance predictions for auxiliary training.
+        vector_predictions : torch.Tensor or None
+            Standardized vector predictions for auxiliary training.
+        """
+
+        if not self.auxiliary_topology_enabled:
+            class_scores = self(
+                features,
+                distance_features=distance_features,
+                vector_features=vector_features,
+            )
+            return class_scores, None, None
+
+        embeddings = self.forward_vdf_embeddings(features)
+        class_scores = self.classifier[4](self.classifier[3](embeddings))
+        distance_predictions = None
+        if self.distance_branch is not None:
+            distance_predictions = self.distance_branch(embeddings)
+        vector_predictions = None
+        if self.vector_branch is not None:
+            vector_predictions = self.vector_branch(embeddings)
+        return class_scores, distance_predictions, vector_predictions
+
+    def forward_embeddings(
+        self,
+        features,
+        distance_features=None,
+        vector_features=None,
+    ):
+        """
+        Return the fused or VDF-only hidden-layer embeddings.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Flattened VDF xz-slice features with shape
+            ``(n_samples, input_size)``.
+        distance_features : torch.Tensor, optional
+            Legacy topology-input distances. Auxiliary models ignore them.
+        vector_features : torch.Tensor, optional
+            Legacy topology-input vectors. Auxiliary models ignore them.
+
+        Returns
+        -------
+        torch.Tensor
+            Fused context embeddings when a context branch is enabled,
+            otherwise VDF-only embeddings.
+        """
+
+        embeddings = [self.forward_vdf_embeddings(features)]
+        if self.context_enabled and self.distance_input_size:
+            embeddings.append(
+                self._forward_context_branch(
+                    features=distance_features,
+                    branch=self.distance_branch,
+                    prefix="distance",
+                    input_size=self.distance_input_size,
+                )
+            )
+        if self.context_enabled and self.vector_input_size:
+            embeddings.append(
+                self._forward_context_branch(
+                    features=vector_features,
+                    branch=self.vector_branch,
+                    prefix="vector",
+                    input_size=self.vector_input_size,
+                )
+            )
+        if not self.context_enabled:
+            return embeddings[0]
+
+        fused_features = torch.cat(embeddings, dim=1)
+        return self.fusion[1](self.fusion[0](fused_features))
+
+    def forward_vdf_embeddings(self, features):
+        """
+        Return hidden-layer embeddings from the VDF branch.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Flattened VDF xz-slice features with shape
+            ``(n_samples, input_size)``.
+
+        Returns
+        -------
+        torch.Tensor
+            VDF-branch hidden-layer embeddings.
+        """
 
         features = (features - self.feature_mean) / self.feature_scale
         images = features.reshape(
@@ -409,14 +804,93 @@ class PyTorchCNNClassifier(nn.Module):
         hidden_features = self.classifier[1](flattened_features)
         return self.classifier[2](hidden_features)
 
-    def predict(self, features):
-        """Predict project class labels."""
+    def _forward_context_branch(self, features, branch, prefix, input_size):
+        """
+        Impute, standardize, and encode one topology-input feature batch.
 
-        class_indices = np.argmax(self.predict_proba(features), axis=1)
+        Parameters
+        ----------
+        features : torch.Tensor
+            Context features with one row per VDF sample.
+        branch : torch.nn.Module
+            Linear topology-input branch used to encode standardized values.
+        prefix : {"distance", "vector"}
+            Branch name used to select its preprocessing buffers.
+        input_size : int
+            Number of expected input features for the branch.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded topology-input features.
+        """
+
+        if features is None:
+            raise ValueError(f"{prefix}_features are required by this model")
+        if features.ndim != 2 or features.shape[1] != input_size:
+            raise ValueError(
+                f"Expected {prefix}_features with shape "
+                f"(n_samples, {input_size})"
+            )
+        impute = getattr(self, f"{prefix}_feature_impute")
+        mean = getattr(self, f"{prefix}_feature_mean")
+        scale = getattr(self, f"{prefix}_feature_scale")
+        features = torch.where(torch.isnan(features), impute, features)
+        return branch((features - mean) / scale)
+
+    def predict(self, features, distance_features=None, vector_features=None):
+        """
+        Predict project class labels.
+
+        Parameters
+        ----------
+        features : array-like of float
+            Flattened VDF xz-slice features.
+        distance_features : array-like of float, optional
+            Legacy topology-input distances. Auxiliary models ignore them.
+        vector_features : array-like of float, optional
+            Legacy topology-input vectors. Auxiliary models ignore them.
+
+        Returns
+        -------
+        numpy.ndarray
+            Predicted project class label for each sample.
+        """
+
+        class_indices = np.argmax(
+            self.predict_proba(
+                features,
+                distance_features=distance_features,
+                vector_features=vector_features,
+            ),
+            axis=1,
+        )
         return self.classes_[class_indices]
 
-    def predict_proba(self, features):
-        """Predict class probabilities in ``classes_`` order."""
+    def predict_proba(
+        self,
+        features,
+        distance_features=None,
+        vector_features=None,
+    ):
+        """
+        Predict class probabilities in ``classes_`` order.
+
+        Parameters
+        ----------
+        features : array-like of float
+            Flattened VDF xz-slice features.
+        distance_features : array-like of float, optional
+            Legacy topology-input distances. Auxiliary models ignore them.
+        vector_features : array-like of float, optional
+            Legacy topology-input vectors. Auxiliary models ignore them.
+
+        Returns
+        -------
+        numpy.ndarray
+            Class probabilities with one row per sample and columns in
+            ``classes_`` order.
+        """
 
         features = np.asarray(features, dtype=np.float32)
         if features.ndim != 2 or features.shape[1] != self.input_size:
@@ -424,6 +898,22 @@ class PyTorchCNNClassifier(nn.Module):
                 "Expected feature matrix with shape "
                 f"(n_samples, {self.input_size})"
             )
+        if self.requires_point_context:
+            distance_features = self._prepare_prediction_context_features(
+                features=distance_features,
+                prefix="distance",
+                input_size=self.distance_input_size,
+                n_samples=len(features),
+            )
+            vector_features = self._prepare_prediction_context_features(
+                features=vector_features,
+                prefix="vector",
+                input_size=self.vector_input_size,
+                n_samples=len(features),
+            )
+        else:
+            distance_features = None
+            vector_features = None
 
         device = self.feature_mean.device
         was_training = self.training
@@ -440,15 +930,122 @@ class PyTorchCNNClassifier(nn.Module):
                     dtype=torch.float32,
                     device=device,
                 )
+                distance_batch = self._create_prediction_context_batch(
+                    features=distance_features,
+                    start=start,
+                    end=end,
+                    device=device,
+                )
+                vector_batch = self._create_prediction_context_batch(
+                    features=vector_features,
+                    start=start,
+                    end=end,
+                    device=device,
+                )
                 probabilities[start:end] = (
-                    torch.softmax(self(feature_batch), dim=1).cpu().numpy()
+                    torch.softmax(
+                        self(
+                            feature_batch,
+                            distance_features=distance_batch,
+                            vector_features=vector_batch,
+                        ),
+                        dim=1,
+                    )
+                    .cpu()
+                    .numpy()
                 )
 
         if was_training:
             self.train()
         return probabilities
 
-    def transform_embeddings(self, features, batch_size=None):
+    def _prepare_prediction_context_features(
+        self,
+        features,
+        prefix,
+        input_size,
+        n_samples,
+    ):
+        """
+        Validate one optional context matrix for prediction.
+
+        Parameters
+        ----------
+        features : array-like of float or None
+            Context feature matrix to validate.
+        prefix : {"distance", "vector"}
+            Branch name used in validation messages.
+        input_size : int
+            Number of context features required by the branch.
+        n_samples : int
+            Number of VDF samples that the context matrix must match.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Float32 context matrix, or ``None`` when the branch is disabled.
+        """
+
+        if input_size == 0:
+            if features is not None:
+                features = np.asarray(features)
+                if features.size:
+                    raise ValueError(
+                        f"This model does not use {prefix}_features"
+                    )
+            return None
+        if features is None:
+            raise ValueError(f"{prefix}_features are required by this model")
+
+        features = np.asarray(features, dtype=np.float32)
+        if features.ndim != 2 or features.shape != (n_samples, input_size):
+            raise ValueError(
+                f"Expected {prefix}_features with shape "
+                f"({n_samples}, {input_size})"
+            )
+        if np.isinf(features).any():
+            raise ValueError(f"{prefix}_features must not contain infinity")
+        return features
+
+    @staticmethod
+    def _create_prediction_context_batch(features, start, end, device):
+        """
+        Create one optional context tensor for a prediction batch.
+
+        Parameters
+        ----------
+        features : numpy.ndarray or None
+            Full context feature matrix.
+        start : int
+            Inclusive start row of the prediction batch.
+        end : int
+            Exclusive end row of the prediction batch.
+        device : torch.device
+            Device where the prediction tensor is created.
+
+        Returns
+        -------
+        torch.Tensor or None
+            Float32 context tensor for the requested rows, or ``None`` when
+            the branch is disabled.
+        """
+
+        if features is None:
+            return None
+        return torch.as_tensor(
+            features[start:end],
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def transform_embeddings(
+        self,
+        features,
+        batch_size=None,
+        *,
+        distance_features=None,
+        vector_features=None,
+    ):
         """
         Extract CNN hidden-layer embeddings.
 
@@ -458,6 +1055,10 @@ class PyTorchCNNClassifier(nn.Module):
             Flattened VDF xz-slice features.
         batch_size : int, optional
             Number of feature rows transformed at once.
+        distance_features : array-like, optional
+            Legacy topology-input distances. Auxiliary models ignore them.
+        vector_features : array-like, optional
+            Legacy topology-input vectors. Auxiliary models ignore them.
 
         Returns
         -------
@@ -471,6 +1072,22 @@ class PyTorchCNNClassifier(nn.Module):
                 "Expected feature matrix with shape "
                 f"(n_samples, {self.input_size})"
             )
+        if self.requires_point_context:
+            distance_features = self._prepare_prediction_context_features(
+                features=distance_features,
+                prefix="distance",
+                input_size=self.distance_input_size,
+                n_samples=len(features),
+            )
+            vector_features = self._prepare_prediction_context_features(
+                features=vector_features,
+                prefix="vector",
+                input_size=self.vector_input_size,
+                n_samples=len(features),
+            )
+        else:
+            distance_features = None
+            vector_features = None
         if batch_size is None:
             batch_size = self.prediction_batch_size
         batch_size = int(batch_size)
@@ -481,7 +1098,10 @@ class PyTorchCNNClassifier(nn.Module):
         was_training = self.training
         self.eval()
         embeddings = np.empty(
-            (len(features), self.classifier_size),
+            (
+                len(features),
+                self.fusion_size if self.context_enabled else self.classifier_size,
+            ),
             dtype=np.float32,
         )
         with torch.inference_mode():
@@ -492,8 +1112,26 @@ class PyTorchCNNClassifier(nn.Module):
                     dtype=torch.float32,
                     device=device,
                 )
+                distance_batch = self._create_prediction_context_batch(
+                    features=distance_features,
+                    start=start,
+                    end=end,
+                    device=device,
+                )
+                vector_batch = self._create_prediction_context_batch(
+                    features=vector_features,
+                    start=start,
+                    end=end,
+                    device=device,
+                )
                 embeddings[start:end] = (
-                    self.forward_embeddings(feature_batch).cpu().numpy()
+                    self.forward_embeddings(
+                        feature_batch,
+                        distance_features=distance_batch,
+                        vector_features=vector_batch,
+                    )
+                    .cpu()
+                    .numpy()
                 )
 
         if was_training:
@@ -550,6 +1188,16 @@ def train_pytorch_convolutional_neural_network_classifier(
     patience = int(model_config.get("patience", 15))
     tolerance = float(model_config.get("tolerance", 1e-4))
     random_seed = int(model_config.get("random_state", 1234))
+    distance_branch_config = _resolve_context_branch_config(
+        model_config=model_config,
+        branch_name="distance",
+        default_feature_columns=DEFAULT_DISTANCE_FEATURE_COLUMNS,
+    )
+    vector_branch_config = _resolve_context_branch_config(
+        model_config=model_config,
+        branch_name="vector",
+        default_feature_columns=DEFAULT_VECTOR_FEATURE_COLUMNS,
+    )
 
     if weight_decay < 0.0 or learning_rate <= 0.0:
         raise ValueError("weight_decay must be non-negative and learning rate positive")
@@ -567,6 +1215,11 @@ def train_pytorch_convolutional_neural_network_classifier(
         dataset_id=dataset_id,
         model_id=model_id,
         target_kind="multiclass",
+    )
+    _add_cnn_context_features(
+        data=data,
+        distance_branch_config=distance_branch_config,
+        vector_branch_config=vector_branch_config,
     )
     embedding_filter_source_result = _run_training_filter_cnn_embedding_knn(
         config=config,
@@ -626,6 +1279,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         data=data,
         report_labels=class_labels,
         target_names=class_names,
+        predict_kwargs_by_split=_create_context_kwargs_by_split(model, data),
     )
     print("PyTorch convolutional neural network classifier results")
     print(f"Train accuracy: {results['train_accuracy']}")
@@ -700,6 +1354,16 @@ def train_pytorch_convolutional_neural_network_classifier(
         f"Convolution channels: {channels}",
         f"Adaptive pool shape: {adaptive_pool_shape}",
         f"Classifier size: {classifier_size}",
+        f"Topology mode: {model.topology_mode}",
+        f"Distance branch enabled: {model.distance_input_size > 0}",
+        f"Distance feature columns: {list(model.distance_feature_names)}",
+        f"Distance branch size: {model.distance_hidden_size}",
+        f"Distance loss weight: {model.distance_loss_weight}",
+        f"Vector branch enabled: {model.vector_input_size > 0}",
+        f"Vector feature columns: {list(model.vector_feature_names)}",
+        f"Vector branch size: {model.vector_hidden_size}",
+        f"Vector loss weight: {model.vector_loss_weight}",
+        f"Fusion size: {model.fusion_size if model.context_enabled else 'none'}",
         f"Dropout: {dropout}",
         f"Class weight: {class_weight}",
         f"Sampler enabled: {sampler_info['enabled']}",
@@ -758,6 +1422,11 @@ def train_pytorch_convolutional_neural_network_classifier(
             "class_labels": class_labels,
             "class_names": np.asarray(class_names),
             "adaptive_pool_shape": np.asarray(adaptive_pool_shape, dtype=int),
+            "topology_mode": np.asarray(model.topology_mode),
+            "distance_feature_names": np.asarray(model.distance_feature_names),
+            "distance_loss_weight": model.distance_loss_weight,
+            "vector_feature_names": np.asarray(model.vector_feature_names),
+            "vector_loss_weight": model.vector_loss_weight,
         },
         predictions=predictions,
         metrics_text=create_metrics_text(
@@ -801,9 +1470,18 @@ def _add_prediction_probabilities(
 
     probabilities = np.concatenate(
         [
-            model.predict_proba(data["X_train_features"]),
-            model.predict_proba(data["X_validation_features"]),
-            model.predict_proba(data["X_test_features"]),
+            model.predict_proba(
+                data["X_train_features"],
+                **_create_context_kwargs(model, data, "train"),
+            ),
+            model.predict_proba(
+                data["X_validation_features"],
+                **_create_context_kwargs(model, data, "validation"),
+            ),
+            model.predict_proba(
+                data["X_test_features"],
+                **_create_context_kwargs(model, data, "test"),
+            ),
         ],
         axis=0,
     )
@@ -862,7 +1540,8 @@ def load_pytorch_cnn_checkpoint(
     except TypeError:
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    if int(checkpoint["format_version"]) != 1:
+    format_version = int(checkpoint["format_version"])
+    if format_version not in {1, 2, 3}:
         raise ValueError(
             "Unsupported PyTorch CNN checkpoint format version: "
             f"{checkpoint['format_version']}"
@@ -875,6 +1554,21 @@ def load_pytorch_cnn_checkpoint(
         raise ValueError("Checkpoint class-label count does not match model output")
 
     input_size = int(checkpoint["input_size"])
+    if format_version == 1:
+        distance_feature_names = ()
+        vector_feature_names = ()
+        topology_mode = "none"
+    else:
+        distance_feature_names = tuple(
+            checkpoint.get("distance_feature_names", ())
+        )
+        vector_feature_names = tuple(checkpoint.get("vector_feature_names", ()))
+        if not distance_feature_names and not vector_feature_names:
+            raise ValueError(
+                f"Format-version {format_version} CNN checkpoint has no "
+                "topology features"
+            )
+        topology_mode = "input" if format_version == 2 else "auxiliary"
     model = PyTorchCNNClassifier(
         input_size=input_size,
         channels=checkpoint["channels"],
@@ -885,31 +1579,338 @@ def load_pytorch_cnn_checkpoint(
         feature_scale=np.ones(input_size, dtype=np.float32),
         adaptive_pool_shape=checkpoint.get("adaptive_pool_shape", [4, 4]),
         prediction_batch_size=prediction_batch_size,
+        distance_feature_names=distance_feature_names,
+        distance_hidden_size=int(checkpoint.get("distance_hidden_size", 8)),
+        distance_loss_weight=float(
+            checkpoint.get("distance_loss_weight", 0.0)
+        ),
+        distance_feature_impute=checkpoint.get("distance_feature_impute"),
+        distance_feature_mean=checkpoint.get("distance_feature_mean"),
+        distance_feature_scale=checkpoint.get("distance_feature_scale"),
+        vector_feature_names=vector_feature_names,
+        vector_hidden_size=int(checkpoint.get("vector_hidden_size", 8)),
+        vector_loss_weight=float(checkpoint.get("vector_loss_weight", 0.0)),
+        vector_feature_impute=checkpoint.get("vector_feature_impute"),
+        vector_feature_mean=checkpoint.get("vector_feature_mean"),
+        vector_feature_scale=checkpoint.get("vector_feature_scale"),
+        fusion_size=int(
+            checkpoint.get("fusion_size", checkpoint["classifier_size"])
+        ),
+        topology_mode=topology_mode,
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     return model.to(device).eval()
 
 
 def save_pytorch_cnn_checkpoint(model, checkpoint_path):
-    """Save model weights and architecture information."""
+    """
+    Save model weights, preprocessing values, and architecture information.
 
-    torch.save(
-        {
-            "format_version": 1,
-            "model_state_dict": {
-                name: value.detach().cpu()
-                for name, value in model.state_dict().items()
-            },
-            "input_size": model.input_size,
-            "channels": list(model.channels),
-            "classifier_size": model.classifier_size,
-            "adaptive_pool_shape": list(model.adaptive_pool_shape),
-            "dropout": model.dropout,
-            "n_classes": len(model.classes_),
-            "class_labels": torch.as_tensor(model.classes_, dtype=torch.int64),
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        Trained CNN classifier to save.
+    checkpoint_path : str or pathlib.Path
+        Output path for the PyTorch checkpoint.
+    """
+
+    if model.context_enabled:
+        format_version = 2
+    elif model.auxiliary_topology_enabled:
+        format_version = 3
+    else:
+        format_version = 1
+
+    checkpoint = {
+        "format_version": format_version,
+        "model_state_dict": {
+            name: value.detach().cpu()
+            for name, value in model.state_dict().items()
         },
-        checkpoint_path,
-    )
+        "input_size": model.input_size,
+        "channels": list(model.channels),
+        "classifier_size": model.classifier_size,
+        "adaptive_pool_shape": list(model.adaptive_pool_shape),
+        "dropout": model.dropout,
+        "n_classes": len(model.classes_),
+        "class_labels": torch.as_tensor(model.classes_, dtype=torch.int64),
+    }
+    if model.topology_enabled:
+        checkpoint.update(
+            {
+                "distance_feature_names": list(model.distance_feature_names),
+                "distance_hidden_size": model.distance_hidden_size,
+                "distance_feature_impute": _cpu_buffer(
+                    model.distance_feature_impute
+                ),
+                "distance_feature_mean": _cpu_buffer(model.distance_feature_mean),
+                "distance_feature_scale": _cpu_buffer(
+                    model.distance_feature_scale
+                ),
+                "vector_feature_names": list(model.vector_feature_names),
+                "vector_hidden_size": model.vector_hidden_size,
+                "vector_feature_impute": _cpu_buffer(model.vector_feature_impute),
+                "vector_feature_mean": _cpu_buffer(model.vector_feature_mean),
+                "vector_feature_scale": _cpu_buffer(model.vector_feature_scale),
+            }
+        )
+    if model.context_enabled:
+        checkpoint["fusion_size"] = model.fusion_size
+    if model.auxiliary_topology_enabled:
+        checkpoint.update(
+            {
+                "distance_loss_weight": model.distance_loss_weight,
+                "vector_loss_weight": model.vector_loss_weight,
+            }
+        )
+
+    torch.save(checkpoint, checkpoint_path)
+
+
+def _cpu_buffer(buffer):
+    """
+    Return an optional model buffer on the CPU.
+
+    Parameters
+    ----------
+    buffer : torch.Tensor or None
+        Registered model buffer to copy to the CPU.
+
+    Returns
+    -------
+    torch.Tensor or None
+        CPU buffer, or ``None`` when the branch has no buffer.
+    """
+
+    if buffer is None:
+        return None
+    return buffer.detach().cpu()
+
+
+def _resolve_context_branch_config(
+    model_config,
+    branch_name,
+    default_feature_columns,
+):
+    """
+    Resolve one optional CNN context-branch configuration.
+
+    Parameters
+    ----------
+    model_config : dict
+        CNN model configuration.
+    branch_name : {"distance", "vector"}
+        Name of the topology branch to resolve.
+    default_feature_columns : sequence of str
+        Metadata columns used when the branch does not configure columns.
+
+    Returns
+    -------
+    dict
+        Validated branch settings, feature columns, hidden size, and loss
+        weight.
+    """
+
+    config = dict(model_config.get(f"{branch_name}_branch", {}) or {})
+    feature_columns = config.get("feature_columns", default_feature_columns)
+    if isinstance(feature_columns, str):
+        feature_columns = [feature_columns]
+    feature_columns = tuple(str(column) for column in feature_columns)
+    if len(feature_columns) != len(set(feature_columns)):
+        raise ValueError(
+            f"model.{branch_name}_branch.feature_columns contains duplicates"
+        )
+
+    hidden_size = int(config.get("hidden_size", 8))
+    if hidden_size <= 0:
+        raise ValueError(f"model.{branch_name}_branch.hidden_size must be positive")
+    loss_weight = float(config.get("loss_weight", 0.0))
+    if not np.isfinite(loss_weight) or loss_weight < 0.0:
+        raise ValueError(
+            f"model.{branch_name}_branch.loss_weight must be finite and "
+            "non-negative"
+        )
+
+    return {
+        "enabled": bool(config.get("enabled", False)),
+        "feature_columns": feature_columns,
+        "hidden_size": hidden_size,
+        "loss_weight": loss_weight,
+    }
+
+
+def _add_cnn_context_features(
+    data,
+    distance_branch_config,
+    vector_branch_config,
+):
+    """
+    Extract configured distance and vector matrices from dataset metadata.
+
+    Parameters
+    ----------
+    data : dict
+        Training data and metadata returned by ``load_training_data``. The
+        dictionary is updated in place with topology arrays for each split.
+    distance_branch_config : dict
+        Resolved distance-branch configuration.
+    vector_branch_config : dict
+        Resolved vector-branch configuration.
+    """
+
+    metadata = data["metadata"]
+    data["distance_branch_config"] = distance_branch_config
+    data["vector_branch_config"] = vector_branch_config
+
+    for branch_name, branch_config in [
+        ("distance", distance_branch_config),
+        ("vector", vector_branch_config),
+    ]:
+        if not branch_config["enabled"]:
+            data[f"{branch_name}_feature_names"] = ()
+            for split_name in ["train", "validation", "test"]:
+                data[f"X_{split_name}_{branch_name}_features"] = None
+            continue
+
+        feature_names = list(branch_config["feature_columns"])
+        missing_columns = [
+            column for column in feature_names if column not in metadata.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                f"CNN {branch_name} branch metadata is missing columns: "
+                f"{missing_columns}"
+            )
+        if not feature_names:
+            raise ValueError(
+                f"CNN {branch_name} branch must configure at least one feature"
+            )
+
+        feature_names = tuple(feature_names)
+        data[f"{branch_name}_feature_names"] = feature_names
+        for split_name in ["train", "validation", "test"]:
+            indices = data[f"{split_name}_indices"]
+            branch_features = (
+                metadata.iloc[indices]
+                .loc[:, list(feature_names)]
+                .to_numpy(dtype=np.float32, copy=True)
+            )
+            if np.isinf(branch_features).any():
+                raise ValueError(
+                    f"CNN {branch_name} metadata features must not contain "
+                    "infinity"
+                )
+            data[f"X_{split_name}_{branch_name}_features"] = branch_features
+
+
+def _fit_context_preprocessing(features, feature_names, branch_name):
+    """
+    Fit train-only median imputation and standardization values.
+
+    Parameters
+    ----------
+    features : array-like of float or None
+        Training topology matrix in Earth radii.
+    feature_names : sequence of str
+        Ordered metadata column names represented by ``features``.
+    branch_name : {"distance", "vector"}
+        Branch name used in validation messages.
+
+    Returns
+    -------
+    dict
+        Median imputation values, feature means, and feature scales fitted
+        from the training split only.
+    """
+
+    feature_names = tuple(feature_names)
+    if not feature_names:
+        return {"impute": None, "mean": None, "scale": None}
+
+    features = np.asarray(features, dtype=np.float32)
+    if features.ndim != 2 or features.shape[1] != len(feature_names):
+        raise ValueError(
+            f"CNN {branch_name} feature matrix does not match configured columns"
+        )
+    if np.isinf(features).any():
+        raise ValueError(
+            f"CNN {branch_name} training features must not contain infinity"
+        )
+    finite = np.isfinite(features)
+    all_missing = np.flatnonzero(~finite.any(axis=0))
+    if len(all_missing):
+        missing_names = [feature_names[index] for index in all_missing]
+        raise ValueError(
+            f"CNN {branch_name} training columns are entirely nonfinite: "
+            f"{missing_names}"
+        )
+
+    finite_or_nan = np.where(finite, features, np.nan)
+    impute = np.nanmedian(finite_or_nan, axis=0).astype(np.float32, copy=False)
+    imputed_features = np.where(finite, features, impute)
+    scaler = StandardScaler().fit(imputed_features)
+    return {
+        "impute": impute,
+        "mean": np.asarray(scaler.mean_, dtype=np.float32),
+        "scale": np.asarray(scaler.scale_, dtype=np.float32),
+    }
+
+
+def _create_context_kwargs(model, data, split_name):
+    """
+    Create optional CNN prediction arguments for one dataset split.
+
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        CNN whose prediction-input mode determines whether context is used.
+    data : dict
+        Training data containing optional distance and vector arrays.
+    split_name : {"train", "validation", "test"}
+        Dataset split used to select topology-input arrays when required.
+
+    Returns
+    -------
+    dict
+        Optional ``distance_features`` and ``vector_features`` keyword
+        arguments accepted by the CNN prediction methods.
+    """
+
+    if not model.requires_point_context:
+        return {}
+
+    kwargs = {}
+    distance_features = data.get(f"X_{split_name}_distance_features")
+    if distance_features is not None:
+        kwargs["distance_features"] = distance_features
+    vector_features = data.get(f"X_{split_name}_vector_features")
+    if vector_features is not None:
+        kwargs["vector_features"] = vector_features
+    return kwargs
+
+
+def _create_context_kwargs_by_split(model, data):
+    """
+    Create optional CNN prediction arguments for all dataset splits.
+
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        CNN whose prediction-input mode determines whether context is used.
+    data : dict
+        Training data containing optional distance and vector arrays.
+
+    Returns
+    -------
+    dict
+        Prediction keyword arguments keyed by train, validation, and test
+        split names.
+    """
+
+    return {
+        split_name: _create_context_kwargs(model, data, split_name)
+        for split_name in ["train", "validation", "test"]
+    }
 
 
 def _train_cnn_model_for_data(
@@ -1004,6 +2005,18 @@ def _train_cnn_model_for_data(
     )
 
     scaler = StandardScaler().fit(data["X_train_features"])
+    distance_preprocessing = _fit_context_preprocessing(
+        features=data.get("X_train_distance_features"),
+        feature_names=data.get("distance_feature_names", ()),
+        branch_name="distance",
+    )
+    vector_preprocessing = _fit_context_preprocessing(
+        features=data.get("X_train_vector_features"),
+        feature_names=data.get("vector_feature_names", ()),
+        branch_name="vector",
+    )
+    distance_branch_config = data["distance_branch_config"]
+    vector_branch_config = data["vector_branch_config"]
     device = _resolve_device(model_config.get("device", "auto"))
     deterministic = bool(model_config.get("deterministic", False))
     _set_random_seed(random_seed, deterministic)
@@ -1028,6 +2041,20 @@ def _train_cnn_model_for_data(
         feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
         adaptive_pool_shape=adaptive_pool_shape,
         prediction_batch_size=prediction_batch_size,
+        distance_feature_names=data["distance_feature_names"],
+        distance_hidden_size=distance_branch_config["hidden_size"],
+        distance_loss_weight=distance_branch_config["loss_weight"],
+        distance_feature_impute=distance_preprocessing["impute"],
+        distance_feature_mean=distance_preprocessing["mean"],
+        distance_feature_scale=distance_preprocessing["scale"],
+        vector_feature_names=data["vector_feature_names"],
+        vector_hidden_size=vector_branch_config["hidden_size"],
+        vector_loss_weight=vector_branch_config["loss_weight"],
+        vector_feature_impute=vector_preprocessing["impute"],
+        vector_feature_mean=vector_preprocessing["mean"],
+        vector_feature_scale=vector_preprocessing["scale"],
+        fusion_size=int(model_config.get("fusion_size", classifier_size)),
+        topology_mode=model_config.get("topology_mode", "input"),
     ).to(device)
 
     print("Configured classes:")
@@ -1040,8 +2067,14 @@ def _train_cnn_model_for_data(
     training_result = _fit_model(
         model=model,
         features=data["X_train_features"],
+        distance_features=data.get("X_train_distance_features"),
+        vector_features=data.get("X_train_vector_features"),
         targets=y_train,
         validation_features=data["X_validation_features"],
+        validation_distance_features=data.get(
+            "X_validation_distance_features"
+        ),
+        validation_vector_features=data.get("X_validation_vector_features"),
         validation_targets=y_validation,
         class_weights=class_weights,
         sampler=sampler,
@@ -1072,8 +2105,12 @@ def _train_cnn_model_for_data(
 def _fit_model(
     model,
     features,
+    distance_features,
+    vector_features,
     targets,
     validation_features,
+    validation_distance_features,
+    validation_vector_features,
     validation_targets,
     class_weights,
     sampler,
@@ -1087,11 +2124,80 @@ def _fit_model(
     patience,
     random_seed,
 ):
+    """
+    Fit a CNN with optional topology-input or auxiliary topology branches.
+
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        CNN classifier to train.
+    features : array-like of float
+        Flattened training VDF xz-slice features.
+    distance_features : array-like of float or None
+        Training point distances in Earth radii in the model's configured
+        order.
+    vector_features : array-like of float or None
+        Training VDF-to-point vector components in Earth radii in the model's
+        configured order.
+    targets : numpy.ndarray
+        Encoded training class indices.
+    validation_features : array-like of float
+        Flattened validation VDF xz-slice features.
+    validation_distance_features : array-like of float or None
+        Validation distance features in the model's configured order.
+    validation_vector_features : array-like of float or None
+        Validation vector features in the model's configured order.
+    validation_targets : numpy.ndarray
+        Encoded validation class indices.
+    class_weights : numpy.ndarray or None
+        Optional class weights in model-output order.
+    sampler : torch.utils.data.Sampler or None
+        Optional sampler for selecting training rows.
+    device : torch.device
+        Device used for model fitting.
+    batch_size : int
+        Number of training samples in each optimization batch.
+    learning_rate : float
+        AdamW learning rate.
+    weight_decay : float
+        AdamW weight-decay coefficient.
+    max_epochs : int
+        Maximum number of training epochs.
+    early_stopping : bool
+        Whether to stop using validation macro F1.
+    tolerance : float
+        Minimum score improvement that resets early-stopping patience.
+    patience : int
+        Number of epochs without improvement before stopping.
+    random_seed : int
+        Seed used for shuffled training batches.
+
+    Returns
+    -------
+    dict
+        Epoch count, best epoch and validation score, and final training loss.
+    """
+
     features = np.asarray(features, dtype=np.float32)
-    dataset = TensorDataset(
-        torch.from_numpy(features),
-        torch.from_numpy(targets),
+    distance_features = model._prepare_prediction_context_features(
+        features=distance_features,
+        prefix="distance",
+        input_size=model.distance_input_size,
+        n_samples=len(features),
     )
+    vector_features = model._prepare_prediction_context_features(
+        features=vector_features,
+        prefix="vector",
+        input_size=model.vector_input_size,
+        n_samples=len(features),
+    )
+    dataset_tensors = [torch.from_numpy(features)]
+    if distance_features is not None:
+        dataset_tensors.append(torch.from_numpy(distance_features))
+    if vector_features is not None:
+        dataset_tensors.append(torch.from_numpy(vector_features))
+    dataset_tensors.append(torch.from_numpy(targets))
+    dataset = TensorDataset(*dataset_tensors)
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -1127,25 +2233,77 @@ def _fit_model(
         model.train()
         total_loss = torch.zeros((), dtype=torch.float32, device=device)
 
-        for feature_batch, target_batch in data_loader:
+        for batch in data_loader:
+            feature_batch = batch[0]
+            batch_position = 1
+            distance_batch = None
+            if model.distance_input_size:
+                distance_batch = batch[batch_position]
+                batch_position += 1
+            vector_batch = None
+            if model.vector_input_size:
+                vector_batch = batch[batch_position]
+            target_batch = batch[-1]
             feature_batch = feature_batch.to(
                 device,
                 non_blocking=device.type == "cuda",
             )
+            if distance_batch is not None:
+                distance_batch = distance_batch.to(
+                    device,
+                    non_blocking=device.type == "cuda",
+                )
+            if vector_batch is not None:
+                vector_batch = vector_batch.to(
+                    device,
+                    non_blocking=device.type == "cuda",
+                )
             target_batch = target_batch.to(
                 device,
                 non_blocking=device.type == "cuda",
             )
             optimizer.zero_grad(set_to_none=True)
-            loss = loss_function(model(feature_batch), target_batch)
+            (
+                class_scores,
+                distance_predictions,
+                vector_predictions,
+            ) = model.forward_training_outputs(
+                feature_batch,
+                distance_features=distance_batch,
+                vector_features=vector_batch,
+            )
+            loss = loss_function(class_scores, target_batch)
+            if distance_predictions is not None:
+                loss = loss + _create_auxiliary_topology_loss(
+                    model=model,
+                    predictions=distance_predictions,
+                    targets=distance_batch,
+                    prefix="distance",
+                )
+            if vector_predictions is not None:
+                loss = loss + _create_auxiliary_topology_loss(
+                    model=model,
+                    predictions=vector_predictions,
+                    targets=vector_batch,
+                    prefix="vector",
+                )
             loss.backward()
             optimizer.step()
             total_loss += loss.detach() * len(feature_batch)
 
         training_loss = float(total_loss.cpu()) / len(dataset)
         if early_stopping:
+            validation_context = {}
+            if model.requires_point_context:
+                validation_context = {
+                    "distance_features": validation_distance_features,
+                    "vector_features": validation_vector_features,
+                }
             validation_predictions = np.argmax(
-                model.predict_proba(validation_features),
+                model.predict_proba(
+                    validation_features,
+                    **validation_context,
+                ),
                 axis=1,
             )
             score = f1_score(
@@ -1184,6 +2342,39 @@ def _fit_model(
         "best_validation_macro_f1": best_score if early_stopping else None,
         "final_training_loss": training_loss,
     }
+
+
+def _create_auxiliary_topology_loss(model, predictions, targets, prefix):
+    """
+    Return one weighted auxiliary topology regression loss.
+
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        CNN containing training-only topology preprocessing values.
+    predictions : torch.Tensor
+        Predicted standardized topology values.
+    targets : torch.Tensor
+        Raw topology values in Earth radii, with missing values as NaN.
+    prefix : {"distance", "vector"}
+        Topology branch name.
+
+    Returns
+    -------
+    torch.Tensor
+        Weighted Smooth L1 loss for the topology branch.
+    """
+
+    impute = getattr(model, f"{prefix}_feature_impute")
+    mean = getattr(model, f"{prefix}_feature_mean")
+    scale = getattr(model, f"{prefix}_feature_scale")
+    loss_weight = getattr(model, f"{prefix}_loss_weight")
+    targets = torch.where(torch.isnan(targets), impute, targets)
+    standardized_targets = (targets - mean) / scale
+    return loss_weight * F.smooth_l1_loss(
+        predictions,
+        standardized_targets,
+    )
 
 
 def _run_training_filter_cnn_embedding_knn(
@@ -1463,6 +2654,20 @@ def _run_cnn_embedding_knn_analysis(model, data, config, class_names_by_label):
 
 
 def _resolve_cnn_embedding_knn_config(config):
+    """
+    Resolve and validate CNN-embedding k-nearest-neighbor settings.
+
+    Parameters
+    ----------
+    config : dict or None
+        CNN-embedding analysis configuration.
+
+    Returns
+    -------
+    dict
+        Validated neighbor, filtering, batching, and plotting settings.
+    """
+
     config = config or {}
     candidate_classes = _resolve_training_filter_classes(
         config.get("candidate_classes", ["exhaust", "dayside"]),
@@ -1470,7 +2675,7 @@ def _resolve_cnn_embedding_knn_config(config):
         require_nonempty=True,
     )
     point_neighbor_classes = _resolve_training_filter_classes(
-        config.get("point_neighbor_classes", ["reconnection", "o_point"]),
+        config.get("point_neighbor_classes", ["x_point", "o_point"]),
         "cnn_embedding_knn.point_neighbor_classes",
         require_nonempty=True,
     )
@@ -1553,18 +2758,39 @@ def _resolve_cnn_embedding_knn_config(config):
 
 
 def _extract_cnn_embeddings_by_split(model, data, batch_size):
+    """
+    Extract CNN embeddings for the train, validation, and test splits.
+
+    Parameters
+    ----------
+    model : PyTorchCNNClassifier
+        Trained CNN classifier used to extract embeddings.
+    data : dict
+        Training data containing VDF features and optional topology arrays.
+    batch_size : int
+        Number of samples transformed at once.
+
+    Returns
+    -------
+    dict
+        Embedding matrices keyed by train, validation, and test split names.
+    """
+
     return {
         "train": model.transform_embeddings(
             data["X_train_features"],
             batch_size=batch_size,
+            **_create_context_kwargs(model, data, "train"),
         ),
         "validation": model.transform_embeddings(
             data["X_validation_features"],
             batch_size=batch_size,
+            **_create_context_kwargs(model, data, "validation"),
         ),
         "test": model.transform_embeddings(
             data["X_test_features"],
             batch_size=batch_size,
+            **_create_context_kwargs(model, data, "test"),
         ),
     }
 
@@ -2122,12 +3348,12 @@ def _create_training_filter_pca_config(config, filter_config, dataset_id, model_
         "point_neighbor_classes",
         filter_config.get(
             "point_neighbor_classes",
-            filter_config.get("protected_classes", ["reconnection", "o_point"]),
+            filter_config.get("protected_classes", ["x_point", "o_point"]),
         ),
     )
     pca_filter_preview_config.setdefault(
         "protected_classes",
-        filter_config.get("protected_classes", ["reconnection", "o_point"]),
+        filter_config.get("protected_classes", ["x_point", "o_point"]),
     )
     pca_filter_preview_config.setdefault("apply_splits", ["train"])
 
@@ -2143,6 +3369,10 @@ def _create_training_filter_pca_config(config, filter_config, dataset_id, model_
             "gap_timesteps": config.get("split", {}).get("gap_timesteps", 10),
         },
         "features": pca_filter_config.get("features", {}),
+        "spatial_features": pca_filter_config.get(
+            "spatial_features",
+            {},
+        ),
         "pca": pca_filter_config.get("pca", {}),
         "pca_fit": pca_filter_config.get("pca_fit", {}),
         "neighbor_metrics": pca_filter_config.get("neighbor_metrics", {}),
@@ -2875,12 +4105,27 @@ def _rank_pca_filter_candidates(rows):
 
 
 def _remove_training_samples(data, selected_sample_indices):
+    """
+    Remove selected rows from all in-memory training arrays.
+
+    Parameters
+    ----------
+    data : dict
+        Training data updated in place, including optional topology arrays.
+    selected_sample_indices : array-like of int
+        Original metadata row indices to remove from the training split.
+    """
+
     selected_sample_indices = np.asarray(selected_sample_indices, dtype=int)
     keep_mask = ~np.isin(
         np.asarray(data["train_indices"], dtype=int),
         selected_sample_indices,
     )
     data["X_train_features"] = data["X_train_features"][keep_mask]
+    for branch_name in ["distance", "vector"]:
+        key = f"X_train_{branch_name}_features"
+        if data.get(key) is not None:
+            data[key] = data[key][keep_mask]
     data["y_train"] = data["y_train"][keep_mask]
     data["train_indices"] = data["train_indices"][keep_mask]
 

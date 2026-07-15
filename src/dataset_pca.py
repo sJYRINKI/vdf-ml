@@ -23,6 +23,19 @@ from src.model_split import split_by_timestep
 from src.timesteps import create_timestep_path
 
 
+DEFAULT_DISTANCE_FEATURE_COLUMNS = (
+    "distance_to_x_point_re",
+    "distance_to_o_point_re",
+)
+
+DEFAULT_VECTOR_FEATURE_COLUMNS = (
+    "vdf_to_x_point_dx_re",
+    "vdf_to_x_point_dz_re",
+    "vdf_to_o_point_dx_re",
+    "vdf_to_o_point_dz_re",
+)
+
+
 def print_pca_progress(value, stage, **fields):
     """
     Print a machine-readable PCA progress line.
@@ -150,7 +163,7 @@ def apply_dataset_pca_preset(config, pca_preset=None):
         {
             "balanced": True,
             "samples_per_class": "min",
-            "class_names": ["exhaust", "dayside", "o_point", "reconnection"],
+            "class_names": ["exhaust", "dayside", "o_point", "x_point"],
             "replace": False,
             "random_state": 1234,
         }
@@ -204,6 +217,9 @@ def plot_dataset_pca(config, timestep, pca_id=None):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     feature_config = resolve_feature_config(config.get("features", {}))
+    spatial_feature_config = resolve_spatial_feature_config(
+        config.get("spatial_features", {})
+    )
     pca_config = resolve_pca_config(config.get("pca", {}))
     pca_fit_config = resolve_pca_fit_config(config.get("pca_fit", {}))
     neighbor_config = resolve_neighbor_config(config.get("neighbor_metrics", {}))
@@ -333,6 +349,15 @@ def plot_dataset_pca(config, timestep, pca_id=None):
             "fit_balanced": pca_fit_config["balanced"],
         }
 
+    spatial_feature_result = create_pca_analysis_features(
+        metadata=metadata,
+        split_indices=split_indices,
+        train_indices=train_indices,
+        scores_by_split=scores_by_split,
+        spatial_feature_config=spatial_feature_config,
+    )
+    analysis_features_by_split = spatial_feature_result["features_by_split"]
+
     sample_metrics = create_sample_metrics(
         y=y,
         metadata=metadata,
@@ -345,7 +370,7 @@ def plot_dataset_pca(config, timestep, pca_id=None):
         print_pca_progress(0.87, "neighbor_metrics_start")
         add_neighbor_metrics(
             sample_metrics=sample_metrics,
-            scores_by_split=scores_by_split,
+            scores_by_split=analysis_features_by_split,
             y=y,
             train_indices=train_indices,
             neighbor_config=neighbor_config,
@@ -356,7 +381,7 @@ def plot_dataset_pca(config, timestep, pca_id=None):
         print_pca_progress(0.925, "filter_preview_start")
         add_filter_preview_metrics(
             sample_metrics=sample_metrics,
-            scores_by_split=scores_by_split,
+            scores_by_split=analysis_features_by_split,
             y=y,
             train_indices=train_indices,
             neighbor_config=neighbor_config,
@@ -387,6 +412,7 @@ def plot_dataset_pca(config, timestep, pca_id=None):
         neighbor_config=neighbor_config,
         filter_preview_config=filter_preview_config,
         embedding_plot_config=embedding_plot_config,
+        spatial_feature_summary=spatial_feature_result["summary"],
     )
     print_pca_progress(0.94, "metrics_text_done")
 
@@ -399,7 +425,7 @@ def plot_dataset_pca(config, timestep, pca_id=None):
             plot_config=plot_config,
             filter_preview_config=filter_preview_config,
             embedding_plot_config=embedding_plot_config,
-            scores_by_split=scores_by_split,
+            scores_by_split=analysis_features_by_split,
             split_indices=split_indices,
         )
         print_pca_progress(0.97, "plots_done")
@@ -412,6 +438,8 @@ def plot_dataset_pca(config, timestep, pca_id=None):
         explained_variance_ratio=explained_variance_ratio,
         pca_summary=pca_summary,
         metrics_text=metrics_text,
+        analysis_features_by_split=analysis_features_by_split,
+        spatial_feature_summary=spatial_feature_result["summary"],
     )
     print_pca_progress(1.0, "outputs_saved")
 
@@ -467,6 +495,96 @@ def resolve_feature_config(config):
         "sample_normalization": sample_normalization,
         "sample_norm_eps": sample_norm_eps,
         "cache": config.get("cache", {}),
+    }
+
+
+def resolve_spatial_feature_config(config):
+    """
+    Resolve optional late-fusion spatial feature settings.
+
+    Parameters
+    ----------
+    config : dict
+        Spatial feature config containing independent ``distance`` and
+        ``vector`` branches.
+
+    Returns
+    -------
+    dict
+        Validated spatial branch settings.
+    """
+
+    config = config or {}
+    distance = resolve_spatial_feature_branch_config(
+        config=config.get("distance", {}),
+        default_columns=DEFAULT_DISTANCE_FEATURE_COLUMNS,
+        branch_name="distance",
+    )
+    vector = resolve_spatial_feature_branch_config(
+        config=config.get("vector", {}),
+        default_columns=DEFAULT_VECTOR_FEATURE_COLUMNS,
+        branch_name="vector",
+    )
+
+    overlapping_columns = set(distance["columns"]) & set(vector["columns"])
+    if distance["enabled"] and vector["enabled"] and overlapping_columns:
+        raise ValueError(
+            "spatial_features distance and vector columns must be distinct: "
+            f"{sorted(overlapping_columns)}"
+        )
+
+    return {
+        "distance": distance,
+        "vector": vector,
+    }
+
+
+def resolve_spatial_feature_branch_config(config, default_columns, branch_name):
+    """
+    Resolve one optional spatial feature branch.
+
+    Parameters
+    ----------
+    config : dict
+        Branch config values.
+    default_columns : sequence of str
+        Metadata columns used when none are explicitly configured.
+    branch_name : str
+        Branch name used in validation errors.
+
+    Returns
+    -------
+    dict
+        Validated branch settings.
+    """
+
+    config = config or {}
+    enabled = bool(config.get("enabled", False))
+    weight = float(config.get("weight", 1.0))
+    columns = config.get("columns", default_columns)
+    if isinstance(columns, str):
+        columns = [columns]
+    columns = [str(column).strip() for column in columns]
+    if enabled and not columns:
+        raise ValueError(
+            f"spatial_features.{branch_name}.columns must not be empty"
+        )
+    if not np.isfinite(weight) or weight < 0.0:
+        raise ValueError(
+            f"spatial_features.{branch_name}.weight must be finite and non-negative"
+        )
+    if any(not column for column in columns):
+        raise ValueError(
+            f"spatial_features.{branch_name}.columns must contain names"
+        )
+    if len(columns) != len(set(columns)):
+        raise ValueError(
+            f"spatial_features.{branch_name}.columns contains duplicates"
+        )
+    return {
+        "enabled": enabled,
+        "weight": weight,
+        "columns": columns,
     }
 
 
@@ -685,7 +803,7 @@ def resolve_filter_preview_config(config):
         str(class_name)
         for class_name in config.get(
             "point_neighbor_classes",
-            ["reconnection", "o_point"],
+            ["x_point", "o_point"],
         )
     ]
     protected_classes = [
@@ -964,6 +1082,226 @@ def select_pca_fit_indices(train_indices, y, metadata, pca_fit_config):
     rng.shuffle(pca_fit_indices)
 
     return pca_fit_indices
+
+
+def create_pca_analysis_features(
+    metadata,
+    split_indices,
+    train_indices,
+    scores_by_split,
+    spatial_feature_config,
+):
+    """
+    Create the late-fusion representation used for PCA analyses.
+
+    The PCA scores remain VDF-only. Enabled distance and vector branches are
+    standardized independently using training rows and concatenated to those
+    scores for neighbor metrics, filtering, and nonlinear embeddings.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        Dataset metadata aligned with the VDF samples.
+    split_indices : dict
+        Mapping from split name to dataset indices.
+    train_indices : numpy.ndarray
+        Dataset indices used to fit spatial feature scalers.
+    scores_by_split : dict
+        VDF-only PCA scores for each split.
+    spatial_feature_config : dict
+        Resolved distance and vector branch settings.
+
+    Returns
+    -------
+    dict
+        Analysis features and spatial branch scaling summary.
+    """
+
+    branch_results = {}
+    for branch_name in ("distance", "vector"):
+        branch_results[branch_name] = fit_transform_spatial_feature_branch(
+            metadata=metadata,
+            split_indices=split_indices,
+            train_indices=train_indices,
+            branch_name=branch_name,
+            branch_config=spatial_feature_config[branch_name],
+        )
+
+    first_scores = next(iter(scores_by_split.values()))
+    pca_columns = [f"pca_{index}" for index in range(first_scores.shape[1])]
+    analysis_columns = list(pca_columns)
+    enabled_branch_names = [
+        branch_name
+        for branch_name in ("distance", "vector")
+        if branch_results[branch_name]["enabled"]
+    ]
+
+    if not enabled_branch_names:
+        features_by_split = scores_by_split
+    else:
+        features_by_split = {}
+        for split_name, scores in scores_by_split.items():
+            feature_parts = [np.asarray(scores, dtype=np.float32)]
+            for branch_name in enabled_branch_names:
+                feature_parts.append(
+                    branch_results[branch_name]["features_by_split"][split_name]
+                )
+            features_by_split[split_name] = np.concatenate(
+                feature_parts,
+                axis=1,
+            ).astype(np.float32, copy=False)
+
+    for branch_name in enabled_branch_names:
+        analysis_columns.extend(branch_results[branch_name]["columns"])
+
+    summary = {
+        "enabled": bool(enabled_branch_names),
+        "fusion": "pca_scores_late_fusion",
+        "scaler_fit_split": "train",
+        "analysis_feature_columns": analysis_columns,
+        "distance": create_spatial_feature_branch_summary(
+            branch_results["distance"]
+        ),
+        "vector": create_spatial_feature_branch_summary(
+            branch_results["vector"]
+        ),
+    }
+
+    return {
+        "features_by_split": features_by_split,
+        "summary": summary,
+    }
+
+
+def fit_transform_spatial_feature_branch(
+    metadata,
+    split_indices,
+    train_indices,
+    branch_name,
+    branch_config,
+):
+    """
+    Fit and apply one metadata-feature scaler using training rows.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        Dataset metadata.
+    split_indices : dict
+        Mapping from split name to dataset indices.
+    train_indices : numpy.ndarray
+        Dataset indices used to fit the scaler.
+    branch_name : str
+        Spatial branch name used in validation errors.
+    branch_config : dict
+        Resolved branch settings.
+
+    Returns
+    -------
+    dict
+        Scaled split features and fitted scaler details.
+    """
+
+    columns = list(branch_config["columns"])
+    weight = float(branch_config["weight"])
+    if not branch_config["enabled"]:
+        return {
+            "enabled": False,
+            "weight": weight,
+            "columns": columns,
+            "features_by_split": {},
+            "imputation": np.empty(0, dtype=np.float64),
+            "mean": np.empty(0, dtype=np.float64),
+            "scale": np.empty(0, dtype=np.float64),
+            "fit_sample_count": 0,
+        }
+
+    missing_columns = sorted(set(columns) - set(metadata.columns))
+    if missing_columns:
+        raise ValueError(
+            f"spatial_features.{branch_name} metadata columns are missing: "
+            f"{missing_columns}"
+        )
+
+    try:
+        values = metadata.loc[:, columns].to_numpy(dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"spatial_features.{branch_name} columns must be numeric: {columns}"
+        ) from error
+
+    infinite_locations = np.argwhere(np.isinf(values))
+    if len(infinite_locations) > 0:
+        row_position, column_position = infinite_locations[0]
+        sample_identifier = row_position
+        if "sample_index" in metadata.columns:
+            sample_identifier = metadata.iloc[row_position]["sample_index"]
+        column_name = columns[int(column_position)]
+        raise ValueError(
+            f"spatial_features.{branch_name} does not allow infinite metadata; "
+            f"sample_index={sample_identifier}, column={column_name}"
+        )
+
+    train_indices = np.asarray(train_indices, dtype=int)
+    train_values = values[train_indices]
+    entirely_missing = [
+        columns[column_index]
+        for column_index in range(train_values.shape[1])
+        if not np.isfinite(train_values[:, column_index]).any()
+    ]
+    if entirely_missing:
+        raise ValueError(
+            f"spatial_features.{branch_name} columns have no finite training "
+            f"values: {entirely_missing}"
+        )
+
+    imputation = np.nanmedian(train_values, axis=0)
+    imputed_values = np.where(np.isnan(values), imputation[None, :], values)
+    scaler = StandardScaler().fit(imputed_values[train_indices])
+    features_by_split = {
+        split_name: (
+            scaler.transform(imputed_values[np.asarray(indices, dtype=int)])
+            * weight
+        ).astype(np.float32, copy=False)
+        for split_name, indices in split_indices.items()
+    }
+
+    return {
+        "enabled": True,
+        "weight": weight,
+        "columns": columns,
+        "features_by_split": features_by_split,
+        "imputation": np.asarray(imputation, dtype=np.float64),
+        "mean": np.asarray(scaler.mean_, dtype=np.float64),
+        "scale": np.asarray(scaler.scale_, dtype=np.float64),
+        "fit_sample_count": len(train_indices),
+    }
+
+
+def create_spatial_feature_branch_summary(branch_result):
+    """
+    Create serializable scaler metadata for one spatial feature branch.
+
+    Parameters
+    ----------
+    branch_result : dict
+        Spatial branch transformation result.
+
+    Returns
+    -------
+    dict
+        Branch config and scaler values without transformed sample matrices.
+    """
+
+    return {
+        "enabled": bool(branch_result["enabled"]),
+        "weight": float(branch_result["weight"]),
+        "columns": list(branch_result["columns"]),
+        "imputation": np.asarray(branch_result["imputation"], dtype=np.float64),
+        "mean": np.asarray(branch_result["mean"], dtype=np.float64),
+        "scale": np.asarray(branch_result["scale"], dtype=np.float64),
+        "fit_sample_count": int(branch_result["fit_sample_count"]),
+    }
 
 
 def fit_feature_scaler(
@@ -2659,7 +2997,8 @@ def save_pca_plots(
     embedding_plot_config : dict, optional
         Embedding plot settings.
     scores_by_split : dict, optional
-        Mapping from split name to PCA scores.
+        Mapping from split name to PCA analysis features. These are VDF-only
+        scores unless late-fusion spatial branches are enabled.
     split_indices : dict, optional
         Mapping from split name to sample indices.
 
@@ -2764,6 +3103,8 @@ def save_pca_outputs(
     explained_variance_ratio,
     pca_summary,
     metrics_text,
+    analysis_features_by_split=None,
+    spatial_feature_summary=None,
 ):
     """
     Save PCA metrics, scores, and text summary.
@@ -2784,6 +3125,10 @@ def save_pca_outputs(
         PCA backend summary.
     metrics_text : str
         Text summary.
+    analysis_features_by_split : dict, optional
+        Late-fusion features used for neighbor and embedding analyses.
+    spatial_feature_summary : dict, optional
+        Spatial branch config and fitted preprocessing values.
     """
 
     output_dir = Path(output_dir)
@@ -2813,6 +3158,62 @@ def save_pca_outputs(
         "pca_algorithm": np.asarray(str(pca_summary.get("algorithm", ""))),
         "pca_device": np.asarray(str(pca_summary.get("device", ""))),
     }
+    if spatial_feature_summary is not None:
+        score_data.update(
+            {
+                "spatial_late_fusion_enabled": np.asarray(
+                    spatial_feature_summary["enabled"]
+                ),
+                "spatial_fusion": np.asarray(
+                    spatial_feature_summary["fusion"]
+                ),
+                "spatial_scaler_fit_split": np.asarray(
+                    spatial_feature_summary["scaler_fit_split"]
+                ),
+                "analysis_feature_columns": np.asarray(
+                    spatial_feature_summary["analysis_feature_columns"],
+                    dtype=str,
+                ),
+            }
+        )
+        for branch_name in ("distance", "vector"):
+            branch = spatial_feature_summary[branch_name]
+            prefix = f"spatial_{branch_name}"
+            score_data[f"{prefix}_enabled"] = np.asarray(branch["enabled"])
+            score_data[f"{prefix}_weight"] = np.asarray(branch["weight"])
+            score_data[f"{prefix}_columns"] = np.asarray(
+                branch["columns"],
+                dtype=str,
+            )
+            score_data[f"{prefix}_imputation"] = np.asarray(
+                branch["imputation"],
+                dtype=np.float64,
+            )
+            score_data[f"{prefix}_mean"] = np.asarray(
+                branch["mean"],
+                dtype=np.float64,
+            )
+            score_data[f"{prefix}_scale"] = np.asarray(
+                branch["scale"],
+                dtype=np.float64,
+            )
+            score_data[f"{prefix}_fit_sample_count"] = np.asarray(
+                branch["fit_sample_count"],
+                dtype=np.int64,
+            )
+
+        if spatial_feature_summary["enabled"]:
+            analysis_features = np.concatenate(
+                [
+                    analysis_features_by_split[split_name]
+                    for split_name in split_indices
+                ],
+                axis=0,
+            )
+            score_data["analysis_features"] = np.asarray(
+                analysis_features,
+                dtype=np.float32,
+            )
     if "point_neighbor_fraction" in sample_metrics.columns:
         score_data["point_neighbor_fraction"] = sample_metrics[
             "point_neighbor_fraction"
@@ -3692,6 +4093,61 @@ def create_split_offsets(sample_metrics):
     return offsets
 
 
+def create_spatial_feature_metric_lines(spatial_feature_summary):
+    """
+    Create metrics text for late-fusion spatial feature branches.
+
+    Parameters
+    ----------
+    spatial_feature_summary : dict or None
+        Spatial feature configuration and fitted scaler values.
+
+    Returns
+    -------
+    list of str
+        Spatial feature metric lines.
+    """
+
+    if spatial_feature_summary is None:
+        return ["Spatial late fusion enabled: False"]
+
+    lines = [
+        "Spatial late fusion enabled: "
+        f"{spatial_feature_summary['enabled']}",
+        f"Spatial fusion mode: {spatial_feature_summary['fusion']}",
+        "Spatial scaler fit split: "
+        f"{spatial_feature_summary['scaler_fit_split']}",
+        "Analysis feature count: "
+        f"{len(spatial_feature_summary['analysis_feature_columns'])}",
+    ]
+    for branch_name in ("distance", "vector"):
+        branch = spatial_feature_summary[branch_name]
+        title = branch_name.capitalize()
+        lines.extend(
+            [
+                f"{title} branch enabled: {branch['enabled']}",
+                f"{title} branch weight: {branch['weight']}",
+                f"{title} branch columns: "
+                f"{format_config_list(branch['columns'])}",
+                f"{title} branch scaler fit samples: "
+                f"{branch['fit_sample_count']}",
+            ]
+        )
+        if branch["enabled"]:
+            lines.extend(
+                [
+                    f"{title} branch training-median imputation: "
+                    f"{format_numeric_array(branch['imputation'])}",
+                    f"{title} branch training mean: "
+                    f"{format_numeric_array(branch['mean'])}",
+                    f"{title} branch training scale: "
+                    f"{format_numeric_array(branch['scale'])}",
+                ]
+            )
+
+    return lines
+
+
 def create_pca_metrics_text(
     dataset_dir,
     output_dir,
@@ -3706,6 +4162,7 @@ def create_pca_metrics_text(
     neighbor_config,
     filter_preview_config,
     embedding_plot_config,
+    spatial_feature_summary=None,
 ):
     """
     Create a text summary for PCA plots and metrics.
@@ -3738,6 +4195,8 @@ def create_pca_metrics_text(
         Filter-preview settings.
     embedding_plot_config : dict
         Embedding plot settings.
+    spatial_feature_summary : dict, optional
+        Late-fusion branch config and train-fitted preprocessing values.
 
     Returns
     -------
@@ -3790,6 +4249,7 @@ def create_pca_metrics_text(
         f"{feature_config.get('cache_metadata', {}).get('enabled', False)}",
         "Feature cache path: "
         f"{feature_config.get('cache_metadata', {}).get('cache_path', 'none')}",
+        *create_spatial_feature_metric_lines(spatial_feature_summary),
         f"Train fraction of usable timesteps: {split_config['train_fraction']}",
         "Validation fraction of usable timesteps: "
         f"{split_config['validation_fraction']}",
@@ -4237,14 +4697,14 @@ def plot_pca_embedding(
     point_size,
 ):
     """
-    Plot t-SNE or UMAP coordinates computed from PCA scores.
+    Plot t-SNE or UMAP coordinates from the PCA analysis representation.
 
     Parameters
     ----------
     sample_metrics : pandas.DataFrame
         Per-sample PCA metric rows.
     scores_by_split : dict
-        Mapping from split name to PCA scores.
+        Mapping from split name to PCA scores plus enabled late-fusion values.
     split_indices : dict
         Mapping from split name to sample indices.
     output_path : str or pathlib.Path
@@ -4302,7 +4762,7 @@ def plot_pca_embedding(
     method = embedding_plot_config["method"].upper()
     ax.set_xlabel(f"{method} 1")
     ax.set_ylabel(f"{method} 2")
-    ax.set_title(f"{method} of PCA scores")
+    ax.set_title(f"{method} of PCA analysis features")
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
@@ -4411,6 +4871,29 @@ def format_config_list(values, default="none"):
         return str(default)
 
     return ", ".join(str(value) for value in values)
+
+
+def format_numeric_array(values):
+    """
+    Format numeric values for compact metrics output.
+
+    Parameters
+    ----------
+    values : array-like of float
+        Values to format.
+
+    Returns
+    -------
+    str
+        Compact array representation.
+    """
+
+    return np.array2string(
+        np.asarray(values, dtype=float),
+        precision=8,
+        separator=", ",
+        max_line_width=1_000_000,
+    )
 
 
 def format_optional_threshold(value):

@@ -3,6 +3,38 @@ file_templates:
   2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
   3d: /wrk-vakka/group/spacephysics/vlasiator/3D/DCB/bulk/bulk.{timestep:07d}.vlsv
 
+flux_file_templates:
+  2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/flux/bulk.000{timestep:04d}.bin
+
+points:
+  point_region_names: [tail, dayside]
+  regions_re:
+    tail:
+      x_between: [-30.0, -10.0]
+      z_abs_max: 1.0
+    dayside:
+      x_between: [6.0, 15.0]
+      z_abs_max: 8.0
+  x_selection:
+    method: union_physical_priority
+    density_variable: rho
+    half_width_di:
+      eigenvector_0: 2.0
+      eigenvector_1: 2.0
+    y_half_width_re: 0.0
+    manual_re:
+      x_half_width_re: 0.4
+      y_half_width_re: 0.0
+      z_half_width_re: 0.3
+  o_selection:
+    method: union_physical_priority
+    core_fraction: 0.7
+    y_half_width_re: 0.0
+    manual_re:
+      x_half_width_re: 0.4
+      y_half_width_re: 0.0
+      z_half_width_re: 0.3
+
 model_dir: data/models/pytorch_convolutional_neural_network_classifier/{model_id}
 output_dir: data/predictions/pytorch_convolutional_neural_network_classifier/{model_id}/{file_source}_xm20_m12_y8_z1/timestep_{timestep}
 
@@ -10,7 +42,7 @@ labels:
   lobe: 0
   exhaust: 1
   o_point: 2
-  reconnection: 3
+  x_point: 3
   dayside: 4
 
 region_re:

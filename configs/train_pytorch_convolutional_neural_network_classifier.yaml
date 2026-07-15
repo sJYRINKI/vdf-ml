@@ -10,7 +10,7 @@ labels:
   lobe: 0
   exhaust: 1
   o_point: 2
-  reconnection: 3
+  x_point: 3
   dayside: 4
 
 features:
@@ -32,8 +32,8 @@ training_filter:
   source: pca
   dry_run: false
   candidate_classes: [exhaust, dayside]
-  point_neighbor_classes: [reconnection, o_point]
-  protected_classes: [reconnection, o_point]
+  point_neighbor_classes: [x_point, o_point]
+  protected_classes: [x_point, o_point]
   max_removed_fraction_per_class: 0.3
   cnn_embedding_knn:
     run_source_model: true
@@ -53,6 +53,21 @@ training_filter:
         rebuild: false
         batch_size: 64
         n_jobs: 8
+    spatial_features:
+      distance:
+        enabled: true
+        weight: 1.0
+        columns:
+          - distance_to_x_point_re
+          - distance_to_o_point_re
+      vector:
+        enabled: true
+        weight: 1.0
+        columns:
+          - vdf_to_x_point_dx_re
+          - vdf_to_x_point_dz_re
+          - vdf_to_o_point_dx_re
+          - vdf_to_o_point_dz_re
     pca:
       backend: torch
       algorithm: lowrank
@@ -64,7 +79,7 @@ training_filter:
     pca_fit:
       balanced: true
       samples_per_class: min
-      class_names: [exhaust, dayside, o_point, reconnection]
+      class_names: [exhaust, dayside, o_point, x_point]
       replace: false
       random_state: 1234
     neighbor_metrics:
@@ -102,8 +117,8 @@ cnn_embedding_knn:
   embedding_batch_size: 512
   neighbor_batch_size: 4096
   candidate_classes: [exhaust, dayside]
-  point_neighbor_classes: [reconnection, o_point]
-  protected_classes: [reconnection, o_point]
+  point_neighbor_classes: [x_point, o_point]
+  protected_classes: [x_point, o_point]
   apply_splits: [train]
   min_point_neighbor_fraction: 0.5
   min_point_neighbor_fraction_by_class:
@@ -122,6 +137,23 @@ model:
   channels: [16, 32, 64]
   adaptive_pool_shape: [4, 4]
   classifier_size: 64
+  topology_mode: auxiliary
+  distance_branch:
+    enabled: true
+    feature_columns:
+      - distance_to_x_point_re
+      - distance_to_o_point_re
+    hidden_size: 8
+    loss_weight: 0.1
+  vector_branch:
+    enabled: true
+    feature_columns:
+      - vdf_to_x_point_dx_re
+      - vdf_to_x_point_dz_re
+      - vdf_to_o_point_dx_re
+      - vdf_to_o_point_dz_re
+    hidden_size: 8
+    loss_weight: 0.1
   dropout: 0.2
   #class_weight: sqrt_balanced
   class_weight: none

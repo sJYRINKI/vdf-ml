@@ -9,7 +9,7 @@ labels:
   lobe: 0
   exhaust: 1
   o_point: 2
-  reconnection: 3
+  x_point: 3
   dayside: 4
 
 creation:

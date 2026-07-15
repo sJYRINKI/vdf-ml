@@ -3,10 +3,15 @@ import time
 import numpy as np
 import analysator as pt
 
-from src.dataset_metadata import create_vdf_spatial_metadata
+from src.dataset_metadata import (
+    OMITTED_DATASET_METADATA_COLUMNS,
+    POINT_REFERENCE_METADATA_COLUMNS,
+    create_point_reference_metadata_arrays,
+    create_vdf_spatial_metadata,
+)
 from src.timesteps import create_timestep_path
 from src.vdf_extract import VdfExtractor
-from src.point_labels import create_point_labeled_coords, iter_labeled_coords
+from src.point_labels import create_point_label_data, iter_labeled_coords
 from src.point_selection import (
     create_point_sample_metadata,
     get_point_selection_result,
@@ -56,12 +61,12 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
 
     point_start = time.perf_counter()
     labeled_coords = list(iter_labeled_coords(config))
-    point_labeled_coords, rejected_cellids = create_point_labeled_coords(
+    point_label_data = create_point_label_data(
         config=config,
         timestep=timestep,
         reader=reader,
     )
-    labeled_coords.extend(point_labeled_coords)
+    labeled_coords.extend(point_label_data["point_labeled_coords"])
     point_elapsed = time.perf_counter() - point_start
 
     specs_start = time.perf_counter()
@@ -69,10 +74,12 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
         config=config,
         timestep=timestep,
         labeled_coords=labeled_coords,
-        rejected_cellids=rejected_cellids,
+        rejected_cellids=point_label_data["rejected_cellids"],
         reader=reader,
         vdf_cellids=vdf_cellids,
         vdf_coords_re=vdf_coords_re,
+        raw_x_point_records=point_label_data["raw_x_point_records"],
+        raw_o_point_records=point_label_data["raw_o_point_records"],
     )
 
     specs_elapsed = time.perf_counter() - specs_start
@@ -99,6 +106,8 @@ def create_timestep_sample_specs(
     reader=None,
     vdf_cellids=None,
     vdf_coords_re=None,
+    raw_x_point_records=None,
+    raw_o_point_records=None,
 ):
     """
     Create VDF sample specifications for one timestep.
@@ -126,6 +135,14 @@ def create_timestep_sample_specs(
         Spatial cell IDs with VDF data.
     vdf_coords_re : numpy.ndarray, optional
         VDF cell coordinates in Earth radii with shape ``(n_cells, 3)``.
+    raw_x_point_records : iterable of dict, optional
+        All X-point records returned by topology detection before VDF-cell
+        conflict removal. Accepted X-point labels are used as a compatibility
+        fallback when omitted.
+    raw_o_point_records : iterable of dict, optional
+        All O-point records returned by topology detection before VDF-cell
+        conflict removal. Accepted O-point labels are used as a compatibility
+        fallback when omitted.
 
     Returns
     -------
@@ -141,8 +158,25 @@ def create_timestep_sample_specs(
     if reader is None:
         reader = pt.vlsvfile.VlsvReader(str(file_location))
 
-    simulation_time = reader.read_parameter("time")
     labeled_coords = list(labeled_coords)
+    if raw_x_point_records is None:
+        raw_x_point_records = [
+            labeled_coord
+            for labeled_coord in labeled_coords
+            if is_point_record(labeled_coord)
+            and str(labeled_coord.get("point_kind", "")).lower() == "x"
+        ]
+    else:
+        raw_x_point_records = list(raw_x_point_records)
+    if raw_o_point_records is None:
+        raw_o_point_records = [
+            labeled_coord
+            for labeled_coord in labeled_coords
+            if is_point_record(labeled_coord)
+            and str(labeled_coord.get("point_kind", "")).lower() == "o"
+        ]
+    else:
+        raw_o_point_records = list(raw_o_point_records)
     rejected_cellids = {int(cid) for cid in (rejected_cellids or set())}
     if vdf_cellids is None or vdf_coords_re is None:
         vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
@@ -190,17 +224,30 @@ def create_timestep_sample_specs(
             seen_class_cellids.add(class_cellid)
             sample_spec = {
                 "file_location": file_location,
-                "simulation_time": simulation_time,
                 "cid": int(cid),
                 "label": int(label),
                 "class_name": class_name,
                 "coord_re": coord_re,
                 "vdf_coord_re": vdf_coord_by_cellid[int(cid)],
-                "neighbor_position": neighbor_position,
                 "timestep": int(timestep),
             }
-            sample_spec.update(sample_metadata)
-            sample_spec.update(metadata_by_position.get(neighbor_position, {}))
+            sample_spec.update(
+                {
+                    key: value
+                    for key, value in sample_metadata.items()
+                    if key not in OMITTED_DATASET_METADATA_COLUMNS
+                }
+            )
+            sample_spec.update(
+                {
+                    key: value
+                    for key, value in metadata_by_position.get(
+                        neighbor_position,
+                        {},
+                    ).items()
+                    if key not in OMITTED_DATASET_METADATA_COLUMNS
+                }
+            )
             sample_specs.append(sample_spec)
 
     conflicting_cellids = find_conflicting_cellids(sample_specs)
@@ -215,7 +262,7 @@ def create_timestep_sample_specs(
             config=config,
             reader=reader,
             file_location=file_location,
-            simulation_time=simulation_time,
+            simulation_time=None,
             existing_sample_specs=sample_specs,
             timestep=timestep,
             rejected_cellids=rejected_cellids,
@@ -225,10 +272,87 @@ def create_timestep_sample_specs(
         )
     )
 
-    return remove_conflicting_cellids(
+    sample_specs = remove_conflicting_cellids(
         sample_specs=sample_specs,
         conflicting_cellids=find_conflicting_cellids(sample_specs),
     )
+    add_point_reference_metadata(
+        sample_specs=sample_specs,
+        raw_x_point_records=raw_x_point_records,
+        raw_o_point_records=raw_o_point_records,
+    )
+    return sample_specs
+
+
+def add_point_reference_metadata(
+    sample_specs,
+    raw_x_point_records=None,
+    raw_o_point_records=None,
+):
+    """
+    Add source-or-nearest X/O geometry to final timestep sample specs.
+
+    X-selected samples use their source X point and O-selected samples use
+    their source O point. All other references use the closest raw detected
+    point of that kind. Vectors point from the VDF-cell center to the point.
+
+    Parameters
+    ----------
+    sample_specs : list of dict
+        Final sample specifications for one timestep.
+    raw_x_point_records : iterable of dict, optional
+        Raw X-point records returned by topology detection.
+    raw_o_point_records : iterable of dict, optional
+        Raw O-point records returned by topology detection.
+
+    Returns
+    -------
+    list of dict
+        The input sample specifications with point-reference fields added.
+    """
+
+    if not sample_specs:
+        return sample_specs
+
+    raw_x_point_records = list(raw_x_point_records or [])
+    raw_o_point_records = list(raw_o_point_records or [])
+    vdf_coords_re = np.asarray(
+        [sample_spec["vdf_coord_re"] for sample_spec in sample_specs],
+        dtype=float,
+    )
+    point_kinds = np.empty(len(sample_specs), dtype=object)
+    source_point_coords_re = np.full(vdf_coords_re.shape, np.nan, dtype=float)
+
+    for index, sample_spec in enumerate(sample_specs):
+        point_kind = sample_spec.get("point_kind")
+        point_kind = "" if point_kind is None else str(point_kind).strip().lower()
+        point_kinds[index] = point_kind
+        if point_kind in {"x", "o"}:
+            source_point_coords_re[index] = (
+                sample_spec["source_point_x_re"],
+                sample_spec["source_point_y_re"],
+                sample_spec["source_point_z_re"],
+            )
+
+    reference_metadata = create_point_reference_metadata_arrays(
+        vdf_coords_re=vdf_coords_re,
+        x_point_coords_re=[
+            point_record["coord_re"]
+            for point_record in raw_x_point_records
+        ],
+        o_point_coords_re=[
+            point_record["coord_re"]
+            for point_record in raw_o_point_records
+        ],
+        point_kinds=point_kinds,
+        source_point_coords_re=source_point_coords_re,
+    )
+
+    for column, values in reference_metadata.items():
+        for sample_spec, value in zip(sample_specs, values):
+            sample_spec[column] = float(value)
+
+    return sample_specs
 
 
 def create_background_region_sample_specs(
@@ -259,8 +383,9 @@ def create_background_region_sample_specs(
         Reader for the timestep VLSV file.
     file_location : pathlib.Path
         Path to the timestep VLSV file.
-    simulation_time : float
-        Simulation time read from the VLSV file.
+    simulation_time : float or None
+        Retained for compatibility. Simulation time is no longer stored in
+        dataset metadata.
     existing_sample_specs : list of dict
         Sample specifications already created for configured point and static
         coordinate classes.
@@ -343,14 +468,11 @@ def create_background_region_sample_specs(
             sample_specs.append(
                 {
                     "file_location": file_location,
-                    "simulation_time": simulation_time,
                     "cid": cid,
                     "label": label,
                     "class_name": class_name,
                     "coord_re": coord_re,
                     "vdf_coord_re": coord_re,
-                    "neighbor_position": f"{region_name}_region",
-                    "region_name": region_name,
                     "timestep": int(timestep),
                 }
             )
@@ -707,16 +829,14 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
     -------
     dict
         Metadata fields for the extracted sample, including the VDF-cell
-        center and the applicable X- or O-point distance in Earth radii.
+        center and source-or-nearest X/O distances and vectors in Earth radii.
     """
 
     metadata_row = {
         "timestep": int(sample_spec["timestep"]),
-        "simulation_time": sample_spec["simulation_time"],
         "cid": int(cid),
         "label": sample_spec["label"],
         "class_name": sample_spec["class_name"],
-        "neighbor_position": sample_spec["neighbor_position"],
         "x_re": float(coord_re[0]),
         "y_re": float(coord_re[1]),
         "z_re": float(coord_re[2]),
@@ -732,11 +852,26 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
             sample_spec["source_point_y_re"],
             sample_spec["source_point_z_re"],
         )
-    spatial_metadata = create_vdf_spatial_metadata(
-        vdf_coord_re=sample_spec["vdf_coord_re"],
-        point_kind=point_kind,
-        source_point_coord_re=source_point_coord_re,
-    )
+    if all(
+        column in sample_spec
+        for column in POINT_REFERENCE_METADATA_COLUMNS
+    ):
+        vdf_coord_re = sample_spec["vdf_coord_re"]
+        spatial_metadata = {
+            "vdf_x_re": float(vdf_coord_re[0]),
+            "vdf_y_re": float(vdf_coord_re[1]),
+            "vdf_z_re": float(vdf_coord_re[2]),
+            **{
+                column: sample_spec[column]
+                for column in POINT_REFERENCE_METADATA_COLUMNS
+            },
+        }
+    else:
+        spatial_metadata = create_vdf_spatial_metadata(
+            vdf_coord_re=sample_spec["vdf_coord_re"],
+            point_kind=point_kind,
+            source_point_coord_re=source_point_coord_re,
+        )
     internal_keys = {
         "file_location",
         "simulation_time",
@@ -747,6 +882,8 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
         "vdf_coord_re",
         "neighbor_position",
         "timestep",
+        *OMITTED_DATASET_METADATA_COLUMNS,
+        *POINT_REFERENCE_METADATA_COLUMNS,
     }
 
     for key, value in sample_spec.items():

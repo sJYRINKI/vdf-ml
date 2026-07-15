@@ -21,6 +21,7 @@ def main(
     training_filter=None,
     dry_run=None,
     run_source_model=None,
+    topology_mode=None,
     class_weight=None,
     class_weight_by_class=None,
     sampler=None,
@@ -49,6 +50,8 @@ def main(
         Optional training-filter dry-run override.
     run_source_model : bool, optional
         Optional CNN embedding source-model override.
+    topology_mode : {"none", "input", "auxiliary"}, optional
+        Optional CNN topology-mode override.
     class_weight : str, optional
         Optional model class-weight override.
     class_weight_by_class : sequence of str, optional
@@ -77,6 +80,7 @@ def main(
         training_filter=training_filter,
         dry_run=dry_run,
         run_source_model=run_source_model,
+        topology_mode=topology_mode,
         class_weight=class_weight,
         class_weight_by_class=class_weight_by_class,
         sampler=sampler,
@@ -137,6 +141,12 @@ if __name__ == "__main__":
         action="store_false",
         default=None,
         help="Use existing embedding kNN metrics instead of training a source CNN.",
+    )
+    parser.add_argument(
+        "--topology-mode",
+        choices=["none", "input", "auxiliary"],
+        default=None,
+        help="Optional CNN topology-mode override.",
     )
     parser.add_argument(
         "--class-weight",
@@ -214,6 +224,7 @@ if __name__ == "__main__":
         training_filter=args.training_filter,
         dry_run=args.dry_run,
         run_source_model=args.run_source_model,
+        topology_mode=args.topology_mode,
         class_weight=args.class_weight,
         class_weight_by_class=args.class_weight_by_class,
         sampler=args.sampler,
