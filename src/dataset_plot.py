@@ -13,6 +13,7 @@ import numpy as np
 
 from src.config import load_config
 from src.colormap_helpers import (
+    create_colormap_legend_handles,
     draw_manual_point_search_boxes,
     draw_o_point_search_areas,
     draw_point_boxes,
@@ -269,7 +270,8 @@ def plot_labeled_colormap(
 
     file_location = metadata_rows.iloc[0]["file_location"]
 
-    fig, ax1 = plt.subplots(figsize=(8, 5))
+    fig, ax1 = plt.subplots(figsize=(8, 6.5))
+    fig.subplots_adjust(bottom=0.22)
 
     pt.plot.plot_colormap(
         filename=file_location,
@@ -316,7 +318,15 @@ def plot_labeled_colormap(
         reader=reader,
         metadata_rows=metadata_rows,
     )
-    ax1.legend(loc=2)
+    legend_handles = create_colormap_legend_handles(ax1)
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.015),
+        ncol=4,
+        fontsize=8,
+        frameon=False,
+    )
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

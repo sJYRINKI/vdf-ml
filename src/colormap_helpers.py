@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon, Rectangle
+from matplotlib.patches import Patch, Polygon, Rectangle
 import numpy as np
 
 from src.point_topology import find_smallest_closed_contour, read_smoothed_flux_grid
@@ -29,7 +29,7 @@ SOURCE_POINT_STYLES = {
         "s": 10,
     },
     "dayside": {
-        "color": "green",
+        "color": "blue",
         "marker": "^",
         "label": "dayside",
         "s": 10,
@@ -42,6 +42,87 @@ SOURCE_POINT_STYLES = {
     },
     "lobe": {"color": "blue", "marker": "2", "label": "lobe", "s": 16},
 }
+
+VDF_CELL_STYLE = {
+    "marker": ".",
+    "s": 8,
+    "color": "gold",
+    "linewidths": 0,
+}
+USED_VDF_CELL_STYLE = {
+    "marker": ".",
+    "s": 18,
+    "color": "red",
+    "linewidths": 0,
+}
+MANUAL_POINT_SEARCH_AREA_STYLE = {
+    "facecolor": "none",
+    "edgecolor": "tab:blue",
+    "alpha": 0.9,
+    "linewidth": 1.5,
+    "linestyle": "--",
+}
+POINT_SEARCH_AREA_STYLE = {
+    "facecolor": "tab:blue",
+    "edgecolor": "tab:blue",
+    "alpha": 0.18,
+    "linewidth": 1.5,
+}
+
+
+def create_colormap_legend_handles(ax):
+    """
+    Create stable legend handles matching spatial colormap overlays.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes used to create empty scatter handles.
+
+    Returns
+    -------
+    list
+        Matplotlib handles in fixed legend order.
+    """
+
+    handles = [
+        ax.scatter([], [], label="VDF cell", **VDF_CELL_STYLE),
+        Patch(
+            label="manual X search area",
+            **MANUAL_POINT_SEARCH_AREA_STYLE,
+        ),
+        Patch(
+            label="manual O search area",
+            **MANUAL_POINT_SEARCH_AREA_STYLE,
+        ),
+        ax.scatter([], [], label="Used VDF cell", **USED_VDF_CELL_STYLE),
+    ]
+
+    for class_name in (
+        "lobe",
+        "x_point",
+        "o_point",
+        "exhaust",
+        "dayside",
+    ):
+        style = dict(SOURCE_POINT_STYLES[class_name])
+        style["label"] = class_name
+        handles.append(ax.scatter([], [], **style))
+
+    handles.extend(
+        [
+            Patch(
+                label="physical O search area",
+                **POINT_SEARCH_AREA_STYLE,
+            ),
+            Patch(
+                label="physical X search area",
+                **POINT_SEARCH_AREA_STYLE,
+            ),
+        ]
+    )
+
+    return handles
 
 
 def expr_velocity(exprmaps, requestvariables=False):
@@ -117,10 +198,7 @@ def scatter_all_vdf_cells(ax, reader, boxre=None):
         coords_re[:, 0],
         coords_re[:, 2],
         label="VDF cell",
-        marker=".",
-        s=8,
-        color="gold",
-        linewidths=0,
+        **VDF_CELL_STYLE,
         zorder=3,
     )
 
@@ -217,9 +295,6 @@ def draw_manual_point_search_boxes(ax, metadata_rows):
         return
 
     plotted_labels = set()
-    colors = {"x": "tab:blue", "o": "tab:blue"}
-    combined_methods = {"consensus", "union_physical_priority"}
-
     for _, row in box_rows.iterrows():
         values = np.asarray(
             [
@@ -236,24 +311,17 @@ def draw_manual_point_search_boxes(ax, metadata_rows):
         point_kind = row["point_kind"]
         label = None
         if point_kind not in plotted_labels:
-            label = f"manual {point_kind.upper()} search box"
+            label = f"manual {point_kind.upper()} search area"
             plotted_labels.add(point_kind)
 
         center_x_re, center_z_re, half_width_x_re, half_width_z_re = values
-        color = colors.get(point_kind, "tab:red")
-        selection_method = str(row.get("selection_method", ""))
-        is_combined = selection_method in combined_methods
         rectangle = Rectangle(
             (center_x_re - half_width_x_re, center_z_re - half_width_z_re),
             2.0 * half_width_x_re,
             2.0 * half_width_z_re,
-            facecolor="none" if is_combined else color,
-            edgecolor=color,
-            alpha=0.9 if is_combined else 0.18,
-            linewidth=1.5,
-            linestyle="--" if is_combined else "-",
             label=label,
             zorder=2.2,
+            **MANUAL_POINT_SEARCH_AREA_STYLE,
         )
         ax.add_patch(rectangle)
 
@@ -426,16 +494,13 @@ def draw_x_point_search_areas(ax, metadata_rows, x_selection_config=None):
             dtype=float,
         )
 
-        label = "X search area" if box_index == 0 else None
+        label = "physical X search area" if box_index == 0 else None
         polygon = Polygon(
             vertices,
             closed=True,
-            facecolor="tab:blue",
-            edgecolor="tab:blue",
-            alpha=0.18,
-            linewidth=1.5,
             label=label,
             zorder=2.1,
+            **POINT_SEARCH_AREA_STYLE,
         )
         ax.add_patch(polygon)
 
@@ -538,16 +603,13 @@ def draw_o_point_search_areas(
 
         _, vertices_re = contour
 
-        label = "O search area" if contour_index == 0 else None
+        label = "physical O search area" if contour_index == 0 else None
         polygon = Polygon(
             vertices_re,
             closed=True,
-            facecolor="tab:blue",
-            edgecolor="tab:blue",
-            alpha=0.18,
-            linewidth=1.5,
             label=label,
             zorder=2,
+            **POINT_SEARCH_AREA_STYLE,
         )
         ax.add_patch(polygon)
 
@@ -615,10 +677,7 @@ def scatter_label_points(ax, reader, metadata_rows):
             cell_coord_re[0],
             cell_coord_re[2],
             label=label,
-            marker=".",
-            s=18,
-            color="red",
-            linewidths=0,
+            **USED_VDF_CELL_STYLE,
             zorder=5,
         )
 

@@ -23,7 +23,20 @@ from src.dataset_plot import (
 from src.timesteps import create_timestep_path
 
 
-def main(config_path, timestep):
+def main(config_path, timestep, plot_mode="all"):
+    """
+    Plot spatial colormaps and optional VDF samples for one dataset.
+
+    Parameters
+    ----------
+    config_path : str or pathlib.Path
+        Path to the plotting configuration file.
+    timestep : str
+        Dataset timestep identifier.
+    plot_mode : {"all", "colormaps"}, optional
+        Whether to plot both colormaps and VDF samples or only colormaps.
+    """
+
     config = load_config(config_path)
 
     dataset_dir = create_timestep_path(
@@ -48,12 +61,14 @@ def main(config_path, timestep):
     )
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
-    X_plot = create_or_load_plot_xz_slice_cache(
-        X=X,
-        dataset_dir=dataset_dir,
-        dataset_id=timestep,
-        cache_config=cache_config,
-    )
+    X_plot = None
+    if plot_mode == "all":
+        X_plot = create_or_load_plot_xz_slice_cache(
+            X=X,
+            dataset_dir=dataset_dir,
+            dataset_id=timestep,
+            cache_config=cache_config,
+        )
 
     colormap_jobs = create_colormap_plot_jobs(
         metadata=metadata,
@@ -66,29 +81,33 @@ def main(config_path, timestep):
         n_jobs=n_jobs,
     )
 
-    n_vdf_plots = int(X.shape[0])
-    vdf_jobs = iter_vdf_plot_jobs(
-        X=X,
-        y=y,
-        metadata=metadata,
-        output_dir=output_dir,
-        vdflim=vdflim,
-        X_plot=X_plot,
-    )
-    run_plot_jobs(
-        plot_function=plot_vdf_sample_from_dataset,
-        plot_jobs=vdf_jobs,
-        n_jobs=n_jobs,
-    )
+    if plot_mode == "all":
+        n_vdf_plots = int(X.shape[0])
+        vdf_jobs = iter_vdf_plot_jobs(
+            X=X,
+            y=y,
+            metadata=metadata,
+            output_dir=output_dir,
+            vdflim=vdflim,
+            X_plot=X_plot,
+        )
+        run_plot_jobs(
+            plot_function=plot_vdf_sample_from_dataset,
+            plot_jobs=vdf_jobs,
+            n_jobs=n_jobs,
+        )
 
     print(f"Dataset directory: {dataset_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Saved {len(colormap_jobs)} colormap plots")
-    print(f"Saved {n_vdf_plots} VDF plots")
+    if plot_mode == "all":
+        print(f"Saved {n_vdf_plots} VDF plots")
+    else:
+        print("Skipped VDF plots (plot mode: colormaps)")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
-        description="Plot all xz VDF samples from saved dataset."
+        description="Plot spatial colormaps and VDF samples from a saved dataset."
     )
 
     parser.add_argument(
@@ -103,9 +122,17 @@ if __name__=="__main__":
         help="Dataset timestep identifier."
     )
 
+    parser.add_argument(
+        "--plot-mode",
+        choices=("all", "colormaps"),
+        default="all",
+        help="Plot everything or only spatial colormaps."
+    )
+
     args = parser.parse_args()
 
     main(
         config_path=args.config,
-        timestep=args.timestep
+        timestep=args.timestep,
+        plot_mode=args.plot_mode,
     )
