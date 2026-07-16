@@ -64,7 +64,10 @@ def load_multilayer_perceptron_classifier_model(model_dir):
     return load_model(model_dir, "multilayer_perceptron_classifier.joblib")
 
 
-def load_pytorch_convolutional_neural_network_classifier_model(model_dir):
+def load_pytorch_convolutional_neural_network_classifier_model(
+    model_dir,
+    device="cpu",
+):
     """
     Load a trained PyTorch CNN and preprocessing values.
 
@@ -72,6 +75,8 @@ def load_pytorch_convolutional_neural_network_classifier_model(model_dir):
     ----------
     model_dir : str
         Directory containing the model and preprocessing files.
+    device : str or torch.device, optional
+        Device used for CNN prediction.
 
     Returns
     -------
@@ -91,7 +96,7 @@ def load_pytorch_convolutional_neural_network_classifier_model(model_dir):
 
     model = load_pytorch_cnn_checkpoint(
         checkpoint_path=model_path,
-        device="cpu",
+        device=device,
     )
     preprocessing = np.load(preprocessing_path)
 

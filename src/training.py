@@ -17,7 +17,11 @@ from sklearn.preprocessing import StandardScaler
 
 from src.autoencoder_data import create_or_load_log_slice_cache, resolve_cache_config
 from src.batches import create_features_in_batches
-from src.dataset_io import load_dataset
+from src.dataset_io import (
+    create_velocity_grid_preprocessing_values,
+    load_dataset,
+    load_velocity_grid_descriptor,
+)
 from src.features import create_features_from_log_slice_cache
 from src.model_evaluation import create_lobe_vs_rest_labels, create_predictions_dataframe
 from src.model_split import split_by_timestep
@@ -214,6 +218,9 @@ def train_multilayer_perceptron_classifier(config, dataset_id, model_id):
         output_dir=data["output_dir"],
         model_filename="multilayer_perceptron_classifier.joblib",
         preprocessing_values={
+            **create_velocity_grid_preprocessing_values(
+                data["velocity_grid"]
+            ),
             "downsample_factor": data["downsample_factor"],
             "dataset_id": dataset_id,
             "model_id": model_id,
@@ -438,6 +445,9 @@ def train_binary_classifier(
         output_dir=data["output_dir"],
         model_filename=model_filename,
         preprocessing_values={
+            **create_velocity_grid_preprocessing_values(
+                data["velocity_grid"]
+            ),
             "downsample_factor": data["downsample_factor"],
             "dataset_id": dataset_id,
             "model_id": model_id,
@@ -515,6 +525,7 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     gap_timesteps = int(split_config.get("gap_timesteps", 10))
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
+    velocity_grid = load_velocity_grid_descriptor(dataset_dir)
     X_log, cache_metadata = create_or_load_log_slice_cache(
         X=X,
         input_config=_create_feature_cache_input_config(log_eps=log_eps),
@@ -594,6 +605,7 @@ def load_training_data(config, dataset_id, model_id, target_kind):
         "X": X,
         "y": y,
         "metadata": metadata,
+        "velocity_grid": velocity_grid,
         "dataset_dir": dataset_dir,
         "output_dir": output_dir,
         "train_indices": train_indices,

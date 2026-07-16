@@ -8,18 +8,24 @@ from src.dataset_metadata import (
     POINT_REFERENCE_METADATA_COLUMNS,
     create_point_reference_metadata_arrays,
 )
+from src.dataset_io import load_velocity_grid_from_preprocessing
 from src.dataset_plot import plot_vdf_xz_slice
 from src.features import create_features
 from src.point_topology import find_point_records
 from src.timesteps import create_path, create_timestep_list
-from src.vdf_extract import VdfExtractor, extract_vdf
+from src.vdf_extract import (
+    VdfExtractor,
+    create_trilinear_xz_plan,
+    resolve_velocity_population,
+)
 from src.vdf_helpers import (
     R_EARTH,
     create_coordinate_name,
     create_region_mask_re,
     get_cellid_with_vdf,
+    get_velocity_cell_size_from_extent,
     get_vdf_cells_with_coords_re,
-    get_vdf_plot_parameters_from_file,
+    get_vdf_plot_threshold,
 )
 
 
@@ -86,22 +92,39 @@ def predict_coordinate(
     plot_config = config["plot"]
     vdflim = float(plot_config.get("vdflim", 2000000.0))
 
-    reader = pt.vlsvfile.VlsvReader(str(file_location))
-    cid = get_cellid_with_vdf(
-        reader=reader,
-        coord_re=coord_re,
-    )
-    vdf = extract_vdf(
-        file_location=file_location,
-        cid=cid,
-    )
-
     model, preprocessing = load_model(model_dir)
     downsample_factor = int(preprocessing["downsample_factor"])
     log_eps = float(preprocessing["log_eps"])
 
+    reader = pt.vlsvfile.VlsvReader(str(file_location))
+    population = resolve_velocity_population(reader=reader)
+    cid = get_cellid_with_vdf(
+        reader=reader,
+        coord_re=coord_re,
+        pop=population,
+    )
+    extractor, target_velocity_grid, interpolation_plan = (
+        create_velocity_resampling(
+            reader=reader,
+            population=population,
+            preprocessing=preprocessing,
+            config=config,
+        )
+    )
+    xz_slice = extractor.extract_interpolated_xz(
+        cid=cid,
+        interpolation_plan=interpolation_plan,
+    )
+    velocity_resampling_path = save_velocity_resampling_metadata(
+        output_dir=output_dir,
+        model_id=model_id,
+        source_velocity_grid=extractor.velocity_grid,
+        target_velocity_grid=target_velocity_grid,
+        interpolation_plan=interpolation_plan,
+    )
+
     features = create_features(
-        X=vdf[None, ...],
+        X=xz_slice[None, :, None, :],
         downsample_factor=downsample_factor,
         log_eps=log_eps,
     )
@@ -131,11 +154,12 @@ def predict_coordinate(
     prediction_score = float(prediction_scores[0])
     predicted_class_name = label_to_class[predicted_label]
 
-    extent, dv, threshold = get_vdf_plot_parameters_from_file(
-        file_location=file_location,
-        cid=cid,
-        vdf_shape=vdf.shape,
+    extent = target_velocity_grid["extent_mps"]
+    dv = get_velocity_cell_size_from_extent(
+        extent=extent,
+        vdf_shape=target_velocity_grid["shape"],
     )
+    threshold = get_vdf_plot_threshold(reader=reader, cid=cid)
     metadata_row = {
         "timestep": timestep,
         "cid": int(cid),
@@ -154,7 +178,7 @@ def predict_coordinate(
     coord_name = create_coordinate_name(coord_re)
     output_plot_path = output_dir / f"prediction_{coord_name}_xz.png"
     plot_vdf_xz_slice(
-        vdf=vdf,
+        vdf=xz_slice[:, None, :],
         y_label=None,
         metadata_row=metadata_row,
         extent=extent,
@@ -173,6 +197,12 @@ def predict_coordinate(
         "score_name": score_name,
         "prediction_score": prediction_score,
         "model_classes": model.classes_,
+        "velocity_resampling_path": velocity_resampling_path,
+        "velocity_population": population,
+        "velocity_resampling": interpolation_plan["method_name"],
+        "target_xz_center_coverage_fraction": interpolation_plan[
+            "coverage_fraction"
+        ],
     }
     if point_reference_metadata:
         result["point_reference_metadata"] = {
@@ -315,7 +345,26 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
     log_eps = float(preprocessing["log_eps"])
 
     reader = pt.vlsvfile.VlsvReader(str(file_location))
-    cellids, coords_re = get_vdf_cells_with_coords_re(reader=reader)
+    population = resolve_velocity_population(reader=reader)
+    cellids, coords_re = get_vdf_cells_with_coords_re(
+        reader=reader,
+        pop=population,
+    )
+    extractor, target_velocity_grid, interpolation_plan = (
+        create_velocity_resampling(
+            reader=reader,
+            population=population,
+            preprocessing=preprocessing,
+            config=config,
+        )
+    )
+    velocity_resampling_path = save_velocity_resampling_metadata(
+        output_dir=output_dir,
+        model_id=model_id,
+        source_velocity_grid=extractor.velocity_grid,
+        target_velocity_grid=target_velocity_grid,
+        interpolation_plan=interpolation_plan,
+    )
     region_mask = create_region_mask_re(
         coords_re=coords_re,
         region_re=config["region_re"],
@@ -366,21 +415,22 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
         writer.writeheader()
 
         if len(cellids) > 0:
-            extractor = VdfExtractor(reader=reader)
-
             for start in range(0, len(cellids), batch_size):
                 end = start + batch_size
                 batch_cellids = cellids[start:end]
                 batch_coords_re = coords_re[start:end]
-                vdfs = np.asarray(
+                xz_slices = np.asarray(
                     [
-                        extractor.extract(cid=int(cid))
+                        extractor.extract_interpolated_xz(
+                            cid=int(cid),
+                            interpolation_plan=interpolation_plan,
+                        )
                         for cid in batch_cellids
                     ],
                     dtype=np.float32,
                 )
                 features = create_features(
-                    X=vdfs,
+                    X=xz_slices[:, :, None, :],
                     downsample_factor=downsample_factor,
                     log_eps=log_eps,
                     n_jobs=feature_n_jobs,
@@ -424,8 +474,167 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
         "file_source": resolved_file_source,
         "file_location": file_location,
         "output_path": output_path,
+        "velocity_resampling_path": velocity_resampling_path,
         "n_selected_cells": int(len(cellids)),
+        "velocity_population": population,
+        "source_velocity_shape": tuple(extractor.vdf_shape),
+        "target_velocity_shape": tuple(
+            int(value) for value in target_velocity_grid["shape"]
+        ),
+        "velocity_resampling": interpolation_plan["method_name"],
+        "target_xz_center_coverage_fraction": interpolation_plan[
+            "coverage_fraction"
+        ],
     }
+
+
+def create_velocity_resampling(reader, population, preprocessing, config):
+    """
+    Create one extractor and cached target-plane interpolation plan.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open source VLSV file reader.
+    population : str
+        Population name in the source VLSV file.
+    preprocessing : numpy.lib.npyio.NpzFile or dict
+        Model preprocessing values containing the training velocity grid.
+    config : dict
+        Prediction config containing the velocity-resampling policy.
+
+    Returns
+    -------
+    extractor : src.vdf_extract.VdfExtractor
+        Source VDF extractor.
+    target_velocity_grid : dict
+        Training velocity-grid descriptor.
+    interpolation_plan : dict
+        Cached target xz-plane interpolation plan.
+    """
+
+    extractor = VdfExtractor(reader=reader, pop=population)
+    target_velocity_grid = load_velocity_grid_from_preprocessing(preprocessing)
+    interpolation_plan = create_trilinear_xz_plan(
+        source_grid=extractor.velocity_grid,
+        target_grid=target_velocity_grid,
+    )
+    resampling_config = config.get("velocity_resampling", {})
+    if not isinstance(resampling_config, dict):
+        raise TypeError("velocity_resampling must be a dictionary")
+    mode = str(resampling_config.get("mode", "auto")).lower()
+    method = str(resampling_config.get("method", "trilinear")).lower()
+    outside_source = str(
+        resampling_config.get("outside_source", "zero")
+    ).lower()
+    minimum_coverage = float(
+        resampling_config.get(
+            "minimum_xz_center_coverage_fraction",
+            0.0,
+        )
+    )
+    if mode not in {"auto", "require_same_grid"}:
+        raise ValueError(
+            "velocity_resampling.mode must be 'auto' or 'require_same_grid'"
+        )
+    if method != "trilinear":
+        raise ValueError("velocity_resampling.method must be 'trilinear'")
+    if outside_source != "zero":
+        raise ValueError("velocity_resampling.outside_source must be 'zero'")
+    if minimum_coverage < 0.0 or minimum_coverage > 1.0:
+        raise ValueError(
+            "minimum_xz_center_coverage_fraction must be between zero and one"
+        )
+    if mode == "require_same_grid" and not interpolation_plan["identity"]:
+        raise ValueError(
+            "Source and training velocity grids differ while "
+            "velocity_resampling.mode is require_same_grid"
+        )
+    if interpolation_plan["coverage_fraction"] < minimum_coverage:
+        raise ValueError(
+            "Target xz center coverage is below the configured minimum: "
+            f"{interpolation_plan['coverage_fraction']:.6f} < "
+            f"{minimum_coverage:.6f}"
+        )
+
+    method_name = (
+        "identity"
+        if interpolation_plan["identity"]
+        else "trilinear_raw_zero_fill"
+    )
+    interpolation_plan["method_name"] = method_name
+    print(
+        f"Velocity population: {population}; "
+        f"source shape: {tuple(extractor.vdf_shape)}; "
+        f"target shape: "
+        f"{tuple(int(value) for value in target_velocity_grid['shape'])}; "
+        f"resampling: {method_name}; "
+        f"target xz coverage: "
+        f"{interpolation_plan['coverage_fraction']:.6f}"
+    )
+
+    return extractor, target_velocity_grid, interpolation_plan
+
+
+def save_velocity_resampling_metadata(
+    output_dir,
+    model_id,
+    source_velocity_grid,
+    target_velocity_grid,
+    interpolation_plan,
+):
+    """
+    Save one prediction velocity-resampling provenance sidecar.
+
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path
+        Prediction output directory.
+    model_id : str
+        Trained model identifier.
+    source_velocity_grid : dict
+        Native VLSV velocity-grid descriptor.
+    target_velocity_grid : dict
+        Training velocity-grid descriptor.
+    interpolation_plan : dict
+        Cached interpolation plan used for prediction.
+
+    Returns
+    -------
+    pathlib.Path
+        Saved provenance archive path.
+    """
+
+    output_path = output_dir / "velocity_resampling.npz"
+    np.savez(
+        output_path,
+        model_id=np.asarray(str(model_id)),
+        method=np.asarray(interpolation_plan["method_name"]),
+        outside_source=np.asarray("zero"),
+        source_population=np.asarray(source_velocity_grid["population"]),
+        source_shape=np.asarray(source_velocity_grid["shape"], dtype=np.int64),
+        source_extent_mps=np.asarray(
+            source_velocity_grid["extent_mps"],
+            dtype=np.float64,
+        ),
+        target_population=np.asarray(target_velocity_grid["population"]),
+        target_shape=np.asarray(target_velocity_grid["shape"], dtype=np.int64),
+        target_extent_mps=np.asarray(
+            target_velocity_grid["extent_mps"],
+            dtype=np.float64,
+        ),
+        target_slice_axis=np.asarray(target_velocity_grid["slice_axis"]),
+        target_slice_index=np.asarray(
+            target_velocity_grid["slice_index"],
+            dtype=np.int64,
+        ),
+        target_xz_center_coverage_fraction=np.asarray(
+            interpolation_plan["coverage_fraction"],
+            dtype=np.float64,
+        ),
+    )
+
+    return output_path
 
 
 def model_uses_point_context(model):

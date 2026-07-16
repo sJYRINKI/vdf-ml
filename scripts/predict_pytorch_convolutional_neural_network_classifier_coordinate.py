@@ -76,7 +76,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--file-source",
         default=None,
-        help="File source from config file_templates, for example 2d or 3d_egi.",
+        help="File source from config file_templates, for example 2d or 3d.",
     )
     args = parser.parse_args()
 

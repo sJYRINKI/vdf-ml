@@ -1,7 +1,13 @@
 file_source: 2d
 file_templates:
   2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
-  3d: /wrk-vakka/group/spacephysics/vlasiator/3D/DCB/bulk/bulk.{timestep:07d}.vlsv
+  3d: /wrk-vakka/group/spacephysics/vlasiator/3D/EGI/bulk/dense_cold_hall1e5_afterRestart374/bulk1.{timestep:07d}.vlsv
+
+velocity_resampling:
+  mode: auto
+  method: trilinear
+  outside_source: zero
+  minimum_xz_center_coverage_fraction: 0.0
 
 flux_file_templates:
   2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/flux/bulk.000{timestep:04d}.bin

@@ -10,7 +10,7 @@ from src.dataset_metadata import (
     create_vdf_spatial_metadata,
 )
 from src.timesteps import create_timestep_path
-from src.vdf_extract import VdfExtractor
+from src.vdf_extract import VdfExtractor, create_velocity_grid_descriptor
 from src.point_labels import create_point_label_data, iter_labeled_coords
 from src.point_selection import (
     create_point_sample_metadata,
@@ -55,8 +55,14 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
     reader = pt.vlsvfile.VlsvReader(str(file_location))
     reader_elapsed = time.perf_counter() - reader_start
 
+    velocity_grid = create_velocity_grid_descriptor(reader=reader)
+    population = velocity_grid["population"]
+
     vdf_cells_start = time.perf_counter()
-    vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
+    vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(
+        reader,
+        pop=population,
+    )
     vdf_cells_elapsed = time.perf_counter() - vdf_cells_start
 
     point_start = time.perf_counter()
@@ -81,6 +87,8 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
         raw_x_point_records=point_label_data["raw_x_point_records"],
         raw_o_point_records=point_label_data["raw_o_point_records"],
     )
+    if sample_specs:
+        sample_specs[0]["velocity_grid"] = velocity_grid
 
     specs_elapsed = time.perf_counter() - specs_start
     planning_elapsed = time.perf_counter() - planning_start
@@ -759,11 +767,17 @@ def iter_timestep_sample_specs(sample_specs):
 
     file_location = sample_specs[0]["file_location"]
     timestep = int(sample_specs[0].get("timestep", 0))
+    velocity_grid = sample_specs[0].get("velocity_grid")
+    population = (
+        str(velocity_grid["population"])
+        if velocity_grid is not None
+        else None
+    )
     extraction_start = time.perf_counter()
 
     print_memory_usage(f"timestep {timestep} before reader")
     reader = pt.vlsvfile.VlsvReader(str(file_location))
-    extractor = VdfExtractor(reader=reader)
+    extractor = VdfExtractor(reader=reader, pop=population)
     print_memory_usage(f"timestep {timestep} after reader")
 
     print(f"Timestep {timestep}: extracting {len(sample_specs)} samples")
@@ -882,6 +896,7 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
         "vdf_coord_re",
         "neighbor_position",
         "timestep",
+        "velocity_grid",
         *OMITTED_DATASET_METADATA_COLUMNS,
         *POINT_REFERENCE_METADATA_COLUMNS,
     }

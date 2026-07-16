@@ -19,8 +19,13 @@ from src.dataset_io import (
     flush_and_release_memmaps,
     release_memmap_pages,
     save_metadata,
+    save_velocity_grid_descriptor,
 )
 from src.timesteps import create_timestep_list
+from src.vdf_extract import (
+    normalize_velocity_grid_descriptor,
+    velocity_grid_descriptors_match,
+)
 
 
 POINT_SELECTION_METHOD_ALIASES = {
@@ -193,6 +198,8 @@ def create_dataset(
     if n_samples == 0:
         raise ValueError("No samples were found for the requested timesteps")
 
+    velocity_grid = get_planned_velocity_grid(sample_specs_by_timestep)
+
     extraction_start = time.perf_counter()
     metadata = []
     sample_index = 0
@@ -205,6 +212,15 @@ def create_dataset(
     first_sample, first_sample_iter = extract_first_sample_from_specs(
         first_sample_specs
     )
+    first_sample_shape = tuple(int(value) for value in first_sample["vdf"].shape)
+    velocity_grid_shape = tuple(
+        int(value) for value in velocity_grid["shape"]
+    )
+    if first_sample_shape != velocity_grid_shape:
+        raise ValueError(
+            "First VDF shape does not match the planned velocity grid: "
+            f"{first_sample_shape} != {velocity_grid_shape}"
+        )
 
     X, y = create_memmap_dataset(
         outdir=outdir,
@@ -260,6 +276,10 @@ def create_dataset(
         outdir=outdir,
         metadata=metadata,
     )
+    velocity_grid_path = save_velocity_grid_descriptor(
+        dataset_dir=outdir,
+        velocity_grid=velocity_grid,
+    )
 
     save_elapsed = time.perf_counter() - save_start
     total_elapsed = time.perf_counter() - total_start
@@ -274,6 +294,52 @@ def create_dataset(
     print(f"Saved X: {outdir / 'X.npy'}")
     print(f"Saved y: {outdir / 'y.npy'}")
     print(f"Saved metadata: {outdir / 'metadata.csv'}")
+    print(f"Saved velocity grid: {velocity_grid_path}")
+
+
+def get_planned_velocity_grid(sample_specs_by_timestep):
+    """
+    Validate and return the common grid from planned timestep samples.
+
+    Parameters
+    ----------
+    sample_specs_by_timestep : dict
+        Mapping from timestep to planned sample specification dictionaries.
+
+    Returns
+    -------
+    dict
+        Common normalized velocity-grid descriptor.
+    """
+
+    velocity_grid = None
+    velocity_grid_timestep = None
+    for timestep, sample_specs in sample_specs_by_timestep.items():
+        if not sample_specs:
+            continue
+        timestep_grid = sample_specs[0].get("velocity_grid")
+        if timestep_grid is None:
+            raise ValueError(
+                f"Timestep {int(timestep)} has no planned velocity grid"
+            )
+        timestep_grid = normalize_velocity_grid_descriptor(timestep_grid)
+        if velocity_grid is None:
+            velocity_grid = timestep_grid
+            velocity_grid_timestep = int(timestep)
+            continue
+        if not velocity_grid_descriptors_match(
+            velocity_grid,
+            timestep_grid,
+        ):
+            raise ValueError(
+                "Dataset velocity grid changes between timesteps "
+                f"{velocity_grid_timestep} and {int(timestep)}"
+            )
+
+    if velocity_grid is None:
+        raise ValueError("No planned velocity grid was found")
+
+    return velocity_grid
 
 
 def get_worker_count(n_jobs, config_name):

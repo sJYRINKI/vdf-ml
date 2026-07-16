@@ -46,6 +46,7 @@ from src.training import (
     load_training_data,
     save_training_artifacts,
 )
+from src.dataset_io import create_velocity_grid_preprocessing_values
 from src.dataset_pca import plot_dataset_pca
 
 
@@ -1410,6 +1411,9 @@ def train_pytorch_convolutional_neural_network_classifier(
     save_training_artifacts(
         output_dir=data["output_dir"],
         preprocessing_values={
+            **create_velocity_grid_preprocessing_values(
+                data["velocity_grid"]
+            ),
             "downsample_factor": data["downsample_factor"],
             "dataset_id": dataset_id,
             "model_id": model_id,

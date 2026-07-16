@@ -100,7 +100,46 @@ def create_feature(vdf, downsample_factor=8, log_eps=1e-30):
     numpy.ndarray
         Feature vector.
     """
-    xz_slice = create_xz_slice(vdf)
+    return create_feature_from_xz_slice(
+        xz_slice=create_xz_slice(vdf),
+        downsample_factor=downsample_factor,
+        log_eps=log_eps,
+    )
+
+
+def create_feature_from_xz_slice(
+    xz_slice,
+    downsample_factor=8,
+    log_eps=1e-30,
+):
+    """
+    Convert one raw physical xz VDF slice into flattened features.
+
+    Parameters
+    ----------
+    xz_slice : numpy.ndarray
+        Raw VDF slice with axis order ``[vx, vz]``.
+    downsample_factor : int, optional
+        Factor used to downsample the xz slice.
+    log_eps : float, optional
+        Positive floor applied before log scaling.
+
+    Returns
+    -------
+    numpy.ndarray
+        Flattened feature vector.
+    """
+
+    xz_slice = np.asarray(xz_slice)
+    if xz_slice.ndim != 2:
+        raise ValueError("xz_slice must be a two-dimensional array")
+    downsample_factor = int(downsample_factor)
+    if downsample_factor <= 0:
+        raise ValueError("downsample_factor must be positive")
+    log_eps = float(log_eps)
+    if not np.isfinite(log_eps) or log_eps <= 0.0:
+        raise ValueError("log_eps must be finite and positive")
+
     xz_slice = np.where(xz_slice > 0, xz_slice, log_eps)
     xz_slice = np.log10(xz_slice)
 

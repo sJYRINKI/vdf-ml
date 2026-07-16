@@ -1,7 +1,8 @@
-# python scripts/predict_pytorch_convolutional_neural_network_classifier_region.py --config configs/predict_region_pytorch_convolutional_neural_network_classifier.yaml --start-timestep 1300 --n-timesteps 100 --model-id v68.0 --file-source 3d
+# python scripts/predict_pytorch_convolutional_neural_network_classifier_region.py --config configs/predict_region_pytorch_convolutional_neural_network_classifier.yaml --start-timestep 1300 --n-timesteps 100 --model-id v68.0 --file-source 3d --device cuda --n-jobs 1
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ def main(
     model_id,
     n_jobs=None,
     file_source=None,
+    device="cpu",
 ):
     """
     Predict VDF cells in a spatial region for multiple timesteps.
@@ -34,21 +36,32 @@ def main(
     model_id : str
         Trained model identifier.
     n_jobs : int, optional
-        Override for ``prediction.n_jobs``.
+        Override for ``prediction.n_jobs``. GPU prediction requires one job.
     file_source : str, optional
         Name of file template source to use.
+    device : str, optional
+        Device used for CNN prediction, such as ``cpu`` or ``cuda``.
     """
 
     config = load_config(config_path)
+    prediction_config = config.setdefault("prediction", {})
     if n_jobs is not None:
-        config.setdefault("prediction", {})["n_jobs"] = int(n_jobs)
+        prediction_config["n_jobs"] = int(n_jobs)
+
+    prediction_n_jobs = int(prediction_config.get("n_jobs", 1))
+    device_type = str(device).strip().lower().split(":", maxsplit=1)[0]
+    if device_type != "cpu" and prediction_n_jobs != 1:
+        raise ValueError("GPU prediction requires --n-jobs 1")
 
     results = predict_region_timesteps(
         config=config,
         start_timestep=start_timestep,
         n_timesteps=n_timesteps,
         model_id=model_id,
-        load_model=load_pytorch_convolutional_neural_network_classifier_model,
+        load_model=partial(
+            load_pytorch_convolutional_neural_network_classifier_model,
+            device=device,
+        ),
         file_source=file_source,
     )
 
@@ -95,12 +108,20 @@ if __name__ == "__main__":
         "--n-jobs",
         type=int,
         default=None,
-        help="Override prediction.n_jobs from the config.",
+        help=(
+            "Override prediction.n_jobs from the config. GPU prediction "
+            "requires --n-jobs 1."
+        ),
     )
     parser.add_argument(
         "--file-source",
         default=None,
-        help="File source from config file_templates, for example 2d or 3d_egi.",
+        help="File source from config file_templates, for example 2d or 3d.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Device used for CNN prediction, for example cpu or cuda.",
     )
     args = parser.parse_args()
 
@@ -111,4 +132,5 @@ if __name__ == "__main__":
         model_id=args.model_id,
         n_jobs=args.n_jobs,
         file_source=args.file_source,
+        device=args.device,
     )

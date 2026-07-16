@@ -1,4 +1,4 @@
-# Example: python scripts/backfill_dataset_metadata.py --config CONFIG --dataset-dir DATASET
+#python scripts/backfill_dataset_metadata.py --config configs/create_dataset.yaml --dataset-dir data/train/timesteps_2900_1400_x_manual_o_manual
 
 import argparse
 import sys

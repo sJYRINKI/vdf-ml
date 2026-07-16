@@ -1,6 +1,8 @@
 import numpy as np
 import analysator as pt
 
+from src.vdf_extract import resolve_velocity_population
+
 R_EARTH = 6.371e6
 
 
@@ -228,7 +230,7 @@ def get_region_axis_bounds_re(region_re, axis_name):
     return lower_re, upper_re
 
 
-def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
+def get_cellid_with_vdf(reader, coord_re, pop=None):
     """
     Find the nearest cell ID with a VDF.
 
@@ -239,7 +241,8 @@ def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
     coord_re : array-like of float
         Coordinate in Earth radii, given as ``[x, y, z]``.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
@@ -247,13 +250,14 @@ def get_cellid_with_vdf(reader, coord_re, pop="avgs"):
         Cell ID with a VDF
     """
 
+    pop = resolve_velocity_population(reader=reader, pop=pop)
     coord_m = coord_re_to_m(coord_re)
     cid = reader.get_cellid_with_vdf(coord_m, pop=pop)
 
     return int(cid)
 
 
-def cell_has_vdf(reader, cid, pop="avgs"):
+def cell_has_vdf(reader, cid, pop=None):
     """
     Check whether a cell contains a VDF.
 
@@ -264,7 +268,8 @@ def cell_has_vdf(reader, cid, pop="avgs"):
     cid : int
         Spatial cell ID.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
@@ -272,6 +277,7 @@ def cell_has_vdf(reader, cid, pop="avgs"):
         Whether the cell contains velocity-space data.
     """
 
+    pop = resolve_velocity_population(reader=reader, pop=pop)
     try:
         velocity_cells = reader.read_velocity_cells(int(cid), pop)
     except Exception:
@@ -280,7 +286,7 @@ def cell_has_vdf(reader, cid, pop="avgs"):
     return len(velocity_cells) > 0
 
 
-def get_vdf_cellid_set(reader, pop="avgs"):
+def get_vdf_cellid_set(reader, pop=None):
     """
     Return all spatial cell IDs that contain VDF blocks.
 
@@ -289,7 +295,8 @@ def get_vdf_cellid_set(reader, pop="avgs"):
     reader : analysator.vlsvfile.VlsvReader
         Open VLSV file reader.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
@@ -297,6 +304,7 @@ def get_vdf_cellid_set(reader, pop="avgs"):
         Cell IDs with velocity-space blocks.
     """
 
+    pop = resolve_velocity_population(reader=reader, pop=pop)
     try:
         cellids = reader.read(
             mesh="SpatialGrid",
@@ -312,7 +320,7 @@ def get_vdf_cellid_set(reader, pop="avgs"):
     return {int(cid) for cid in np.atleast_1d(cellids)}
 
 
-def get_vdf_cells_with_coords_re(reader, pop="avgs"):
+def get_vdf_cells_with_coords_re(reader, pop=None):
     """
     Return VDF cell IDs and their coordinates in Earth radii.
 
@@ -321,7 +329,8 @@ def get_vdf_cells_with_coords_re(reader, pop="avgs"):
     reader : analysator.vlsvfile.VlsvReader
         Open VLSV file reader.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
@@ -331,6 +340,7 @@ def get_vdf_cells_with_coords_re(reader, pop="avgs"):
         Cell center coordinates in Earth radii with shape ``(n_cells, 3)``.
     """
 
+    pop = resolve_velocity_population(reader=reader, pop=pop)
     cellids = np.asarray(sorted(get_vdf_cellid_set(reader, pop=pop)), dtype=int)
     if len(cellids) == 0:
         return cellids, np.empty((0, 3), dtype=float)
@@ -416,7 +426,7 @@ def get_vdf_cellids_in_box(
     reader,
     coord_re,
     box_config,
-    pop="avgs",
+    pop=None,
     cell_has_vdf_func=None,
     vdf_cellids=None,
     vdf_coords_re=None,
@@ -433,7 +443,8 @@ def get_vdf_cellids_in_box(
     box_config : dict
         Box half-widths in Earth radii.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
     cell_has_vdf_func : callable, optional
         Function taking a cell ID and returning whether it has VDF data. Kept
         for compatibility; precomputed VDF cell IDs already satisfy this.
@@ -548,7 +559,7 @@ def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
     return float((vmax - vmin) / vdf_shape[axis_index])
 
 
-def get_vdf_plot_parameters(reader, cid, vdf_shape, pop="avgs"):
+def get_vdf_plot_parameters(reader, cid, vdf_shape, pop=None):
     """
     Read sample specific parameters from an open VLSV reader.
 
@@ -561,7 +572,8 @@ def get_vdf_plot_parameters(reader, cid, vdf_shape, pop="avgs"):
     vdf_shape : tuple of int
         Shape of the VDF array.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
@@ -586,7 +598,7 @@ def get_vdf_plot_parameters(reader, cid, vdf_shape, pop="avgs"):
     return extent, dv, threshold
 
 
-def get_vdf_plot_axes_parameters(reader, vdf_shape, pop="avgs"):
+def get_vdf_plot_axes_parameters(reader, vdf_shape, pop=None):
     """
     Read file-level VDF plot axis parameters from an open VLSV reader.
 
@@ -597,7 +609,8 @@ def get_vdf_plot_axes_parameters(reader, vdf_shape, pop="avgs"):
     vdf_shape : tuple of int
         Shape of the VDF array.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
@@ -607,6 +620,7 @@ def get_vdf_plot_axes_parameters(reader, vdf_shape, pop="avgs"):
         Velocity cell size.
     """
 
+    pop = resolve_velocity_population(reader=reader, pop=pop)
     extent = np.asarray(
         reader.get_velocity_mesh_extent(pop=pop),
         dtype=float
@@ -642,7 +656,7 @@ def get_vdf_plot_threshold(reader, cid):
     return threshold
 
 
-def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs"):
+def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop=None):
     """
     Read sample specific parameters from a VLSV file.
 
@@ -655,7 +669,8 @@ def get_vdf_plot_parameters_from_file(file_location, cid, vdf_shape, pop="avgs")
     vdf_shape : tuple of int
         Shape of the VDF array.
     pop : str, optional
-        Particle population name.
+        Explicit particle population override. If omitted, ``avgs`` is used
+        when available and ``proton`` otherwise.
 
     Returns
     -------
