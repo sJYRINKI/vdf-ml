@@ -1,0 +1,112 @@
+# Autoencoder training configuration. The command separately selects the
+# dataset, output directory, and representation (raw or hermite). Physical
+# class and topology values never enter the model input or reconstruction
+# target. Training writes autoencoder.pt, metrics.txt, training_history.csv,
+# and one consolidated reconstruction_examples.png; metrics.txt reports
+# normalized-space reconstruction MSE by chronological split and class, with
+# class labels introduced only after inference for reporting and plot titles.
+# Hermite input is the complete signed physical-VDF coefficient cube. Its
+# order and optional rotation come from the saved dataset rather than this
+# model configuration; Hermite values are not logged or thresholded.
+
+random_state: 1234
+# Device choices are auto, cpu, cuda, or cuda:N. auto selects the current
+# CUDA/ROCm accelerator when PyTorch exposes one and otherwise selects CPU;
+# cuda:N selects visible accelerator index N.
+device: auto
+
+# Raw-only preprocessing applied to the middle-vy physical VDF plane before
+# training-derived per-pixel normalization; Hermite coefficients skip it.
+raw:
+  # Positive physical VDF floor in s^3 m^-6. Nonpositive raw values are
+  # replaced by this value before log10, preventing undefined logarithms.
+  log_eps: 1.0e-30
+
+# Encoder, decoder, and deterministic latent-vector architecture. These
+# choices affect parameter count, activation memory, and reconstruction
+# capacity for the selected raw or Hermite representation.
+model:
+  # Nonempty list of positive integers; each value is the output-channel
+  # count of one successive 2-D raw Conv/ReLU/average-pooling block.
+  raw_channels: [8, 16, 32]
+  # Nonempty list of positive integers; each value is the output-channel
+  # count of one successive 3-D Hermite Conv/ReLU/average-pooling block.
+  hermite_channels: [8, 16, 32]
+  # Positive integer giving the learned latent-vector width; larger values
+  # increase embedding capacity and dense-layer parameter memory.
+  latent_dim: 64
+  # Pooling choice; average is the only supported option and halves every
+  # spatial axis that is still large enough for another reduction.
+  pooling: average
+
+# Chronological complete-timestep partitioning. Two boundary gaps are
+# excluded first; fractions then assign leading usable timesteps to train
+# and validation, with every remaining usable timestep assigned to test.
+split:
+  # Float fraction from 0 to 1 of usable unique timesteps assigned to model
+  # fitting. It combines with validation_fraction, leaving the remainder
+  # for the test partition.
+  train_fraction: 0.6
+  # Float fraction from 0 to 1 of usable unique timesteps assigned to epoch
+  # selection. train_fraction + validation_fraction must leave test data.
+  validation_fraction: 0.2
+  # Nonnegative integer count of unique timesteps omitted at each of the
+  # train-validation and validation-test boundaries to reduce leakage.
+  gap_timesteps: 1
+
+# Memory-mapped sample loading and bounded float64 normalization. Batch and
+# worker choices trade throughput against accelerator and host-memory use.
+data_loader:
+  # Positive integer samples per optimizer update; larger batches may improve
+  # throughput but increase activation and accelerator memory use.
+  batch_size: 8
+  # Nonnegative integer PyTorch reader-process count. 0 reads in the training
+  # process; larger values load samples concurrently and use more host memory.
+  num_workers: 0
+  # Positive integer samples per float64 normalization-statistics batch;
+  # smaller values reduce peak host memory without changing the statistics.
+  normalization_batch_size: 8
+  # Choices are true, false, or auto. true pins loader tensors in host memory,
+  # false disables pinning, and auto pins only for CUDA/ROCm execution.
+  pin_memory: auto
+
+# AdamW parameter-update settings used for every trainable encoder, latent,
+# and decoder parameter.
+optimizer:
+  # Positive float AdamW step size; larger values make faster but potentially
+  # less stable parameter updates.
+  learning_rate: 1.0e-3
+  # Nonnegative float decoupled AdamW weight-decay coefficient; 0 disables
+  # parameter shrinkage and larger values regularize weights more strongly.
+  weight_decay: 1.0e-4
+  # Exactly two floats from 0 to below 1: exponential decay factors for the
+  # AdamW first-moment and second-moment estimates, respectively.
+  betas: [0.9, 0.999]
+  # Positive float added to the AdamW denominator for numerical stability;
+  # it does not alter the reconstruction-loss definition.
+  epsilon: 1.0e-8
+
+# Training duration and early stopping. The best checkpoint is the epoch
+# with the lowest normalized-space validation reconstruction MSE.
+training:
+  # Positive integer maximum number of complete training epochs.
+  max_epochs: 50
+  # Positive integer consecutive epochs without a sufficient validation-MSE
+  # decrease before training stops early.
+  patience: 10
+  # Nonnegative float minimum normalized-space validation-MSE decrease that
+  # counts as an improvement and resets the patience counter.
+  min_delta: 1.0e-6
+
+# reconstruction_examples.png contains deterministic original,
+# reconstruction, and absolute-error panels from the best selected model.
+# Raw panels use the extraction physical VDF style and one logarithmic scale;
+# Hermite panels retain the signed coefficient visualization and white axes;
+# labels follow the saved unrotated or rotated coefficient-axis order.
+plot:
+  # Positive integer maximum examples retained for each physical class in
+  # each of train, validation, and test within the combined figure.
+  max_per_class: 3
+  # Positive integer PNG resolution in dots per inch; increasing it improves
+  # raster detail while increasing rendering time and output-file size.
+  dpi: 150

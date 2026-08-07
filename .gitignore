@@ -1,11 +1,23 @@
 __pycache__/
-*.pyc
-
+.venv/
 *.vlsv
 *.npy
 *.npz
 
 vdf-ml-env/
+vdf-ml-env-hile/
+vdf-ml-hile-wheelhouse/
 externals/analysator/
 data/
+tests/
+AGENTS.md
+DEVELOPEMENT_AND_TESTING.md
+outputs/
+
+!configs/data/
+!configs/data/**
+!scripts/data/
+!scripts/data/**
+!src/data/
+!src/data/**
 slurm/

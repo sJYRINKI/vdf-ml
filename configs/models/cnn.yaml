@@ -1,0 +1,123 @@
+# CNN training configuration. The command separately selects the dataset,
+# output directory, and representation (raw or hermite). Classification width
+# follows the physical classes present in metadata; training writes model.pt
+# and one consolidated metrics.txt report containing class and topology
+# performance for the validation-selected model.
+# Hermite input is the full signed physical-VDF coefficient cube: no log or
+# MinValue threshold is applied. Its order and optional extraction rotation
+# are derived from the saved dataset shape and recorded in the checkpoint.
+
+random_state: 1234
+# Device choices are auto, cpu, cuda, or cuda:N. auto selects the current
+# CUDA/ROCm accelerator when PyTorch exposes one and otherwise selects CPU;
+# cuda:N selects visible accelerator index N and is the first model stage.
+device: auto
+# Positive integer maximum visible CUDA/ROCm devices for consecutive CNN
+# stages. 1 keeps every stage on the selected device; values above 1 place
+# contiguous encoder/head stages across devices in one process, transferring
+# activations between them without DDP. Surplus devices remain unused.
+model_parallel_gpus: 1
+
+# Raw-only preprocessing applied to the complete (vx, vy, vz) VDF before
+# training-derived per-feature normalization; Hermite coefficients skip it.
+raw:
+  # Positive physical VDF floor in s^3 m^-6. Nonpositive raw values are
+  # replaced by this value before log10, preventing undefined logarithms.
+  log_eps: 1.0e-30
+
+# Representation-specific Conv3d encoders and the shared class/topology
+# projection. Width and pooling choices control capacity and memory use.
+model:
+  # Nonempty list of positive integers; each value is the output-channel
+  # count of one successive Conv3d block for the complete raw VDF.
+  raw_channels: [4, 8, 16]
+  # Nonempty list of positive integers; each value is the output-channel
+  # count of one successive Conv3d block for the Hermite coefficient volume.
+  hermite_channels: [16, 32, 64]
+  # Exactly three positive integers in [vx, vy, vz] order; adaptive average
+  # pooling produces this raw spatial shape before the dense projection.
+  raw_adaptive_pool_shape: [2, 2, 2]
+  # Exactly three positive integers. Adaptive average pooling produces this
+  # shape before flattening. Input axes come from the saved cube:
+  # [n_x, n_y, n_z] unrotated or [n_parallel, n_perp1, n_perp2] rotated.
+  adaptive_pool_shape_3d: [2, 2, 2]
+  # Positive integer width of the dense embedding shared by the class and
+  # six-value topology heads; larger widths increase capacity and parameters.
+  shared_hidden_size: 64
+  # Float from 0 to 1 giving the training-time dropout probability before
+  # both output heads; 0 disables dropout and evaluation always disables it.
+  dropout: 0.2
+
+# Auxiliary six-target topology scaling and loss weighting. Topology is a
+# masked training target and reported output, never a CNN input feature.
+topology:
+  # Nonnegative float multiplier in total_loss = class_cross_entropy +
+  # loss_weight * masked_topology_SmoothL1; 0 removes its loss contribution.
+  loss_weight: 0.1
+  # Positive float in Earth radii: a training-target standard deviation at
+  # or below this threshold is replaced by 1 before topology standardization.
+  scaler_epsilon: 1.0e-8
+
+# Chronological complete-timestep partitioning. Two boundary gaps are
+# excluded first; fractions then assign leading usable timesteps to train
+# and validation, with every remaining usable timestep assigned to test.
+split:
+  # Float fraction from 0 to 1 of usable unique timesteps assigned to model
+  # fitting. It combines with validation_fraction, leaving the remainder
+  # for the test partition.
+  train_fraction: 0.6
+  # Float fraction from 0 to 1 of usable unique timesteps assigned to epoch
+  # selection. train_fraction + validation_fraction must leave test data.
+  validation_fraction: 0.2
+  # Nonnegative integer count of unique timesteps omitted at each of the
+  # train-validation and validation-test boundaries to reduce leakage.
+  gap_timesteps: 1
+
+# Memory-mapped sample loading and bounded float64 normalization. Batch and
+# worker choices trade throughput against accelerator and host-memory use.
+data_loader:
+  # Positive integer samples per optimizer update; larger batches may improve
+  # throughput but increase activation memory. Full raw VDFs commonly require
+  # a smaller value than Hermite inputs on the same device layout.
+  batch_size: 16
+  # Nonnegative integer PyTorch reader-process count. 0 reads in the training
+  # process; larger values load samples concurrently and use more host memory.
+  num_workers: 0
+  # Positive integer samples per float64 normalization-statistics batch;
+  # smaller values reduce peak host memory without changing the statistics.
+  normalization_batch_size: 16
+  # Choices are true, false, or auto. true pins loader tensors in host memory,
+  # false disables pinning, and auto pins only for CUDA/ROCm execution.
+  pin_memory: auto
+
+# AdamW settings for one optimizer spanning parameters on every occupied
+# model stage device.
+optimizer:
+  # Positive float AdamW step size; larger values make faster but potentially
+  # less stable parameter updates.
+  learning_rate: 1.0e-3
+  # Nonnegative float decoupled AdamW weight-decay coefficient; 0 disables
+  # parameter shrinkage and larger values regularize weights more strongly.
+  weight_decay: 1.0e-4
+  # Exactly two floats from 0 to below 1: exponential decay factors for the
+  # AdamW first-moment and second-moment estimates, respectively.
+  betas: [0.9, 0.999]
+  # Positive float added to the AdamW denominator for numerical stability;
+  # it does not alter either loss definition.
+  epsilon: 1.0e-8
+  # null or a positive float. null disables clipping; a number caps the
+  # global L2 gradient norm across all model stages before each optimizer step.
+  gradient_clip_norm: null
+
+# Training duration and early stopping. The best checkpoint maximizes
+# validation macro F1, using lower total multitask loss for ties within
+# min_delta.
+training:
+  # Positive integer maximum number of complete training epochs.
+  max_epochs: 200
+  # Positive integer consecutive epochs without a macro-F1/loss selection
+  # improvement before training stops early.
+  patience: 20
+  # Nonnegative dimensionless float: required macro-F1 increase and equality
+  # tolerance for invoking the lower-total-loss tie breaker.
+  min_delta: 1.0e-4

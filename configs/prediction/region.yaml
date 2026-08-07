@@ -1,0 +1,76 @@
+# Region prediction source, spatial selection, batching, and plotting settings.
+# The command supplies checkpoint, output directory, timestep range, and
+# device. The checkpoint owns representation and physical class order.
+# Raw checkpoints receive each complete source VDF after resampling to the
+# checkpoint velocity grid; combined figures still show 2-D cuts only for
+# scientific visualization.
+# Hermite checkpoints store the actual coefficient order and extraction
+# rotation. Prediction projects the physical linear VDF with no log or
+# MinValue threshold and reproduces the saved unrotated or rotated frame.
+
+# Source geometry used to choose a path from file_templates. Allowed values
+# are 2d for the BCH source or 3d for the EGI source; --file-source can
+# override this choice for one command.
+file_source: 3d
+# VLSV path templates keyed by every allowed file_source value. The command
+# substitutes each requested integer timestep into the named {timestep:...}
+# field before opening that source file.
+file_templates:
+  2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+  3d: /wrk-vakka/group/spacephysics/vlasiator/3D/EGI/bulk/dense_cold_hall1e5_afterRestart374/bulk1.{timestep:07d}.vlsv
+# Velocity-space population read from each VLSV source. Use auto to select avgs
+# when present and otherwise proton, or provide one exact source population
+# name such as proton.
+population: auto
+
+# Inclusive VDF-cell-centre selection bounds in Earth radii. Each option takes
+# [minimum, maximum] and controls which source cells are predicted and written
+# to each timestep CSV.
+region_re:
+  # Inclusive x-coordinate interval [minimum, maximum] in Earth radii.
+  x_between: [-20.0, -15.0]
+  # Inclusive y-coordinate interval [minimum, maximum] in Earth radii.
+  y_between: [-1.0, 1.0]
+  # Inclusive z-coordinate interval [minimum, maximum] in Earth radii.
+  z_between: [-1.0, 1.0]
+
+# CNN inference settings applied independently to every requested timestep.
+prediction:
+  # Number of selected cells prepared for one CNN inference call. A larger
+  # positive integer may improve throughput but uses more CPU/GPU memory; it
+  # does not limit the total cells predicted or written to CSV.
+  batch_size: 1
+
+# Optional combined figure written beside each predictions_<timestep>.csv.
+# These options affect visualization only and do not change CSV rows.
+plotting:
+  # Enable combined-figure output. true writes one PNG per timestep after its
+  # CSV; false writes the CSV without rendering a figure.
+  enabled: true
+  # Spatial-map bounds as [xmin, xmax, zmin, zmax] in Earth radii. Four numeric
+  # values control only the displayed x-z view; region_re controls prediction.
+  spatial_box_re: [-30.0, 30.0, -15.0, 15.0]
+  # Maximum number of representative source VDF panels shown with each map.
+  # Use a positive integer; this does not limit predictions or CSV rows.
+  maximum_examples: 5
+  # Strategy for choosing the displayed VDF panels. Allowed values are
+  # highest_confidence_per_class (best row from each class),
+  # highest_confidence_overall (best rows regardless of class), first_per_class
+  # (first row from each class), or explicit_cids (configured cell IDs only).
+  # Selection affects the figure only; every predicted row remains in the CSV.
+  # For explicit_cids, add an ``explicit_cids: [cid, ...]`` list in this
+  # plotting section; list order controls panel order and maximum_examples caps it.
+  representative_selection: highest_confidence_per_class
+  # The map prefers stored x velocity and otherwise uses legacy rho_v/rho. It
+  # draws compact class markers only for representatives with displayed VDF
+  # panels. The dedicated legend below the map identifies classes; distance
+  # circles, per-marker text, and topology vectors are not drawn.
+  # Magnetic-field streamline overlay. true requests black streamlines on the
+  # x-velocity map; false omits them without changing prediction values.
+  show_streamlines: true
+  # Saved-PNG resolution in dots per inch. Higher integer values increase pixel
+  # resolution and plotting cost without changing prediction or CSV values.
+  dpi: 150
+  # Positive symmetric velocity-axis limit for every VDF panel, in metres per
+  # second; 2000000 displays each velocity axis from -2000 to +2000 km/s.
+  velocity_limit_ms: 2000000

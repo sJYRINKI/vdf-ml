@@ -1,5 +1,0 @@
-dataset_dir: data/train/timesteps_{timestep}
-output_dir: data/train/timesteps_{timestep}/plots/sample_plots
-
-plot:
-  vdflim: 2000000.0

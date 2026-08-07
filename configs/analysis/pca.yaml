@@ -1,0 +1,106 @@
+# Active PCA-analysis settings. The command supplies dataset/output paths and
+# chooses ``raw`` or ``hermite`` features; these options control reproducible
+# streaming PCA, KMeans diagnostics, nearest-neighbor purity, t-SNE, figures,
+# and the human-readable metrics report.
+# Hermite analysis memory-maps the complete signed physical-VDF coefficient
+# cube, derives its order from X_hermite.npy, and flattens every coefficient
+# in C order with no log scaling or thresholding and with every coefficient
+# retained.
+
+random_state: 1234
+
+# Positive number of leading PCA score columns supplied to KMeans, silhouette,
+# nearest-neighbor purity, and t-SNE. It must not exceed ``pca.n_components``;
+# the value is a component count and has no physical unit.
+analysis_components: 32
+
+# Positive neighbor count used to measure local physical-label purity in the
+# leading PCA score space; larger values average class agreement more broadly.
+nearest_neighbors: 25
+
+# Raw-only feature preparation. Hermite analysis ignores this section.
+raw:
+  # Positive floor in the saved VDF's physical units (s^3 m^-6), applied to
+  # every raw voxel before ``log10`` so zero values remain finite features.
+  log_eps: 1.0e-30
+
+# PyTorch standardization, decomposition, and score-projection settings.
+# KMeans, physical metrics, t-SNE, plots, and output writing continue on CPU
+# after PCA scores return as NumPy arrays (rank zero only in multi-GPU mode).
+pca:
+  # Choice ``full`` uses exact reduced SVD for single-device incremental
+  # updates; ``lowrank`` uses seeded randomized updates. Feature-sharded
+  # multi-GPU mode uses an exact reduced row-Gram solve for either choice,
+  # while ``lowrank`` retains the configured oversampling rows between updates.
+  method: full
+  # Single-device choice: ``auto`` selects CUDA when available and otherwise
+  # CPU; ``cpu`` forces CPU; ``cuda`` selects the default visible GPU; and
+  # ``cuda:N`` selects visible CUDA device index N. Multi-GPU mode ignores this
+  # value and uses one torchrun-owned CUDA/NCCL device per rank.
+  device: auto
+  # Boolean choice: ``true`` shards contiguous feature columns across one
+  # torchrun/NCCL process per GPU; ``false`` runs the ordinary single-device
+  # path. In sharded mode only rank zero runs downstream analysis and writes.
+  multi_gpu: false
+  # Positive batch size in saved samples used for statistics, incremental PCA
+  # updates, and score projection. Smaller batches reduce peak feature memory
+  # but increase the number of decomposition and I/O passes.
+  batch_size: 16
+  # Positive number of PCA components and score columns retained for analysis;
+  # it is dimensionless and bounded by the sample and feature counts.
+  n_components: 64
+  # Nonnegative count of extra working rows retained only by ``lowrank``;
+  # larger values can improve the approximation but increase memory and work.
+  # Single-device mode uses randomized vectors; multi-GPU uses row-Gram rows.
+  lowrank_oversampling: 5
+  # Nonnegative power-iteration count used only by single-device randomized
+  # ``lowrank`` PCA. More iterations can improve accuracy at extra compute
+  # cost; distributed row-Gram PCA and ``full`` mode ignore this value.
+  lowrank_niter: 4
+
+# Label-blind scikit-learn KMeans diagnostic fitted in the leading PCA score
+# space. The workflow derives cluster count from physical classes in metadata;
+# these options affect fitting effort but do not change physical labels.
+kmeans:
+  # Positive integer number of independent centroid initializations; KMeans
+  # keeps the solution with the lowest within-cluster sum of squares.
+  n_init: 20
+  # Positive maximum Lloyd/Elkan update iterations allowed per initialization.
+  max_iter: 300
+  # Algorithm choice: ``lloyd`` uses the standard update loop; ``elkan`` uses
+  # triangle-inequality bounds that can accelerate well-separated clusters at
+  # the cost of an additional sample-by-cluster distance-bound array.
+  algorithm: lloyd
+
+# Label-blind scikit-learn t-SNE visualization fitted to the same leading PCA
+# scores. Its dimensionless embedding coordinates are for visualization only;
+# physical and KMeans labels do not enter fitting.
+tsne:
+  # Positive embedding dimension count; ``2`` supplies the x-y coordinates
+  # used by the current physical-class scatter plot.
+  n_components: 2
+  # Positive dimensionless perplexity, smaller than the sample count, setting
+  # the effective neighborhood size in PCA score space.
+  perplexity: 50
+  # Choice ``auto`` lets scikit-learn derive the dimensionless optimization
+  # step size; a positive numeric value uses that fixed learning rate instead.
+  learning_rate: auto
+  # Positive dimensionless early-exaggeration factor that strengthens
+  # attractive forces during the initial optimization phase.
+  early_exaggeration: 16.0
+  # Positive maximum number of t-SNE gradient-descent iterations.
+  max_iter: 2000
+  # Initialization choice: ``pca`` starts from a PCA projection and ``random``
+  # starts from seeded random coordinates.
+  init: pca
+  # Nonnegative Matplotlib scatter area in points squared used by both
+  # physical-class PCA/t-SNE figures; it does not affect fitted coordinates.
+  marker_size: 3
+  # Dimensionless marker opacity from ``0`` (transparent) to ``1`` (opaque)
+  # used by the t-SNE figure to control overplotting.
+  alpha: 0.28
+
+# Output-figure settings shared by the PCA and t-SNE physical-class plots.
+plot:
+  # Positive raster resolution in dots per inch used when saving both figures.
+  dpi: 150

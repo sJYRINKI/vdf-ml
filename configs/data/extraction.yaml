@@ -1,0 +1,181 @@
+# Active dataset-extraction settings. The extraction command supplies the
+# dataset kind and timestep range; these options control source paths, saved
+# representations, worker counts, physical point selection, and optional
+# plotting and animation artifacts.
+
+# VLSV source template. ``{timestep:04d}`` inserts the requested timestep as
+# four zero-padded digits; the resolved file supplies VDFs and plasma fields.
+file_template_bulk: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+# Magnetic-flux template using the same timestep placeholder. The resolved
+# binary grid supplies the flux surface used for X/O critical-point detection.
+file_template_flux: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/flux/bulk.000{timestep:04d}.bin
+
+# Base output directory selected by ``--dataset-kind``. Available choices are
+# ``train`` and ``test``; the workflow appends the timestep-derived dataset
+# directory beneath the corresponding path.
+output_dirs:
+  train: data/train
+  test: data/test
+
+# Fixed physical-class names and integer IDs written to ``metadata.csv``.
+# These seven names are the available supervised targets consumed by current
+# CNN training, evaluation, and prediction.
+labels:
+  lobe: 0
+  current_layer: 1
+  o_point: 2
+  x_point: 3
+  solar_wind: 4
+  magnetosheath: 5
+  inner_magnetosphere: 6
+
+# Joblib concurrency for independent timestep work. Each value accepts ``1``
+# for serial execution, a positive integer for exactly that many workers,
+# ``-1`` for all available logical CPUs, or a value below ``-1`` to leave
+# ``abs(value + 1)`` logical CPUs unused according to Joblib semantics.
+creation:
+  # Worker count used while opening sources and planning sample locations.
+  planning_n_jobs: 32
+  # Worker count used while reading and writing planned VDF samples.
+  # Raw-only extraction uses this Joblib setting. When Hermite output is
+  # enabled, the aligned raw/Hermite callback uses the serial extraction path
+  # even when this value is greater than one.
+  extraction_n_jobs: 12
+
+# Saved-representation settings. Raw ``X.npy`` is always written; the nested
+# Hermite options control whether ``X_hermite.npy`` is additionally produced.
+representations:
+  hermite:
+    # ``true`` saves physical-VDF Hermite coefficients in ``X_hermite.npy``;
+    # ``false`` writes only the mandatory raw representation.
+    enabled: True
+    # Positive integer count of physicists' Hermite modes per velocity axis.
+    # The physical linear VDF is projected without log or MinValue threshold.
+    order: 22
+    # ``false`` uses the original ``(vx, vy, vz)`` frame. ``true`` first
+    # rotates the physical VDF to ``(B, perpendicular bulk flow,
+    # B x perpendicular flow)`` before calculating moments and coefficients.
+    rotate: True
+    # NumPy dtype name, such as ``float32`` or ``float64``, controlling the
+    # saved Hermite coefficient precision and disk/memory footprint.
+    output_dtype: float32
+
+# Optional artifact switches. Every plotting or animation key accepts the
+# Boolean choices ``true`` (produce the artifact) or ``false`` (skip it).
+postprocessing:
+  # ``true`` writes one x-directed bulk-velocity colormap per timestep;
+  # ``false`` skips colormap rendering. The map uses a symmetric ``bwr`` range
+  # of +/-1.5e6 m s^-1, black magnetic streamlines, and yellow VDF cells.
+  # It draws source coordinates in blue and selected VDF cells in red, using
+  # the same class or point marker shape. Overlapping union sets show one
+  # physical outline; disjoint sets show both whole physical and manual
+  # outlines.
+  plot_colormaps: true
+  # ``true`` writes one square vx-vz frame per sample at its peak vy; ``false``
+  # skips VDF frames. The display uses the source cell's physical sparsity
+  # threshold and float32 ``plane * dv``, where ``dv`` is in m s^-1. Values
+  # below ``threshold * dv`` are masked; ``nipy_spectral`` and ``LogNorm`` are
+  # drawn over white axes labelled in km s^-1, grouped into CID directories.
+  plot_vdfs: true
+  # ``true`` saves one signed Hermite-coefficient frame per extracted sample,
+  # grouped by CID and ordered by timestep; ``false`` skips these frames.
+  # Requires ``representations.hermite.enabled: true``.
+  plot_hermites: true
+  # ``true`` encodes existing Stage 6 colormap frames in timestep order;
+  # ``false`` does not create a colormap animation.
+  animate_colormaps: true
+  # ``true`` encodes each multi-frame CID directory without class regrouping;
+  # ``false`` does not create per-CID VDF animations.
+  animate_vdfs: true
+  # Positive playback rate in frames per second used by both animation types.
+  animation_fps: 30
+  # Filename extension and ffmpeg container, for example ``mp4`` or ``mkv``,
+  # used for both animation types; availability depends on installed ffmpeg.
+  animation_format: mp4
+
+# X/O detection labels, retained spatial regions, and VDF-cell selection
+# geometry. Coordinate triples use [x_re, y_re, z_re] order. All spatial
+# coordinates and widths ending in ``_re`` use Earth radii (R_E); local
+# ion-scale widths ending in ``_di`` are dimensionless.
+points:
+  # Label name assigned to detected X points; the value must be a key in
+  # ``labels`` and controls the saved class ID and marker identity.
+  x_class_name: x_point
+  # Label name assigned to detected O points; the value must be a key in
+  # ``labels`` and controls the saved class ID and marker identity.
+  o_class_name: o_point
+  # Ordered list of keys from ``regions_re``. Only detected X/O points inside
+  # one of these named regions are retained, in the listed precedence order.
+  point_region_names: [tail, sunward]
+  # Named inclusive x-z acceptance regions in R_E. ``x_between`` is
+  # ``[minimum, maximum]`` and ``z_abs_max`` retains ``|z|`` at or below that
+  # value; omitted y bounds leave y unrestricted.
+  regions_re:
+    tail:
+      x_between: [-30.0, -10.0]
+      z_abs_max: 1.0
+    sunward:
+      x_between: [6.0, 15.0]
+      z_abs_max: 8.0
+  # Settings that select VDF-carrying cells around each accepted X point.
+  x_selection:
+    # Choice manual uses the configured manual area; physical uses the Hessian
+    # box; consensus keeps their intersection.
+    # union keeps every cell selected by either area.
+    # no selected VDF cell is omitted.
+    # When union sets share a VDF cell, colormaps show only the physical
+    # search-area outline; disjoint sets show both. Every selected cell stays.
+    method: physical
+    # VLSV proton number-density producer whose values in m^-3 determine the
+    # local ion inertial length used by the physical Hessian box.
+    density_variable: rho
+    # Nonnegative half-widths along Hessian eigenvectors, measured in local
+    # ion inertial lengths d_i; each value scales one eigenvector direction.
+    half_width_di:
+      eigenvector_0: 2.0
+      eigenvector_1: 2.0
+    # Nonnegative physical-box y half-width in R_E; ``0`` leaves y unrestricted.
+    y_half_width_re: 0.0
+    # Nonnegative manual box half-widths in R_E around the detected X point.
+    manual_re:
+      x_half_width_re: 0.4
+      # Manual y half-width in R_E; ``0`` leaves y unrestricted.
+      y_half_width_re: 0.0
+      z_half_width_re: 0.3
+  # Settings that select VDF-carrying cells around each accepted O point.
+  o_selection:
+    # Choice manual uses the configured manual area; physical uses the O-point
+    # flux contour; consensus keeps their intersection.
+    # union keeps every cell selected by either area.
+    # no selected VDF cell is omitted.
+    # When union sets share a VDF cell, colormaps show only the physical
+    # search-area outline; disjoint sets show both. Every selected cell stays.
+    method: union
+    # Dimensionless value from ``0`` to ``1`` locating the physical contour
+    # between O-point flux (0) and the selected X-boundary flux (1).
+    core_fraction: 0.7
+    # Nonnegative physical-contour y half-width in R_E; ``0`` leaves y
+    # unrestricted.
+    y_half_width_re: 0.0
+    # Nonnegative manual box half-widths in R_E around the detected O point.
+    manual_re:
+      x_half_width_re: 0.4
+      # Manual y half-width in R_E; ``0`` leaves y unrestricted.
+      y_half_width_re: 0.0
+      z_half_width_re: 0.3
+
+# Optional manual samples keyed by a name from ``labels``. Each list accepts
+# zero or more [x_re, y_re, z_re] coordinates in Earth radii and selects the
+# nearest VDF-carrying cell; an empty list creates no samples for that class.
+# ``current_layer`` is not configured through manual coordinates: it is the
+# inclusive magnetotail fallback and uses no current-density detector.
+class_coords_re:
+  lobe:
+    - [-12, 0, 8]
+    - [-12, 0, -8]
+  solar_wind:
+    - [25, 0, 0]
+  magnetosheath:
+    - [15, 0, 0]
+  inner_magnetosphere:
+    - [7, 0, 0]

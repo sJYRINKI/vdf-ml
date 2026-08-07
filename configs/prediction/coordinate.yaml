@@ -1,0 +1,46 @@
+# Coordinate prediction source and plotting settings. The command supplies
+# checkpoint, output directory, timestep, [x_re, y_re, z_re] in Earth radii,
+# and device. The checkpoint owns representation and physical class order.
+# Raw checkpoints receive the complete source VDF after resampling to the
+# checkpoint velocity grid; combined figures still show 2-D cuts only for
+# scientific visualization.
+# Hermite checkpoints store the actual coefficient order and extraction
+# rotation. Prediction projects the physical linear VDF with no log or
+# MinValue threshold and reproduces the saved unrotated or rotated frame.
+
+# Source geometry used to choose a path from file_templates. Allowed values
+# are 2d for the BCH source or 3d for the EGI source; --file-source can
+# override this choice for one command.
+file_source: 2d
+# VLSV path templates keyed by every allowed file_source value. The command
+# substitutes its integer timestep into the named {timestep:...} field.
+file_templates:
+  2d: /wrk-vakka/group/spacephysics/vlasiator/2D/BCH/bulk/bulk.000{timestep:04d}.vlsv
+  3d: /wrk-vakka/group/spacephysics/vlasiator/3D/EGI/bulk/dense_cold_hall1e5_afterRestart374/bulk1.{timestep:07d}.vlsv
+# Velocity-space population read from the VLSV source. Use auto to select avgs
+# when present and otherwise proton, or provide one exact source population
+# name such as proton.
+population: auto
+
+# predictions_<timestep>.csv is always written; these options control only the
+# optional prediction_combined.png visualization created after the CSV.
+plotting:
+  # Enable combined-figure output. true writes the PNG after prediction CSV
+  # output; false writes the CSV without rendering a figure.
+  enabled: true
+  # Spatial-map bounds as [xmin, xmax, zmin, zmax] in Earth radii. Four numeric
+  # values control only the displayed x-z view and do not change VDF-cell choice.
+  spatial_box_re: [-30.0, 30.0, -15.0, 15.0]
+  # The map prefers stored x velocity and otherwise uses legacy rho_v/rho.
+  # It shows a compact blue requested-coordinate star, a compact selected-VDF
+  # marker, scalar X/O distance circles, and a dedicated legend below the
+  # colormap; vector arrows and inferred point endpoints are not rendered.
+  # Magnetic-field streamline overlay. true requests black streamlines on the
+  # x-velocity map; false omits them without changing prediction values.
+  show_streamlines: true
+  # Saved-PNG resolution in dots per inch. Higher integer values increase pixel
+  # resolution and plotting cost without changing prediction or CSV values.
+  dpi: 150
+  # Positive symmetric velocity-axis limit for every VDF panel, in metres per
+  # second; 2000000 displays each velocity axis from -2000 to +2000 km/s.
+  velocity_limit_ms: 2000000
