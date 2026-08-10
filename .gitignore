@@ -11,7 +11,7 @@ externals/analysator/
 data/
 tests/
 AGENTS.md
-docs/DEVELOPEMENT_AND_TESTING.md
+/docs/DEVELOPMENT_AND_TESTING.md
 outputs/
 
 !configs/data/
