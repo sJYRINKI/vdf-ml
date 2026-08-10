@@ -567,7 +567,6 @@ ordinary exceptions.
 - [CNN](docs/CNN.md)
 - [Autoencoder](docs/AUTOENCODER.md)
 - [Prediction and plotting](docs/PREDICTION_AND_PLOTTING.md)
-- [Development and testing](docs/DEVELOPMENT_AND_TESTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Historical recovery](docs/LEGACY.md)
 
