@@ -304,9 +304,16 @@ dataset layout is unchanged by postprocessing.
 
 `X.npy` stores complete VDFs in `[vx, vy, vz]` order. `metadata.csv` owns
 physical `class_id` and `class_name`. Current workflows trust these saved
-files and directly load the data they need. The writer creates a hidden
-sibling staging directory, writes samples sequentially, flushes and closes
-its arrays, and renames the staging directory to the final path.
+files and directly load the data they need. Planning and extraction use
+separate `planning_n_jobs` and `extraction_n_jobs` settings. The parent
+streams the first nonempty timestep used to discover the raw shape. With
+more than one extraction job, remaining timesteps run in Joblib workers;
+each worker reuses one source reader and VDF extractor while processing its
+samples sequentially into worker-local raw and optional Hermite memory maps.
+Only the parent copies those aligned rows into the hidden sibling staging
+directory in planned timestep and sample order, flushes and closes the final
+arrays, and renames the directory to the final path. Setting
+`extraction_n_jobs: 1` keeps extraction serial.
 
 The current physical-class IDs are:
 
@@ -370,9 +377,16 @@ The default order is 22, but every consumer derives the actual cube shape
 from `X_hermite.npy` or the checkpoint. Without rotation the axes are
 `[n_x, n_y, n_z]`. Optional extraction rotation uses the frame
 `[parallel B, perpendicular bulk flow, B x perpendicular flow]` and produces
-`[n_parallel, n_perp1, n_perp2]`. Hermite-enabled extraction uses the serial
-sample-callback path even when `extraction_n_jobs` is larger than one; the
-raw-only path retains its configured parallel workers.
+`[n_parallel, n_perp1, n_perp2]`. Hermite-enabled extraction uses the same
+timestep worker count as raw-only extraction. Each physical VDF is extracted
+once, and its raw row and Hermite cube use the same local and final row.
+Rotation increases per-worker memory because interpolation arrays coexist
+with one raw VDF and one coefficient cube.
+
+This execution-only change leaves raw-only numerical output and Hermite
+coefficient values unchanged. Throughput depends on both VLSV filesystem I/O
+and the per-sample Hermite calculation, so worker counts should be increased
+only after measuring the intended dataset on its allocated node.
 
 Hermite datasets and Hermite-trained checkpoints created before this
 physical-VDF convention must be regenerated and retrained. The active code

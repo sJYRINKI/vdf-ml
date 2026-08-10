@@ -93,6 +93,10 @@ To save the default order-22 physical-VDF Hermite representation and its
 per-CID coefficient frames, use the live nested settings:
 
 ```yaml
+creation:
+  planning_n_jobs: 40
+  extraction_n_jobs: 4
+
 representations:
   hermite:
     enabled: true
@@ -106,9 +110,16 @@ postprocessing:
 
 The transform projects the physical linear VDF with endpoint velocity axes,
 a physically normalized physicists' Hermite basis, and `dv**3` quadrature.
-It applies no logarithm or `MinValue` threshold. Hermite-enabled extraction
-uses the aligned serial sample callback even when `extraction_n_jobs` is
-greater than one; raw-only extraction retains its configured parallel path.
+It applies no logarithm or `MinValue` threshold. `planning_n_jobs` plans
+independent timesteps, while `extraction_n_jobs` controls timestep workers
+for raw-only or aligned raw-plus-Hermite output. The parent streams the first
+nonempty timestep for shape discovery; each remaining worker owns one
+timestep, reuses one reader and extractor, and processes samples
+sequentially into paired temporary memory maps. The parent alone merges
+those rows in planned order. Set `extraction_n_jobs: 1` for serial execution.
+The value `4` is an example that must fit the allocated physical cores,
+memory, and VLSV filesystem workload. A one-timestep run has no remaining
+timestep to submit, so it cannot use more than one extraction worker.
 
 Manual plasma-region coordinates in `class_coords_re` use
 `[x_re, y_re, z_re]` order and Earth-radii units. Each entry maps to the
@@ -260,9 +271,16 @@ sbatch --partition=hile slurm/hile/cpu/extract_dataset.sbatch \
 Extraction and Hermite projection can require substantially more memory than
 a one-timestep example. Choose worker counts for the selected files,
 velocity mesh, sample count, full-node CPU allocation, and enabled
-postprocessing. The selected extraction job runs optional Stage 6 and
-Stage 7 according to the YAML; no separate plotting or animation job is
-needed.
+postprocessing. More workers increase the number of concurrent raw VDFs and
+Hermite calculations. Rotated 268 x 268 x 268 VDFs also require interpolation
+arrays, so begin with two to four extraction workers and increase only after
+measuring memory and VLSV I/O; unrotated extraction may support more. Do not
+set `extraction_n_jobs` above the allocated physical CPU cores. Both site
+wrappers launch one Slurm task, and the configured Joblib workers remain
+local to that node. Throughput depends on VLSV filesystem I/O and the
+per-sample Hermite calculation. The selected extraction job runs optional
+Stage 6 and Stage 7 according to the YAML; no separate plotting or animation
+job is needed.
 
 ## Dataset colormap
 

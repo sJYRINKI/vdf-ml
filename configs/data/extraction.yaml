@@ -34,27 +34,30 @@ labels:
 # ``-1`` for all available logical CPUs, or a value below ``-1`` to leave
 # ``abs(value + 1)`` logical CPUs unused according to Joblib semantics.
 creation:
-  # Worker count used while opening sources and planning sample locations.
+  # Worker count for parallel sample planning across independent timesteps;
+  # ``1`` plans every requested timestep serially.
   planning_n_jobs: 32
-  # Worker count used while reading and writing planned VDF samples.
-  # Raw-only extraction uses this Joblib setting. When Hermite output is
-  # enabled, the aligned raw/Hermite callback uses the serial extraction path
-  # even when this value is greater than one.
+  # Timestep extraction workers for raw-only or paired raw-plus-Hermite
+  # output. ``1`` selects serial execution. Each worker reuses one reader and
+  # extractor while processing its timestep samples sequentially.
   extraction_n_jobs: 12
 
 # Saved-representation settings. Raw ``X.npy`` is always written; the nested
 # Hermite options control whether ``X_hermite.npy`` is additionally produced.
 representations:
   hermite:
-    # ``true`` saves physical-VDF Hermite coefficients in ``X_hermite.npy``;
-    # ``false`` writes only the mandatory raw representation.
+    # ``true`` enables paired output in the serial path and every timestep
+    # worker. These paths write aligned raw and physical-VDF Hermite rows to
+    # ``X.npy`` and ``X_hermite.npy``; ``false`` writes only mandatory raw.
     enabled: True
     # Positive integer count of physicists' Hermite modes per velocity axis.
     # The physical linear VDF is projected without log or MinValue threshold.
     order: 22
     # ``false`` uses the original ``(vx, vy, vz)`` frame. ``true`` first
     # rotates the physical VDF to ``(B, perpendicular bulk flow,
-    # B x perpendicular flow)`` before calculating moments and coefficients.
+    # B x perpendicular flow)`` before calculating moments and coefficients;
+    # rotation increases memory because each worker holds interpolation
+    # arrays for one active sample.
     rotate: True
     # NumPy dtype name, such as ``float32`` or ``float64``, controlling the
     # saved Hermite coefficient precision and disk/memory footprint.

@@ -334,9 +334,15 @@ Expected behavior:
 - the raw autoencoder retains its existing two-dimensional reconstruction
   plane independently of the PCA/CNN input path;
 - normalization uses bounded accumulation;
-- Hermite-enabled extraction selects the aligned serial callback even when
-  `extraction_n_jobs` is above one; raw-only extraction retains its configured
-  parallel path;
+- the parent streams the first nonempty extraction timestep for shape
+  discovery; `extraction_n_jobs: 1` remains serial, while larger values use
+  timestep workers for remaining raw-only or paired raw-plus-Hermite output;
+- each timestep worker reuses one reader and extractor, processes samples
+  sequentially into worker-local memory maps, and never writes the final
+  staged arrays; the parent merges raw, Hermite, and metadata rows at the
+  same planned offsets regardless of completion order;
+- serial and parallel saved raw, Hermite, metadata, and velocity-grid
+  outputs are exactly equal for the same planned extraction;
 - Hermite consumers derive complete volume shape and order from the saved
   array or checkpoint and handle one full sample at a time;
 - region predictions stream rows;

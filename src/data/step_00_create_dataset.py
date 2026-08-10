@@ -10,6 +10,7 @@ returned path contains aligned raw, optional Hermite, metadata, and
 velocity-grid files plus optional plot and animation directories.
 """
 
+from functools import partial
 import os
 from pathlib import Path
 import time
@@ -28,7 +29,7 @@ from src.data.step_03_plan_dataset_samples import (
 )
 from src.data.step_04_extract_vdf_samples import (
     iter_timestep_sample_specs,
-    transform_extracted_sample_to_hermite,
+    write_extracted_sample_hermite,
     write_remaining_timesteps,
     write_timestep_samples,
 )
@@ -157,31 +158,18 @@ def create_dataset(
         nonlocal raw_write_elapsed
         raw_write_start = time.perf_counter()
 
-        def write_hermite_sample(output_sample_index, sample):
-            """Transform one raw row and assign its aligned Hermite cube.
-
-            The callback runs immediately after the corresponding raw
-            assignment. Optional same-cell rotation vectors remain available
-            for rotated extraction, and its output row shares the exact
-            ``sample_index`` used by ``X.npy`` and ``metadata.csv``.
-            """
-
-            coefficients = transform_extracted_sample_to_hermite(
-                raw_vdf=sample["vdf"],
+        sample_callback = (
+            partial(
+                write_extracted_sample_hermite,
+                X_hermite=hermite_output,
                 velocity_grid=velocity_grid,
                 order=storage_config["hermite_order"],
                 rotate=hermite_rotate,
-                rotation_context=sample.get("rotation_context"),
                 output_dtype=storage_config["hermite_output_dtype"],
             )
-            hermite_output[output_sample_index] = coefficients
-            sample["metadata"]["hermite_order"] = storage_config[
-                "hermite_order"
-            ]
-            sample["metadata"]["hermite_rotate"] = hermite_rotate
-            del coefficients
-
-        sample_callback = write_hermite_sample if hermite_enabled else None
+            if hermite_enabled
+            else None
+        )
         sample_index = write_timestep_samples(
             X=raw_output,
             metadata=metadata,
@@ -207,7 +195,14 @@ def create_dataset(
             extraction_n_jobs=extraction_n_jobs,
             extraction_worker_count=extraction_worker_count,
             include_rotation_context=hermite_enabled and hermite_rotate,
-            sample_callback=sample_callback,
+            sample_callback=(
+                sample_callback if extraction_n_jobs == 1 else None
+            ),
+            X_hermite=hermite_output,
+            velocity_grid=velocity_grid,
+            hermite_order=storage_config["hermite_order"],
+            hermite_rotate=hermite_rotate,
+            hermite_dtype=storage_config["hermite_output_dtype"],
         )
         raw_write_elapsed = time.perf_counter() - raw_write_start
         metadata = create_extraction_metadata(metadata)
@@ -383,10 +378,10 @@ def resolve_extraction_storage_config(config):
     """Resolve optional Hermite extraction settings.
 
     Stage 0 always writes the physical ``X.npy`` source. This view allocates
-    optional physical-VDF Hermite storage and configures its sample-wise
-    projection callback, order, rotation setting, and one final storage cast.
-    YAML scalar values are converted to the Python and NumPy types consumed by
-    later stages.
+    optional physical-VDF Hermite storage and configures the serial callback
+    or timestep worker with its order, rotation setting, and one final storage
+    cast. YAML scalar values are converted to the Python and NumPy types
+    consumed by later stages.
 
     Parameters
     ----------

@@ -6,7 +6,7 @@ writes their aligned rows, flushes and closes the arrays, writes metadata
 and the velocity grid, and renames the staging directory to the requested
 dataset path.
 
-Inputs are array sources or one sequential sample callback. The returned
+Inputs are array sources or one extraction callback. The returned
 path contains only ``X.npy``, optional ``X_hermite.npy``, ``metadata.csv``,
 and ``velocity_grid.npz``.
 """
@@ -37,12 +37,14 @@ def write_dataset(
 ):
     """Stage and write one current-format dataset.
 
-    This final dataset stage owns all filesystem side effects. It creates a
-    hidden sibling directory, allocates raw and optional Hermite NumPy memory
-    maps, accepts either existing arrays or a sequential writer callback,
-    flushes and closes the completed mappings, writes aligned metadata and
-    velocity-grid files, and renames the completed directory to
-    ``dataset_dir``.
+    This final dataset stage owns final-array allocation and publication. It
+    creates a hidden sibling directory, allocates raw and optional Hermite
+    NumPy memory maps, and accepts either existing arrays or an extraction
+    writer callback. Parallel Stage 4 workers may create temporary arrays
+    beneath that sibling directory, but only the callback's parent process
+    writes these final mappings. Stage 5 then flushes and closes them, writes
+    aligned metadata and velocity-grid files, and renames the completed
+    directory to ``dataset_dir``.
 
     Parameters
     ----------
@@ -137,8 +139,8 @@ def _create_memmap(path, shape, dtype):
     """Allocate a writable ``.npy`` memory map for one staged array.
 
     Stage 5 returns the live mapping to either direct array assignment or the
-    sequential sample callback. The owning writer flushes and closes it before
-    the staging directory is renamed.
+    extraction callback. The owning writer flushes and closes it before the
+    staging directory is renamed.
     """
 
     return np.lib.format.open_memmap(

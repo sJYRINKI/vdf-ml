@@ -263,16 +263,26 @@ columns remain unchanged.
 
 ## Transactional writing
 
-The writer creates one hidden sibling staging directory, allocates staged
-`X.npy` and optional `X_hermite.npy` memory maps, writes samples
-sequentially in metadata order, writes `metadata.csv` and
-`velocity_grid.npz`, flushes and closes the maps, and renames the staging
-directory to the final path.
+The writer creates one hidden sibling staging directory and allocates final
+`X.npy` and optional `X_hermite.npy` memory maps. The parent process streams
+the first nonempty timestep while discovering the raw VDF shape. With
+`extraction_n_jobs: 1`, it continues serially. With more than one extraction
+job, each remaining timestep is one Joblib task for raw-only or paired
+raw-plus-Hermite output. One worker opens the timestep source once, reuses
+one VDF extractor, and processes its planned samples sequentially. Each raw
+VDF is extracted once and its raw and Hermite rows are written at the same
+local index in worker-owned memory maps beneath a staging-local temporary
+directory, so large arrays do not travel through process IPC.
 
-Raw-only extraction retains the configured parallel writer. When Hermite is
-enabled, the aligned per-sample callback selects the serial extraction path
-even if `extraction_n_jobs` is greater than one, ensuring every raw and
-Hermite row is written in the same order.
+Workers never receive the final staged memory maps. The parent consumes
+timestep descriptors in submission order and copies raw and optional
+Hermite blocks into the same next final slice, placing metadata at the
+corresponding indexes. Planned timestep order followed by within-timestep
+sample order is therefore stable even when workers complete out of order.
+The parent then writes `metadata.csv` and `velocity_grid.npz`, flushes and
+closes the final maps, and renames the staging directory to the final path.
+This execution-only change leaves raw-only numerical output and Hermite
+coefficient values unchanged.
 
 The writer does not reopen or scan the complete staged dataset before the
 final rename. It uses only the staging directory, direct destination checks,

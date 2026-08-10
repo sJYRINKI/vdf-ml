@@ -64,6 +64,16 @@ directories.
 Disabled postprocessing does not import or run either visual
 stage. The package does not depend on analysis or model code.
 
+Stage 0 streams the first nonempty timestep through the parent process to
+discover the raw VDF shape. Stage 4 then submits one Joblib task per remaining
+timestep when `extraction_n_jobs` is greater than one, for either raw-only or
+paired raw-plus-Hermite extraction. A worker opens one source, reuses one VDF
+extractor, and processes samples sequentially into worker-local memory maps.
+The parent alone consumes results in submission order, copies raw and
+optional Hermite rows into the identical next final range, and places
+metadata at those indexes. Workers never receive or write the final staged
+memory maps, and `extraction_n_jobs: 1` retains the serial path.
+
 ### `src.physics`
 
 This package owns X/O point selection and topology, physical labels,
@@ -289,10 +299,14 @@ Each functionality guide documents the configuration it owns.
 
 ## Output ownership
 
-Dataset writing uses a hidden same-parent staging directory, flushes and
-closes the staged arrays, and uses an ordinary directory rename. Other
-workflows create their output directories and save the artifacts they own
-directly. PCA is report-only: it saves `pca_physical_classes.png`,
+Dataset writing uses a hidden same-parent staging directory. Parallel
+timestep workers write only raw and optional Hermite memory maps beneath a
+staging-local temporary directory; the parent merges ordered results with a
+monotonically increasing row offset, writes metadata at the same indexes,
+flushes and closes the final staged arrays, and uses an
+ordinary directory rename. Other workflows create their output directories
+and save the artifacts they own directly. PCA is report-only: it saves
+`pca_physical_classes.png`,
 `tsne_physical_classes.png`, and `metrics.txt`, with no PCA, KMeans, or
 t-SNE arrays, CSV tables, or explained-variance figure.
 

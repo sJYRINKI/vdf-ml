@@ -5,10 +5,16 @@ It reuses one VLSV reader and producer set per timestep, expands sparse VDFs
 to ``[vx, vy, vz]`` cubes, and writes rows in stable sample order.
 
 Inputs are ordered sample records and staged arrays. Outputs are aligned raw
-rows, optional same-cell Hermite callbacks, and metadata records. Parallel
-raw extraction uses bounded temporary arrays without changing final order.
+rows, optional physical-VDF Hermite rows, and metadata records. Parallel
+extraction assigns one timestep to each joblib task. A worker reuses one VLSV
+reader and dense extractor while processing that timestep's samples
+sequentially into worker-owned memory maps. Only the parent copies temporary
+raw and Hermite rows into final staged arrays, preserving requested timestep
+and within-timestep order without transferring full samples through process
+IPC or permitting concurrent final-array writes.
 """
 
+from functools import partial
 from pathlib import Path
 import tempfile
 import time
@@ -39,13 +45,20 @@ def write_remaining_timesteps(
     extraction_worker_count,
     include_rotation_context=False,
     sample_callback=None,
+    X_hermite=None,
+    velocity_grid=None,
+    hermite_order=DEFAULT_HERMITE_ORDER,
+    hermite_rotate=False,
+    hermite_dtype=np.float32,
 ):
     """Extract and write all timesteps after the first open-reader stream.
 
     Stage 0 calls this dispatcher after writing the first timestep used for
-    shape discovery. It selects serial streaming when Hermite context must
-    remain sample-wise and the configured parallel raw path otherwise; both
-    branches return the same next-row index.
+    shape discovery. One configured worker selects serial streaming for raw
+    or paired raw/Hermite rows. More than one worker selects timestep-level
+    temporary extraction for either representation, followed by a parent-only
+    merge into the staged arrays. Both branches return the same next-row
+    index and preserve the planned ordering.
 
     Parameters
     ----------
@@ -67,7 +80,20 @@ def write_remaining_timesteps(
         Whether same-cell magnetic field and total bulk velocity are required
         for optional Hermite rotation.
     sample_callback : callable, optional
-        Per-sample callback used for aligned Hermite writing.
+        Per-sample callback used only by serial aligned Hermite writing.
+    X_hermite : numpy.ndarray, optional
+        Writable final staged Hermite array with shape
+        ``(samples, order, order, order)``. Its presence enables paired
+        worker output in the parallel path.
+    velocity_grid : dict, optional
+        Dataset velocity-grid descriptor used by the physical Hermite
+        transform.
+    hermite_order : int, optional
+        Number of saved coefficients along each Hermite axis.
+    hermite_rotate : bool, optional
+        Whether workers rotate each physical VDF before projection.
+    hermite_dtype : numpy.dtype, optional
+        Storage dtype for temporary and final Hermite coefficients.
 
     Returns
     -------
@@ -75,7 +101,7 @@ def write_remaining_timesteps(
         Next unwritten dataset row.
     """
 
-    if extraction_n_jobs == 1 or sample_callback is not None:
+    if extraction_n_jobs == 1:
         return write_timesteps_serial(
             sample_specs_by_timestep=sample_specs_by_timestep,
             X=X,
@@ -93,6 +119,11 @@ def write_remaining_timesteps(
         timesteps=timesteps,
         extraction_n_jobs=extraction_n_jobs,
         extraction_worker_count=extraction_worker_count,
+        X_hermite=X_hermite,
+        velocity_grid=velocity_grid,
+        hermite_order=hermite_order,
+        hermite_rotate=hermite_rotate,
+        hermite_dtype=hermite_dtype,
     )
 
 
@@ -160,13 +191,21 @@ def write_timesteps_parallel(
     timesteps,
     extraction_n_jobs,
     extraction_worker_count,
+    X_hermite=None,
+    velocity_grid=None,
+    hermite_order=DEFAULT_HERMITE_ORDER,
+    hermite_rotate=False,
+    hermite_dtype=np.float32,
 ):
-    """Extract raw timesteps in parallel and copy them in stable order.
+    """Extract timesteps in parallel and merge aligned rows in the parent.
 
-    Raw-only creation uses bounded timestep chunks so worker-owned arrays do
-    not all reside in memory simultaneously. Joblib results are consumed in
-    submission order and copied into the staged memory map without changing
-    the requested timestep or within-timestep sample sequence.
+    Raw-only and raw-plus-Hermite creation use bounded timestep chunks. Each
+    worker processes one timestep sequentially into local memory-mapped
+    arrays, while the parent consumes joblib results in submission order and
+    copies both representations through the same final slice. Workers may
+    finish out of order, but they never receive the writable final sinks;
+    ordered result delivery and the parent's monotonically increasing row
+    cursor preserve requested timestep, sample, and metadata order.
 
     Parameters
     ----------
@@ -184,6 +223,18 @@ def write_timesteps_parallel(
         Joblib worker count.
     extraction_worker_count : int
         Positive bound on concurrently materialized timestep arrays.
+    X_hermite : numpy.memmap, optional
+        Parent-owned final Hermite array with shape
+        ``(samples, order, order, order)``.
+    velocity_grid : dict, optional
+        Velocity-grid descriptor shared by all physical Hermite projections.
+    hermite_order : int, optional
+        Number of Hermite coefficients per transform axis.
+    hermite_rotate : bool, optional
+        Whether worker-local VDFs are rotated before projection. Rotation
+        adds an interpolated VDF and grid coordinates to per-worker memory.
+    hermite_dtype : numpy.dtype, optional
+        Storage dtype of worker-local and final coefficient arrays.
 
     Returns
     -------
@@ -208,10 +259,16 @@ def write_timesteps_parallel(
                 temp_dir=temp_dir,
                 sample_shape=X.shape[1:],
                 dtype=X.dtype,
+                hermite_enabled=X_hermite is not None,
+                velocity_grid=velocity_grid,
+                hermite_order=hermite_order,
+                hermite_rotate=hermite_rotate,
+                hermite_dtype=hermite_dtype,
             )
             for extracted_timestep in chunk_results:
                 sample_index = write_extracted_timestep(
                     X=X,
+                    X_hermite=X_hermite,
                     metadata=metadata,
                     extracted_timestep=extracted_timestep,
                     sample_index=sample_index,
@@ -219,66 +276,170 @@ def write_timesteps_parallel(
     return sample_index
 
 
-def extract_timestep_samples_to_temp(sample_specs, temp_dir, sample_shape, dtype):
-    """Extract one timestep into a worker-owned temporary NumPy array.
+def extract_timestep_samples_to_temp(
+    sample_specs,
+    temp_dir,
+    sample_shape,
+    dtype,
+    hermite_enabled=False,
+    velocity_grid=None,
+    hermite_order=DEFAULT_HERMITE_ORDER,
+    hermite_rotate=False,
+    hermite_dtype=np.float32,
+):
+    """Extract one timestep into aligned temporary raw and Hermite arrays.
 
-    A joblib worker owns this intermediate file while the parent process owns
-    the final staged dataset array. The function writes rows and metadata in
-    timestep order, flushes and closes its memory map, and returns only the
-    path and descriptors needed for the parent copy.
+    One joblib worker opens the timestep's VLSV source and reuses its dense
+    VDF extractor for every planned sample. Samples remain sequential inside
+    the worker: each physical VDF is extracted once, written to the local raw
+    memory map, and optionally transformed into a Hermite coefficient cube at
+    the identical local row index. Rotated Hermite extraction also holds one
+    interpolated VDF and its coordinate grid while processing that sample.
+
+    Worker-owned temporary arrays keep large VDF data out of the process
+    result channel. The worker flushes and closes the arrays before returning
+    their paths and small metadata records. The parent later copies both
+    arrays into the next ordered final range; worker processes never receive
+    or write the final dataset memory maps.
 
     Parameters
     ----------
     sample_specs : list of dict
         Ordered sample records for one timestep.
     temp_dir : str or pathlib.Path
-        Existing staging-local directory for worker outputs.
+        Existing staging-local directory receiving
+        ``timestep_<timestep>_X.npy`` and, when enabled,
+        ``timestep_<timestep>_X_hermite.npy``.
     sample_shape : tuple of int
-        Dense sample shape in ``[vx, vy, vz]`` order.
+        Dense sample shape in ``[vx, vy, vz]`` order. The raw temporary
+        array has shape ``(n_samples, *sample_shape)``.
     dtype : numpy.dtype
-        Raw staged-array dtype.
+        Raw temporary-array dtype, normally ``float32``.
+    hermite_enabled : bool, optional
+        Whether to write a sibling coefficient array with shape
+        ``(n_samples, hermite_order, hermite_order, hermite_order)``.
+    velocity_grid : dict, optional
+        Velocity-grid descriptor used for physical-VDF moments, basis
+        coordinates, optional rotation, and coefficient projection.
+    hermite_order : int, optional
+        Number of saved coefficients along each transform axis.
+    hermite_rotate : bool, optional
+        Whether to rotate each physical VDF before its Hermite transform.
+    hermite_dtype : numpy.dtype, optional
+        Temporary coefficient storage dtype, normally ``float32``.
+        Calculation remains float64 in the physical transform and is cast
+        once for storage.
 
     Returns
     -------
     dict
-        Sample count, ordered metadata, and temporary ``X.npy`` path.
+        Timestep sample count, ordered metadata, temporary raw path, and the
+        optional temporary Hermite path consumed by the parent merge.
+
+    Notes
+    -----
+    The timestep is the parallel work unit because all of its samples share
+    one VLSV reader and dense extractor. The memory-mapped output arrays may
+    cover the whole timestep on disk, but ordinary memory remains bounded to
+    the active raw VDF, optional rotated VDF, and coefficient cube.
     """
 
     if not sample_specs:
-        return {"n_samples": 0, "metadata": [], "X_path": None}
+        return {
+            "timestep": None,
+            "n_samples": 0,
+            "metadata": [],
+            "X_path": None,
+            "X_hermite_path": None,
+        }
 
     timestep = int(sample_specs[0]["timestep"])
     temp_dir = Path(temp_dir)
+    raw_shape = tuple(int(value) for value in sample_shape)
+    velocity_limits_mps = (
+        np.asarray(velocity_grid["extent_mps"], dtype=np.float64)
+        if hermite_enabled
+        else None
+    )
     X_path = temp_dir / f"timestep_{timestep}_X.npy"
     X_temp = np.lib.format.open_memmap(
         X_path,
         mode="w+",
         dtype=dtype,
-        shape=(len(sample_specs), *sample_shape),
+        shape=(len(sample_specs), *raw_shape),
     )
+    X_hermite_path = None
+    X_hermite_temp = None
+    if hermite_enabled:
+        X_hermite_path = temp_dir / f"timestep_{timestep}_X_hermite.npy"
+        X_hermite_temp = np.lib.format.open_memmap(
+            X_hermite_path,
+            mode="w+",
+            dtype=hermite_dtype,
+            shape=(
+                len(sample_specs),
+                hermite_order,
+                hermite_order,
+                hermite_order,
+            ),
+        )
+
     metadata = []
+    sample_callback = (
+        partial(
+            write_extracted_sample_hermite,
+            X_hermite=X_hermite_temp,
+            velocity_grid=velocity_grid,
+            order=hermite_order,
+            rotate=hermite_rotate,
+            raw_shape=raw_shape,
+            velocity_limits_mps=velocity_limits_mps,
+            output_dtype=hermite_dtype,
+        )
+        if hermite_enabled
+        else None
+    )
     sample_index = write_timestep_samples(
         X=X_temp,
         metadata=metadata,
-        timestep_samples=iter_timestep_sample_specs(sample_specs),
+        timestep_samples=iter_timestep_sample_specs(
+            sample_specs,
+            include_rotation_context=hermite_enabled and hermite_rotate,
+        ),
         sample_index=0,
+        sample_callback=sample_callback,
     )
     X_temp.flush()
     X_temp._mmap.close()
+    if X_hermite_temp is not None:
+        X_hermite_temp.flush()
+        X_hermite_temp._mmap.close()
     return {
+        "timestep": timestep,
         "n_samples": sample_index,
         "metadata": metadata,
         "X_path": str(X_path),
+        "X_hermite_path": (
+            str(X_hermite_path) if X_hermite_path is not None else None
+        ),
     }
 
 
-def write_extracted_timestep(X, metadata, extracted_timestep, sample_index):
-    """Copy one temporary timestep array into final staged row order.
+def write_extracted_timestep(
+    X,
+    metadata,
+    extracted_timestep,
+    sample_index,
+    X_hermite=None,
+):
+    """Merge one temporary timestep result into aligned final array rows.
 
-    The parent extraction process calls this for joblib results in requested
-    order. It copies the raw block, offsets each temporary metadata
-    ``sample_index`` to the final dataset row, and closes the read-only
-    temporary memory map before returning.
+    Timestep workers may complete out of order, while joblib exposes their
+    results to this parent writer in submission order. The current parent row
+    cursor therefore defines the final planned offset. Raw and optional
+    Hermite memory maps are opened read-only and copied through the identical
+    destination slice; metadata indexes are placed at that same offset. Only
+    this parent process writes final staged dataset arrays.
 
     Parameters
     ----------
@@ -290,6 +451,8 @@ def write_extracted_timestep(X, metadata, extracted_timestep, sample_index):
         Descriptor returned by :func:`extract_timestep_samples_to_temp`.
     sample_index : int
         First destination row for this timestep.
+    X_hermite : numpy.ndarray, optional
+        Writable parent-owned Hermite array aligned with ``X``.
 
     Returns
     -------
@@ -304,6 +467,13 @@ def write_extracted_timestep(X, metadata, extracted_timestep, sample_index):
     X_temp = np.load(extracted_timestep["X_path"], mmap_mode="r")
     write_end = sample_index + n_samples
     X[sample_index:write_end] = X_temp[:n_samples]
+    if X_hermite is not None:
+        X_hermite_temp = np.load(
+            extracted_timestep["X_hermite_path"],
+            mmap_mode="r",
+        )
+        X_hermite[sample_index:write_end] = X_hermite_temp[:n_samples]
+        X_hermite_temp._mmap.close()
     for metadata_row in timestep_metadata:
         output_row = dict(metadata_row)
         output_row["sample_index"] = sample_index + int(
@@ -321,13 +491,20 @@ def extract_timestep_chunk_parallel(
     temp_dir,
     sample_shape,
     dtype,
+    hermite_enabled=False,
+    velocity_grid=None,
+    hermite_order=DEFAULT_HERMITE_ORDER,
+    hermite_rotate=False,
+    hermite_dtype=np.float32,
 ):
     """Submit a bounded timestep chunk to joblib.
 
-    This function is the process-boundary owner for raw-only extraction.
-    Independent workers write one temporary array per timestep, while
-    joblib's ordered generator preserves the chunk sequence consumed by the
-    parent writer.
+    This function is the only process boundary for raw-only and paired
+    raw/Hermite extraction. Independent workers receive plain configuration
+    values and write one aligned temporary result per timestep. They never
+    receive final writable sinks. Joblib's ordered generator preserves the
+    chunk sequence consumed by the parent even when work finishes in another
+    order.
 
     Parameters
     ----------
@@ -343,6 +520,16 @@ def extract_timestep_chunk_parallel(
         Dense ``[vx, vy, vz]`` sample shape.
     dtype : numpy.dtype
         Raw staged-array dtype.
+    hermite_enabled : bool, optional
+        Whether every worker writes aligned Hermite coefficients.
+    velocity_grid : dict, optional
+        Shared physical velocity-grid descriptor.
+    hermite_order : int, optional
+        Coefficient count along each Hermite axis.
+    hermite_rotate : bool, optional
+        Whether workers perform optional velocity-space rotation.
+    hermite_dtype : numpy.dtype, optional
+        Temporary Hermite storage dtype.
 
     Returns
     -------
@@ -357,6 +544,11 @@ def extract_timestep_chunk_parallel(
             temp_dir=temp_dir,
             sample_shape=sample_shape,
             dtype=dtype,
+            hermite_enabled=hermite_enabled,
+            velocity_grid=velocity_grid,
+            hermite_order=hermite_order,
+            hermite_rotate=hermite_rotate,
+            hermite_dtype=hermite_dtype,
         )
         for timestep in timestep_chunk
     )
@@ -376,8 +568,7 @@ def create_extraction_parallel(extraction_n_jobs):
     Returns
     -------
     joblib.Parallel
-        Generator-capable executor when supported by the installed joblib,
-        otherwise its ordered list-returning equivalent.
+        Ordered generator executor for timestep task results.
     """
 
     return Parallel(
@@ -512,6 +703,75 @@ def write_timestep_samples(
     return sample_index
 
 
+def write_extracted_sample_hermite(
+    output_sample_index,
+    sample,
+    *,
+    X_hermite,
+    velocity_grid,
+    order=DEFAULT_HERMITE_ORDER,
+    rotate=False,
+    raw_shape=None,
+    velocity_limits_mps=None,
+    output_dtype=np.float32,
+):
+    """Transform one extracted VDF and write its aligned Hermite row.
+
+    Serial extraction uses this operation with the parent-owned final
+    ``X_hermite.npy`` memory map. A parallel timestep worker uses it with the
+    worker-owned temporary ``X_hermite.npy`` map and supplies the raw shape
+    and endpoint velocity limits determined once for that timestep. In both
+    cases the input is the same in-memory physical VDF already written to the
+    raw row, and the coefficient cube and Hermite metadata use the identical
+    sample index.
+
+    Parameters
+    ----------
+    output_sample_index : int
+        Serial final or worker-local destination row shared with raw output.
+    sample : dict
+        Current physical VDF, metadata, and optional rotation context.
+    X_hermite : numpy.ndarray
+        Writable final or temporary coefficient array with shape
+        ``(samples, order, order, order)``.
+    velocity_grid : dict
+        Physical velocity-grid descriptor with endpoint limits in metres per
+        second.
+    order : int, optional
+        Number of coefficients retained along every transform axis.
+    rotate : bool, optional
+        Whether to rotate this physical VDF before projection.
+    raw_shape : tuple of int, optional
+        Reusable physical VDF shape in ``[vx, vy, vz]`` order.
+    velocity_limits_mps : numpy.ndarray, optional
+        Reusable float64 endpoint extent for one timestep.
+    output_dtype : numpy.dtype, optional
+        Saved coefficient dtype, normally ``float32`` after float64
+        calculation.
+
+    Returns
+    -------
+    None
+        The coefficient row and its Hermite metadata fields are written in
+        place.
+    """
+
+    coefficients = transform_extracted_sample_to_hermite(
+        raw_vdf=sample["vdf"],
+        velocity_grid=velocity_grid,
+        order=order,
+        rotate=rotate,
+        rotation_context=sample.get("rotation_context"),
+        raw_shape=raw_shape,
+        velocity_limits_mps=velocity_limits_mps,
+        output_dtype=output_dtype,
+    )
+    X_hermite[output_sample_index] = coefficients
+    sample["metadata"]["hermite_order"] = order
+    sample["metadata"]["hermite_rotate"] = rotate
+    del coefficients
+
+
 def transform_extracted_sample_to_hermite(
     raw_vdf,
     velocity_grid,
@@ -519,21 +779,25 @@ def transform_extracted_sample_to_hermite(
     order=DEFAULT_HERMITE_ORDER,
     rotate=False,
     rotation_context=None,
+    raw_shape=None,
+    velocity_limits_mps=None,
     output_dtype=np.float32,
 ):
     """Project one aligned physical VDF into saved Hermite coefficients.
 
-    The stage-0 callback projects the physical linear VDF with endpoint
-    velocity coordinates and the supplied physical-velocity Hermite basis.
-    Optional rotation first interpolates onto the expanded
-    ``(parallel, perp1, perp2)`` grid using same-cell magnetic field and total
-    bulk flow. Transformation occurs immediately after the aligned raw write;
-    float64 coefficients are cast once to the configured storage dtype.
+    Serial extraction and timestep workers both call this operation on the
+    same physical linear VDF written to the aligned raw row. Endpoint
+    velocity coordinates and the supplied physical-velocity Hermite basis
+    define the projection. Optional rotation first interpolates onto the
+    expanded ``(parallel, perp1, perp2)`` grid using same-cell magnetic field
+    and total bulk flow. Transformation occurs immediately after the aligned
+    raw write; float64 coefficients are cast once to the configured storage
+    dtype.
 
     Parameters
     ----------
     raw_vdf : numpy.ndarray
-        Unchanged physical VDF in ``[vx, vy,vz]`` order.
+        Unchanged physical VDF in ``[vx, vy, vz]`` order.
     velocity_grid : dict
         Current velocity-grid descriptor with extents in metres per second.
     order : int, optional
@@ -544,6 +808,14 @@ def transform_extracted_sample_to_hermite(
     rotation_context : tuple of numpy.ndarray, optional
         Same-cell magnetic field in teslas and bulk velocity in metres per
         second, used only when ``rotate`` is true.
+    raw_shape : tuple of int, optional
+        Reusable physical VDF shape in ``[vx, vy, vz]`` order. Serial callers
+        derive it from ``raw_vdf``; a timestep worker supplies the shape
+        determined once before processing its samples.
+    velocity_limits_mps : numpy.ndarray, optional
+        Reusable endpoint extent in metres per second. Serial callers derive
+        it from ``velocity_grid``; a timestep worker supplies one float64
+        array shared by every sample in that timestep.
     output_dtype : numpy.dtype, optional
         Saved coefficient dtype.
 
@@ -554,25 +826,30 @@ def transform_extracted_sample_to_hermite(
         unrotated or ``(n_parallel, n_perp1, n_perp2)`` when rotated.
     """
 
-    shape = tuple(int(value) for value in raw_vdf.shape)
-    velocity_limits_mps = np.asarray(
-        velocity_grid["extent_mps"],
-        dtype=np.float64,
-    )
+    if raw_shape is None:
+        raw_shape = tuple(int(value) for value in raw_vdf.shape)
+    if velocity_limits_mps is None:
+        velocity_limits_mps = np.asarray(
+            velocity_grid["extent_mps"],
+            dtype=np.float64,
+        )
     transform_vdf = raw_vdf
     if rotate:
         magnetic_field, bulk_velocity = rotation_context
-        transform_vdf, shape, velocity_limits_mps, _ = rotate_vdf(
+        transform_vdf, transform_shape, transform_limits_mps, _ = rotate_vdf(
             raw_vdf,
-            shape,
+            raw_shape,
             velocity_limits_mps,
             magnetic_field,
             bulk_velocity,
         )
+    else:
+        transform_shape = raw_shape
+        transform_limits_mps = velocity_limits_mps
     coefficients = vdf_to_hermite(
         transform_vdf,
-        shape,
-        velocity_limits_mps,
+        transform_shape,
+        transform_limits_mps,
         order=int(order),
     )
     return coefficients.astype(np.dtype(output_dtype), copy=False)
@@ -581,8 +858,9 @@ def transform_extracted_sample_to_hermite(
 def iter_chunks(items, chunk_size):
     """Yield consecutive bounded slices from an ordered sequence.
 
-    Parallel raw extraction uses these slices to cap concurrently materialized
-    timestep arrays while leaving input ordering unchanged.
+    Parallel raw or paired raw/Hermite extraction uses these slices to cap
+    concurrently materialized timestep arrays while leaving input ordering
+    unchanged.
 
     Parameters
     ----------

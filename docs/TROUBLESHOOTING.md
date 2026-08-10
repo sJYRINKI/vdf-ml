@@ -154,8 +154,12 @@ Useful first steps:
 - raw autoencoder batch size one for its existing two-dimensional input;
 - normalization batch size one or two;
 - start Hermite PCA/CNN/autoencoder batches at one when memory is tight;
-- Hermite extraction already uses the aligned serial callback, regardless of
-  a larger configured raw extraction worker count;
+- start large rotated 268 x 268 x 268 Hermite extraction with two to four
+  timestep workers because each worker holds one active VDF, rotation
+  interpolation arrays, and one coefficient cube; unrotated extraction may
+  support more;
+- keep `extraction_n_jobs` at or below the allocated physical CPU count and
+  increase it only after measuring memory use and VLSV filesystem I/O;
 - one-cell region smoke;
 - disable optional prediction plotting when testing inference alone; and
 - measure with `/usr/bin/time -v`.
