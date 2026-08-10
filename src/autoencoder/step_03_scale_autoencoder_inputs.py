@@ -2,8 +2,8 @@
 
 This stage follows the timestep split and precedes model construction. It
 binds the autoencoder's normalization batch size to the shared stable
-float64 accumulation and returns one mean and scale per reconstructed pixel
-or coefficient.
+float64 accumulation and returns one mean and scale per reconstructed raw
+voxel or Hermite coefficient.
 
 The stage receives sample-wise representation data, training row indices,
 and loader settings. It returns the shared :class:`InputFeatureScaler`
@@ -20,7 +20,7 @@ def scale_autoencoder_inputs(data, train_indices, config):
     """Fit per-feature normalization from training rows only.
 
     This adapter delegates to the same bounded float64 accumulation used by
-    CNN training. The resulting float32 raw-pixel or Hermite-coefficient
+    CNN training. The resulting float32 raw-voxel or Hermite-coefficient
     statistics define the normalized space reconstructed by stage 4.
 
     Parameters

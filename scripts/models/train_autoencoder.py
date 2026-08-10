@@ -1,8 +1,9 @@
-"""Train one raw or Hermite reconstruction autoencoder.
+"""Train one full-volume raw or Hermite multitask autoencoder.
 
 The command loads model configuration and delegates timestep splitting,
-training-only normalization, optimization, evaluation, checkpointing, and
-artifact writing to ``src.autoencoder``.
+training-only representation/topology scaling, one-process model-parallel
+optimization, evaluation, checkpointing, and artifact writing to
+``src.autoencoder``.
 """
 
 import argparse
@@ -14,12 +15,12 @@ from src.configuration import load_config
 
 
 def main(argv=None):
-    """Train one raw or Hermite reconstruction autoencoder.
+    """Train one full-volume Conv3d raw or Hermite autoencoder.
 
     The command selects a representation and optional PyTorch device before
-    delegating chronological splitting, training-only normalization,
-    normalized-space reconstruction, evaluation, and checkpoint writing
-    to the ordered autoencoder package.
+    delegating chronological splitting, training-only scaling,
+    reconstruction plus auxiliary topology optimization, and artifact
+    writing to the ordered autoencoder package.
 
     Parameters
     ----------
@@ -35,7 +36,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(
         description=(
-            "Train one timestep-split raw or Hermite autoencoder."
+            "Train one full-3D topology-aware raw or Hermite autoencoder."
         )
     )
     parser.add_argument("--config", required=True)
@@ -47,6 +48,14 @@ def main(argv=None):
         choices=("raw", "hermite"),
     )
     parser.add_argument("--device")
+    parser.add_argument(
+        "--model-parallel-gpus",
+        type=int,
+        help=(
+            "Visible GPUs used for consecutive model stages in one process; "
+            "overrides model_parallel_gpus in YAML."
+        ),
+    )
     args = parser.parse_args(argv)
     config = load_config(args.config)
     result = run_autoencoder_training(
@@ -55,16 +64,22 @@ def main(argv=None):
         args.output_dir,
         args.representation,
         device=args.device,
+        model_parallel_gpus=args.model_parallel_gpus,
     )
     print(f"Checkpoint: {result['checkpoint_path']}")
     print(f"Metrics: {result['metrics_path']}")
+    print(f"Training history: {result['training_history_path']}")
     print(f"Reconstruction figure: {result['reconstruction_figure_path']}")
     print(f"Representation: {result['representation']}")
     print(f"Device: {result['device']}")
+    print(
+        "Effective model-parallel GPUs: "
+        f"{result['effective_model_parallel_gpus']}"
+    )
     print(f"Best epoch: {result['best_epoch']}")
     print(
-        "Validation reconstruction MSE: "
-        f"{result['validation_reconstruction_mse']:.8g}"
+        "Validation total loss: "
+        f"{result['validation_total_loss']:.8g}"
     )
     return 0
 

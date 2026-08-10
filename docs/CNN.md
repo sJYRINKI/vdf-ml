@@ -148,6 +148,12 @@ The target scaler fits each column using valid training values only. It
 uses the topology mask so missing values contribute nothing to scaling or
 loss.
 
+The fixed target order remains in `src.data.metadata_columns`. Generic target
+extraction, finite masks, training-only scaling, inverse scaling, and globally
+masked Smooth L1 live in `src.learning.topology_supervision` and are shared
+unchanged with the autoencoder; CNN architecture and numerical behavior
+remain owned here.
+
 Evaluation and prediction inverse-transform outputs to Earth-radii physical
 units.
 
@@ -271,6 +277,9 @@ model.
 - topology loss weight;
 - random seed.
 
+The direct representation name, preprocessing values, architecture, and
+exact topology target order define the checkpoint.
+
 The loader accesses these fields directly, reconstructs the model and
 scalers, loads the state dictionary, and selects evaluation mode.
 Checkpoints are expected to come from the current workflow and use `raw` or
@@ -309,10 +318,11 @@ The configuration contains no class weights, samplers, balancing,
 over/undersampling, or feature filtering. Devices are `cpu`, `cuda`,
 `cuda:N`, and `auto`. The supplied compact raw channels are `[4, 8, 16]`,
 and the raw adaptive-pooling shape is `[2, 2, 2]`. Complete raw volumes
-require substantially more memory than the autoencoder's plane input. The
-shared checked-in batch values remain eight to preserve Hermite defaults;
-set them to one for an initial full-resolution raw run and profile memory
-before increasing batch sizes, channels, or worker counts.
+require substantial activation memory in both the CNN and the fully
+three-dimensional autoencoder. The shared checked-in batch values remain
+eight to preserve Hermite defaults; set them to one for an initial
+full-resolution raw run and profile memory before increasing batch sizes,
+channels, or worker counts.
 
 Comments immediately above each YAML key are the quickest reference for
 accepted choices, training effects, and memory-sensitive settings.

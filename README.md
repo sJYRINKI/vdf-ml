@@ -40,7 +40,8 @@ superseded workflows.
   full or low-rank PCA, followed by physical-class plots and internal
   KMeans, nearest-neighbor, and t-SNE diagnostics
 - a raw or Hermite 3-D multitask CNN
-- a deterministic raw/Hermite reconstruction autoencoder
+- a deterministic, fully three-dimensional raw/Hermite reconstruction
+  autoencoder with auxiliary topology supervision
 - coordinate and bounded-region prediction
 - combined x-velocity maps and peak-centred VDF figures for predictions
 - one shared Stage 6/standalone dataset-colormap style with role-based overlays
@@ -59,6 +60,7 @@ superseded workflows.
 | `src/analysis/` | ordered PCA, physical-label diagnostics, t-SNE, and output stages |
 | `src/cnn/` | ordered CNN loading, splitting, scaling, training, evaluation, and saving |
 | `src/autoencoder/` | ordered reconstruction loading, training, evaluation, and saving |
+| `src/learning/` | shared topology-target extraction, scaling, and masked supervision |
 | `src/prediction/` | ordered shared inference stages plus coordinate and region orchestration |
 | `src/plotting/` | dataset, VDF, prediction, and frame-animation visualization |
 | `src/configuration/` | shared YAML configuration loading |
@@ -350,16 +352,13 @@ coordinate.
 
 ### `raw`
 
-`X.npy` stores complete VDFs in `(sample, vx, vy, vz)` order. Raw PCA and
-CNN preprocessing apply the configured positive floor and `log10` to every
-velocity-space cell. PCA flattens all `vx * vy * vz` values in stable C
-order; the CNN adds one channel and preserves all three velocity axes for
-`Conv3d`. Neither path slices, crops, projects, averages, or downsamples the
-physical VDF.
-
-The raw autoencoder intentionally retains its existing middle-`vy`
-two-dimensional reconstruction input. That autoencoder-specific plane and
-the peak-centred planes shown in figures are not PCA or CNN model inputs.
+`X.npy` stores complete VDFs in `(sample, vx, vy, vz)` order. Raw PCA, CNN,
+and autoencoder preprocessing apply the configured positive floor and
+`log10` to every velocity-space cell. PCA flattens all `vx * vy * vz` values
+in stable C order; both neural models add one channel and preserve all three
+velocity axes for `Conv3d`. None of these paths slices, crops, projects,
+averages, or downsamples the physical VDF. Peak-centred planes shown in
+figures are visualization only and never become model inputs or loss targets.
 
 ### `hermite`
 
@@ -399,7 +398,7 @@ other metadata.
 |---|---|---|
 | PCA | complete 3-D VDF, flattened in C order | complete coefficient cube, flattened in C order |
 | CNN | complete 3-D VDF with `Conv3d` | complete coefficient cube with `Conv3d` |
-| Autoencoder | existing middle-`vy` plane with `Conv2d` | complete coefficient cube with `Conv3d` |
+| Autoencoder | complete 3-D VDF with `Conv3d` | complete coefficient cube with `Conv3d` |
 
 ## PCA analysis
 
@@ -504,29 +503,63 @@ one or several GPUs.
 
 ## Autoencoder
 
-`VdfAutoencoder` reconstructs either representation in normalized input
-space and returns a latent vector. It uses the same timestep and
-training-only normalization boundary as the CNN, AdamW, mean squared error,
-validation-MSE checkpoint selection, and early stopping.
+`VdfAutoencoder` is one Conv3d model for both representations. Raw batches
+contain every `X.npy` voxel in `(batch, 1, vx, vy, vz)` order; Hermite batches
+contain every signed coefficient in `(batch, 1, n1, n2, n3)` order. Its
+encoder creates one latent vector that feeds both the Conv3d decoder and a
+small auxiliary topology head. The head predicts, in order,
+`distance_to_x_point_re`, `distance_to_o_point_re`,
+`vdf_to_x_point_dx_re`, `vdf_to_x_point_dz_re`,
+`vdf_to_o_point_dx_re`, and `vdf_to_o_point_dz_re`. These Earth-radius values
+come from metadata, are scaled from valid training entries only, and remain
+masked where missing. They supervise the latent space but never enter the
+model input or decoder.
 
-It does not use classes, topology, coordinates, or physical context as
-inputs or targets. It is deterministic, not variational or adversarial, and
-is not currently a generative model. The autoencoder checkpoint is separate
-from the CNN checkpoint. A training run writes `autoencoder.pt`, a
-human-readable `metrics.txt`, `training_history.csv`, and a consolidated
-`reconstruction_examples.png`. The figure uses the restored best model and
-shows deterministic original, reconstructed, and absolute-error examples for
-the active raw or Hermite representation. Raw originals and reconstructions
-reuse the extraction VDF preparation and drawing functions, including
-physical km/s axes, `LogNorm`, unmodified `nipy_spectral`, a grey grid, and
-transparent masks over white axes. Each original/reconstruction pair shares
-one physical color scale; the current two-dimensional raw input plane is not
-changed for plotting. Hermite examples retain their signed coefficient scale
-over white axes. The report describes the run and architecture and summarizes
-normalized-space reconstruction MSE by chronological split and current
-physical class. Class labels are joined only after reconstruction for
-reporting and titles; they never enter the model, loss, optimizer, early
-stopping, or checkpoint selection.
+Autoencoder samples use on-demand memory-mapped loading. Each DataLoader
+process opens `X.npy` or `X_hermite.npy` read-only on its first sample request,
+reuses that mapping, and has `__getitem__` copy and preprocess only the
+requested row. The complete prepared dataset is never materialized in RAM;
+the model still receives an ordinary complete three-dimensional batch.
+
+`model.bottleneck_shape` configures the maximum retained spatial cells along
+the three model axes after encoding. The effective shape is capped by the
+encoded volume on each axis, so adaptive pooling never expands a smaller
+axis. Smaller values reduce the two dense bottleneck projections and increase
+compression; larger values retain more spatial information but increase
+parameters, checkpoint size, and bottleneck-stage memory and compute.
+
+Training uses complete-timestep partitions, AdamW, and one combined objective:
+
+```text
+total_loss = full_volume_reconstruction_mse
+           + topology_loss_weight * masked_topology_smooth_l1
+```
+
+Validation total loss controls early stopping and the selected checkpoint.
+With `model_parallel_gpus` greater than one, one process can place consecutive
+encoder, bottleneck, decoder, reconstruction, and topology stages across
+several visible GPUs. Activations move only when stage ownership changes, and
+one optimizer owns every parameter. The same placement path supports CPU and
+one GPU. `data_loader.num_workers` controls loading and preprocessing only.
+This is layer model parallelism, not DDP, model replication, or data
+parallelism.
+
+The autoencoder checkpoint stores architecture, complete input
+shape, representation and topology scaling, selection metadata, and a CPU
+state dictionary. Runtime CUDA IDs and stage mapping are not stored. Direct
+representation and topology-order fields define model identity.
+Existing two-dimensional reconstruction-only checkpoints require retraining.
+A run writes `autoencoder.pt`, `metrics.txt`, `training_history.csv`, and
+`reconstruction_examples.png`. Raw figures restore complete physical volumes,
+then display one x-z plane through the original volume's three-dimensional
+peak for original, reconstruction, and absolute error. Hermite figures retain
+their signed coefficient-plane convention. Those planes are visualization
+only. Figure preparation reconstructs one full raw pair at a time and retains
+only its two fixed display planes, avoiding a collection of full `268^3`
+examples in host memory. Full-resolution raw training is memory intensive;
+batch size one is a practical starting point, every individual Conv3d stage
+must fit on its owner, and activation transfers can make model parallelism
+slower for small models.
 
 ## Prediction and figures
 

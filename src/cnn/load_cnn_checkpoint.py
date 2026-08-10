@@ -10,11 +10,9 @@ from dataclasses import dataclass
 
 import torch
 
-from src.cnn.step_03_scale_cnn_inputs import (
-    InputFeatureScaler,
-    TopologyTargetScaler,
-)
+from src.cnn.step_03_scale_cnn_inputs import InputFeatureScaler
 from src.cnn.step_04_build_cnn import VdfCNN
+from src.learning.topology_supervision import TopologyTargetScaler
 
 
 @dataclass(frozen=True)
@@ -34,7 +32,7 @@ class LoadedCnnCheckpoint:
     topology_scaler : TopologyTargetScaler
         Scaling used to restore auxiliary outputs to Earth radii.
     checkpoint : dict
-        Directly loaded version-6 checkpoint record.
+        Directly loaded checkpoint record.
 
     Notes
     -----
@@ -54,7 +52,7 @@ def load_cnn_checkpoint(
     map_location="cpu",
     model_parallel_gpus=1,
 ):
-    """Load and reconstruct one current version-6 CNN checkpoint.
+    """Load and reconstruct one current CNN checkpoint.
 
     This reusable loading path follows stage-8 checkpoint saving and
     precedes coordinate or region inference. It rebuilds the model and both

@@ -12,6 +12,8 @@ src/
 ├── analysis/
 ├── cnn/
 ├── autoencoder/
+├── learning/
+│   └── topology_supervision.py
 ├── prediction/
 ├── plotting/
 └── configuration/
@@ -151,22 +153,45 @@ evaluation, checkpoint, and the two training outputs. Its training path is
 
 ### `src.autoencoder`
 
-This package owns raw/Hermite reconstruction data, the 2-D/3-D model,
-timestep-aware training, per-sample normalized-space reconstruction
-evaluation, checkpoint, and the four training outputs. Its path is
-`step_00_train_autoencoder.py` through
-`step_07_save_autoencoder.py`; `load_autoencoder_checkpoint.py` reconstructs
-the current saved model directly. The raw autoencoder keeps its existing
-middle-`vy` two-dimensional input in an autoencoder-owned preparation path;
-this plane does not define the raw PCA or CNN representation. Physical class
-labels are joined only after final reconstruction to produce split and class
-tables in `metrics.txt`; they never enter training or checkpoint selection.
-For `reconstruction_examples.png`, inverse preprocessing restores the raw
-plane to physical phase-space density and delegates its original and
-reconstruction panels to the extraction Stage 6 VDF preparation and drawing
-owners. The pair shares logarithmic limits, physical km/s axes, transparent
-masks, and white axes. Signed Hermite coefficients retain their symmetric
-display convention on white axes.
+This package owns on-demand memory-mapped raw/Hermite reconstruction data, the
+common Conv3d model, timestep-aware multitask training, evaluation,
+checkpoint, and the four training outputs. Its ordered path remains
+`step_00_train_autoencoder.py` through `step_07_save_autoencoder.py`;
+`autoencoder_loss.py` owns the combined objective without creating an
+artificial numbered stage, and `load_autoencoder_checkpoint.py` reconstructs
+the current saved model directly. Raw inputs retain every `X.npy` voxel in
+`(vx, vy, vz)` order, while Hermite inputs retain the complete signed saved
+coefficient cube. One latent vector feeds the decoder and the six-target
+topology head; topology metadata is an auxiliary masked target rather than an
+input. Physical class labels are joined only after final reconstruction to
+produce split and class tables in `metrics.txt`.
+
+The configured three-axis bottleneck shape is a per-axis maximum after
+encoding; dimensions already smaller than that setting remain unchanged.
+This changes dense latent-projection capacity without changing the saved input
+or exact reconstructed output shape.
+
+Runtime placement keeps one model and optimizer in one process. Consecutive
+encoder, bottleneck, decoder, reconstruction, and topology stages own
+consecutive devices, and activations transfer only when ownership changes.
+CPU and one-GPU execution use the same path. Runtime CUDA IDs are not
+checkpoint architecture. For `reconstruction_examples.png`, inverse
+preprocessing first restores the complete raw volume, then delegates one
+original-peak x-z visualization to the shared physical VDF renderer. Signed
+Hermite coefficients retain their symmetric display convention on white axes.
+Raw examples are reconstructed sequentially and reduced to copied display
+planes before the next row, so the figure builder retains only one full raw
+pair at a time.
+
+### `src.learning`
+
+This focused shared package owns model-independent topology supervision for
+the CNN and autoencoder. `topology_supervision.py` converts saved topology
+metadata to finite masks, fits training-only target scaling, restores physical
+Earth-radii values, and calculates globally masked Smooth L1. Physical X/O
+detection and geometry remain under `src.physics`; topology values never
+become model inputs. The fixed target order remains owned by
+`src.data.metadata_columns`.
 
 ### `src.prediction`
 
@@ -234,8 +259,9 @@ stages live in modules that own one sequential operation:
   t-SNE, and save two physical-class plots plus `metrics.txt`;
 - CNN stages load data, split timesteps, scale inputs and topology, build
   the model, calculate loss, optimize, evaluate, and save;
-- autoencoder stages load data, split timesteps, scale inputs, build,
-  optimize, evaluate, and save;
+- autoencoder stages load data and aligned topology targets, split timesteps,
+  fit input and topology scaling, build and place the Conv3d model, calculate
+  combined loss, optimize, evaluate, and save;
 - prediction stages load a current CNN, open source VDFs, prepare model
   input, run inference, and save coordinate or region outputs; and
 - prediction figures separate the fixed x-velocity background,
@@ -319,4 +345,6 @@ Checkpoints contain the preprocessing and model data used directly by
 inference. CNN training saves only `model.pt` and its consolidated
 `metrics.txt` report. Autoencoder training saves `autoencoder.pt`,
 `metrics.txt`, `training_history.csv`, and one consolidated
-`reconstruction_examples.png` generated from the restored best model.
+`reconstruction_examples.png` generated from the restored best model. The
+autoencoder checkpoint stores a CPU state dictionary and no runtime stage
+mapping, so CPU, one-GPU, and multi-GPU loading can choose placement anew.

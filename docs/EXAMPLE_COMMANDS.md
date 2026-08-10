@@ -60,6 +60,7 @@ The complete path matrix is:
 | CNN training | `slurm/turso/cpu/train_cnn.sbatch` | `slurm/turso/gpu/train_cnn.sbatch` | `slurm/hile/cpu/train_cnn.sbatch` | `slurm/hile/gpu/train_cnn.sbatch` |
 | Model-parallel CNN | — | `slurm/turso/gpu/train_cnn_model_parallel.sbatch` | — | `slurm/hile/gpu/train_cnn_model_parallel.sbatch` |
 | Autoencoder training | `slurm/turso/cpu/train_autoencoder.sbatch` | `slurm/turso/gpu/train_autoencoder.sbatch` | `slurm/hile/cpu/train_autoencoder.sbatch` | `slurm/hile/gpu/train_autoencoder.sbatch` |
+| Model-parallel autoencoder | — | `slurm/turso/gpu/train_autoencoder_model_parallel.sbatch` | — | `slurm/hile/gpu/train_autoencoder_model_parallel.sbatch` |
 | Coordinate prediction | `slurm/turso/cpu/predict_coordinate.sbatch` | `slurm/turso/gpu/predict_coordinate.sbatch` | `slurm/hile/cpu/predict_coordinate.sbatch` | `slurm/hile/gpu/predict_coordinate.sbatch` |
 | Region prediction | `slurm/turso/cpu/predict_region.sbatch` | `slurm/turso/gpu/predict_region.sbatch` | `slurm/hile/cpu/predict_region.sbatch` | `slurm/hile/gpu/predict_region.sbatch` |
 
@@ -830,8 +831,13 @@ metrics.txt
 
 ## Autoencoder training
 
-Autoencoder training uses `configs/models/autoencoder.yaml`. Raw and Hermite
-models use the same timestep-aware split policy as the CNN.
+Autoencoder training uses `configs/models/autoencoder.yaml`. Raw input is the
+complete `X.npy` volume in `(vx, vy, vz)` order; Hermite input is the complete
+signed `X_hermite.npy` cube. Both use the same Conv3d model, complete-timestep
+split policy, auxiliary six-target topology task, and combined validation
+objective. `model.bottleneck_shape` sets the maximum retained spatial cells
+along the three encoded axes; smaller values reduce dense bottleneck capacity
+and memory. There is no raw slice, raw downsampling, or two-dimensional mode.
 
 Raw autoencoder on CPU:
 
@@ -841,21 +847,39 @@ python -m scripts.models.train_autoencoder \
     --dataset-dir /path/to/dataset \
     --output-dir /path/to/model/autoencoder-raw \
     --representation raw \
-    --device cpu
+    --device cpu \
+    --model-parallel-gpus 1
 ```
 
-Hermite autoencoder on CUDA:
+One-GPU raw autoencoder:
 
 ```bash
 python -m scripts.models.train_autoencoder \
     --config configs/models/autoencoder.yaml \
     --dataset-dir /path/to/dataset \
+    --output-dir /path/to/model/autoencoder-raw \
+    --representation raw \
+    --device cuda \
+    --model-parallel-gpus 1
+```
+
+Local three-GPU Hermite autoencoder:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2 \
+python -m scripts.models.train_autoencoder \
+    --config configs/models/autoencoder.yaml \
+    --dataset-dir /path/to/dataset \
     --output-dir /path/to/model/autoencoder-hermite \
     --representation hermite \
-    --device cuda
+    --device cuda \
+    --model-parallel-gpus 3
 ```
 
 The CLI also accepts `auto` and indexed devices such as `cuda:0`.
+`--model-parallel-gpus` overrides the YAML value. It controls consecutive
+model stages in one Python process; `data_loader.num_workers` controls only
+sample loading and preprocessing.
 
 Turso CPU submission:
 
@@ -887,10 +911,20 @@ sbatch --partition=hile slurm/hile/cpu/train_autoencoder.sbatch \
     --representation raw
 ```
 
-HILE GPU submission:
+Turso one-process model-parallel submission:
 
 ```bash
-sbatch --partition=hile slurm/hile/gpu/train_autoencoder.sbatch \
+sbatch slurm/turso/gpu/train_autoencoder_model_parallel.sbatch \
+    --config configs/models/autoencoder.yaml \
+    --dataset-dir /path/to/dataset \
+    --output-dir /path/to/model/autoencoder-raw \
+    --representation raw
+```
+
+HILE one-process model-parallel submission:
+
+```bash
+sbatch slurm/hile/gpu/train_autoencoder_model_parallel.sbatch \
     --config configs/models/autoencoder.yaml \
     --dataset-dir /path/to/dataset \
     --output-dir /path/to/model/autoencoder-hermite \
@@ -906,18 +940,27 @@ training_history.csv
 reconstruction_examples.png
 ```
 
-`metrics.txt` describes the run and model and reports normalized-space
-reconstruction MSE by train/validation/test split and by current physical
-class. Class labels are joined only after reconstruction for reporting; they
-are not model inputs, loss targets, or checkpoint-selection data.
+`metrics.txt` describes the complete input shape, Conv3d model, configured and
+effective bottleneck shapes, latent size, requested and effective stage
+placement, topology scaling and order, and reconstruction, topology, and total
+losses by split. It retains reconstruction MSE by current physical class and
+reports each topology target's valid count, MAE, and RMSE in Earth radii. Class
+labels are joined only after reconstruction for reporting; they are not model
+inputs, loss targets, or checkpoint-selection data. Topology metadata is a
+masked auxiliary target and is never a model input.
 The consolidated PNG uses the restored best model and shows deterministic
 original, reconstructed, and absolute-error examples for the active raw or
 Hermite representation. Raw originals and reconstructions reuse the
 extraction Stage 6 physical VDF preparation and drawing functions with
 physical km/s axes, transparent threshold masks over white axes,
-`nipy_spectral`, and one shared `LogNorm`; the current two-dimensional raw
-input plane is unchanged. Hermite examples retain their signed coefficient
-scale over white axes.
+`nipy_spectral`, and one shared `LogNorm`. The displayed x-z plane crosses the
+original complete volume's three-dimensional peak and is visualization only.
+Hermite examples retain their signed coefficient scale over white axes.
+
+Full `268^3` raw training has high memory cost. Begin with batch size one;
+model parallelism does not split one Conv3d, so every stage and its backward
+activation must fit on its owning GPU. For small models, activation transfers
+may make several GPUs slower than one.
 
 ## Coordinate prediction
 

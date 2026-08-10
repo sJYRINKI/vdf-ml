@@ -1,10 +1,10 @@
 """Describe and construct sample-wise raw or Hermite model tensors.
 
 This module dispatches a loaded representation to the alternative raw and
-Hermite preparation stages for CNN consumers. PCA owns a separate restartable
-sample-batch iterator so it never materializes every feature row. The
-autoencoder-specific raw plane preparation remains inside the autoencoder
-package.
+Hermite preparation stages for model consumers. PCA owns a separate
+restartable sample-batch iterator so it never materializes every feature row.
+The autoencoder preserves its historical nonpositive-value replacement but
+now applies that operation to its complete raw volume inside its own loader.
 """
 
 from dataclasses import dataclass

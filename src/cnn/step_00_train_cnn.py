@@ -19,7 +19,6 @@ from src.cnn.step_01_load_cnn_data import load_cnn_data
 from src.cnn.step_02_split_cnn_timesteps import split_cnn_timesteps
 from src.cnn.step_03_scale_cnn_inputs import (
     DEFAULT_SCALER_EPSILON,
-    TopologyTargetScaler,
     fit_input_scaler,
 )
 from src.cnn.step_04_build_cnn import build_cnn
@@ -32,6 +31,7 @@ from src.cnn.step_06_optimize_cnn import (
 )
 from src.cnn.step_07_evaluate_cnn import evaluate_cnn
 from src.cnn.step_08_save_cnn import save_cnn_outputs
+from src.learning.topology_supervision import TopologyTargetScaler
 
 
 def run_cnn_training(

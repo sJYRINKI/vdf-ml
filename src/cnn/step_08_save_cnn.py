@@ -1,8 +1,8 @@
 """Stage 8: save the trained CNN and one consolidated metrics report.
 
-This final stage follows evaluation. It writes the version-6 model
-checkpoint and a human-readable report describing the run, chronological
-split, final physical-class performance, and auxiliary topology errors.
+This final stage follows evaluation. It writes the model checkpoint and a
+human-readable report describing the run, chronological split, final
+physical-class performance, and auxiliary topology errors.
 
 The stage receives the restored model, both training-derived scalers,
 representation preprocessing, fit summary, split, and final evaluations.
@@ -19,16 +19,8 @@ import torch
 
 from src.cnn.class_mapping import ClassMapping
 from src.data.load_velocity_grid import load_velocity_grid
-from src.data.metadata_columns import (
-    HERMITE,
-    TOPOLOGY_SCHEMA_VERSION,
-    TOPOLOGY_TARGET_COLUMNS,
-)
+from src.data.metadata_columns import TOPOLOGY_TARGET_COLUMNS
 from src.data.velocity_grid import normalize_velocity_grid_geometry
-from src import RAW
-
-
-CHECKPOINT_VERSION = 6
 
 
 def save_cnn_outputs(
@@ -47,7 +39,7 @@ def save_cnn_outputs(
     """Save the inference checkpoint and consolidated metrics report.
 
     This is the final side-effecting CNN stage. It prepares preprocessing
-    needed by prediction, writes the version-6 checkpoint, serializes
+    needed by prediction, writes the checkpoint, serializes
     run settings and final evaluation metrics as readable text, and does
     not persist a separate epoch-history or metrics sidecar.
 
@@ -225,9 +217,7 @@ def create_cnn_metrics_text(
         f"Unique cell IDs: {metadata['cid'].nunique()}",
         f"Physical classes: {len(class_mapping.class_ids)}",
         f"Class order: {class_order}",
-        f"Topology schema version: {TOPOLOGY_SCHEMA_VERSION}",
         "Topology target order: " + ", ".join(TOPOLOGY_TARGET_COLUMNS),
-        f"Checkpoint version: {CHECKPOINT_VERSION}",
         f"Device: {selected_device}",
         f"PyTorch version: {torch.__version__}",
         f"Random seed: {config['random_state']}",
@@ -400,7 +390,7 @@ def save_cnn_checkpoint(
     topology_loss_weight,
     random_seed,
 ):
-    """Save one optimizer-independent version-6 CNN checkpoint.
+    """Save one optimizer-independent CNN checkpoint.
 
     Prediction reconstructs the network, input normalization, class order,
     topology scaling, and representation preprocessing from this single
@@ -435,21 +425,23 @@ def save_cnn_checkpoint(
     """
 
     class_mapping = ClassMapping(model.class_ids, model.class_names)
+    checkpoint_preprocessing = deepcopy(preprocessing)
+    checkpoint_preprocessing.pop("representation_version", None)
+    if checkpoint_preprocessing["raw_preprocessing"] is not None:
+        checkpoint_preprocessing["raw_preprocessing"].pop(
+            "representation_version",
+            None,
+        )
     checkpoint = {
-        "checkpoint_version": CHECKPOINT_VERSION,
         "model_state_dict": {
             name: value.detach().cpu()
             for name, value in model.state_dict().items()
         },
         "representation": model.representation,
-        "representation_version": preprocessing[
-            "representation_version"
-        ],
         "expected_input_shape": list(model.input_shape),
-        "preprocessing": deepcopy(preprocessing),
+        "preprocessing": checkpoint_preprocessing,
         "input_normalization": input_scaler.to_dict(),
         "class_mapping": class_mapping.to_dict(),
-        "topology_schema_version": TOPOLOGY_SCHEMA_VERSION,
         "topology_target_names": list(TOPOLOGY_TARGET_COLUMNS),
         "topology_scaler": topology_scaler.to_dict(),
         "model_architecture": model.constructor_config(),
@@ -492,17 +484,17 @@ def _prediction_preprocessing(data):
     """
 
     if data.representation == "raw":
+        raw_preprocessing = deepcopy(data.representation_metadata)
+        raw_preprocessing.pop("representation_version", None)
         return {
             "representation": "raw",
-            "representation_version": RAW,
-            "raw_preprocessing": deepcopy(data.representation_metadata),
+            "raw_preprocessing": raw_preprocessing,
             "training_velocity_grid": _serialize_velocity_grid(
                 load_velocity_grid(data.dataset_dir)
             ),
         }
     return {
         "representation": "hermite",
-        "representation_version": HERMITE,
         "raw_preprocessing": None,
         "training_velocity_grid": None,
     }
@@ -573,7 +565,6 @@ def _format_metric(value):
 
 
 __all__ = [
-    "CHECKPOINT_VERSION",
     "create_cnn_metrics_text",
     "save_cnn_checkpoint",
     "save_cnn_outputs",

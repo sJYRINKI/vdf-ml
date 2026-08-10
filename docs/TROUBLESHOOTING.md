@@ -148,10 +148,12 @@ Useful first steps:
 - reduce PCA `--batch-size` below its shipped value of 16;
 - use low-rank PCA when a small retained component count is scientifically
   suitable, while remembering that it is an approximation;
-- use a full-node GPU profile for complete-volume raw PCA or CNN when the
-  workload fits the selected accelerator;
+- use a full-node GPU profile for complete-volume raw PCA, CNN, or
+  autoencoder work when the workload fits the selected accelerator;
 - raw CNN batch size one;
-- raw autoencoder batch size one for its existing two-dimensional input;
+- raw autoencoder batch size one for its complete `268^3` input;
+- reduce `model.bottleneck_shape` when dense latent projections or the
+  bottleneck stage dominate autoencoder memory;
 - normalization batch size one or two;
 - start Hermite PCA/CNN/autoencoder batches at one when memory is tight;
 - start large rotated 268 x 268 x 268 Hermite extraction with two to four
@@ -197,11 +199,20 @@ The launcher is single-node NCCL execution. A direct Python PCA command still
 uses one device even when several GPUs are visible; it must be launched by
 `torchrun` with `--multi-gpu` to pool component memory.
 
-For CNN memory pressure, `--model-parallel-gpus N` distributes consecutive
-encoder/output stages, optimizer state, and saved activations across visible
-GPUs in one process. It does not shard one `Conv3d`, so an oversized first
-convolution stage or its activation must still fit on the first GPU. Model
-parallelism may also be slower because activations cross device boundaries.
+For CNN or autoencoder memory pressure, `--model-parallel-gpus N` distributes
+consecutive model stages, optimizer state, and saved activations across visible
+GPUs in one process. The autoencoder distributes encoder, bottleneck, decoder,
+reconstruction, and topology stages. Neither workflow shards one `Conv3d`, so
+an oversized convolution stage and its local activation must still fit on its
+owner. Model parallelism may also be slower for small models because
+activations cross device boundaries. `data_loader.num_workers` affects only
+loading and preprocessing and cannot distribute the model.
+
+For the autoencoder, `model.bottleneck_shape` is the maximum retained spatial
+shape after encoding. Smaller values reduce both dense latent projections,
+checkpoint size, and bottleneck-stage memory and compute, but increase spatial
+compression. The effective shape never exceeds the encoded volume along any
+axis.
 
 Full mode performs exact reduced SVD within each update, but a multi-batch
 fit is truncated between updates and is not generally identical to
@@ -259,37 +270,45 @@ or a separate explained-variance figure.
 
 ## Reading autoencoder reconstruction metrics
 
-Autoencoder `metrics.txt` reports reconstruction MSE in the training-derived
-normalized representation space, not original VDF units. Compare the split
-table to identify train/validation/test behavior and the physical-class table
-to identify populations that are easier or harder to reconstruct. Both come
-from the restored validation-selected model. Class labels are joined after
-reconstruction only and cannot improve or degrade the learned result by
-acting as model inputs. `training_history.csv` remains the per-epoch record,
-and `reconstruction_examples.png` shows deterministic original,
-reconstructed, and absolute-error panels from the same restored best model.
-Raw original/reconstruction panels reverse preprocessing to physical
-phase-space density and use the extraction Stage 6 renderer with one shared
-`LogNorm`, unmodified `nipy_spectral`, physical km/s axes, and transparent
-masks over white axes. The current two-dimensional raw input plane is not
-changed by plotting. Hermite panels remain signed coefficient views with a
-symmetric scale and white axes.
+Autoencoder `metrics.txt` reports complete-volume reconstruction MSE in the
+training-derived normalized representation space, masked topology Smooth L1
+in scaled target space, and their weighted total objective. Validation total
+loss selects the restored model. Compare the objective table across train,
+validation, and test, then use the physical-class reconstruction table to
+identify populations that are easier or harder to reconstruct. The topology
+table reports each target's valid count, MAE, and RMSE after inverse scaling to
+Earth radii. Missing metadata is masked rather than treated as zero.
+
+Class labels are joined after reconstruction only. Topology metadata is an
+auxiliary target that supervises the latent vector, not a model input or
+decoder condition. `training_history.csv` records reconstruction, topology,
+and total losses for training and validation. `reconstruction_examples.png`
+shows deterministic original, reconstructed, and absolute-error panels from
+the same restored best model. Raw panels first reverse preprocessing for the
+complete physical volume, then use the extraction Stage 6 renderer on one x-z
+plane through the original three-dimensional peak with a shared `LogNorm`,
+unmodified `nipy_spectral`, physical km/s axes, and transparent masks over
+white axes. That plane is visualization only. Hermite panels remain signed
+coefficient views with a symmetric scale and white axes. Raw examples are
+reconstructed one at a time and reduced to copied display planes before the
+next row, preventing the figure builder from retaining all selected full
+volumes.
 
 ## Representation mismatch
 
 The command selector (`raw` or `hermite`), saved dataset, configuration, and
-checkpoint are expected to agree. Raw PCA and CNN input shape follows the
-complete saved training grid in `(vx, vy, vz)` order; Hermite order and axes
-follow the saved array/checkpoint convention. Unrotated coefficients use
-`(n_x, n_y, n_z)` and optional rotated coefficients use
+checkpoint are expected to agree. Raw PCA, CNN, and autoencoder input shapes
+follow the complete saved training grid in `(vx, vy, vz)` order; Hermite order
+and axes follow the saved array/checkpoint convention. Unrotated coefficients
+use `(n_x, n_y, n_z)` and optional rotated coefficients use
 `(n_parallel, n_perp1, n_perp2)`. Mismatches surface through ordinary
 dictionary, NumPy, or PyTorch operations.
 
-Current PCA and CNN representation values are `raw` and `hermite`.
-The raw autoencoder retains its own two-dimensional plane convention.
-Removed sliced raw CNN checkpoints are not adapted by the current loader.
-Neither are Hermite datasets or checkpoints from the retired compact-log,
-fixed-order convention: regenerate the dataset and retrain the model.
+Current PCA, CNN, and autoencoder representation values are `raw` and
+`hermite`. Removed sliced raw CNN checkpoints and retired two-dimensional or
+reconstruction-only autoencoder checkpoints are not adapted. Neither are
+Hermite datasets or checkpoints from the retired compact-log, fixed-order
+convention: regenerate the dataset and retrain the model.
 
 ## Checkpoint from another workflow
 
@@ -297,6 +316,14 @@ Current CNN prediction reads checkpoint fields directly. Current
 autoencoder loading reads checkpoint fields directly. Files from removed
 historical workflows are not inspected or converted; recover the
 appropriate historical commit in a separate directory.
+
+Direct representation names, preprocessing values, architecture fields, and
+topology target order define current model checkpoints.
+
+The autoencoder checkpoint stores a CPU state dictionary and no runtime
+CUDA identifiers, stage map, or requested GPU count. Choose CPU, one-GPU, or
+multi-GPU placement when loading; changing the runtime GPU count does not
+require rewriting the checkpoint.
 
 ## Class or topology mismatch
 

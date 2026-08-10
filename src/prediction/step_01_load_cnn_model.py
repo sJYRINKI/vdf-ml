@@ -30,7 +30,7 @@ def load_prediction_model(
     Parameters
     ----------
     checkpoint_path : str or pathlib.Path
-        Current version-6 CNN checkpoint produced by the training workflow.
+        Current CNN checkpoint produced by the training workflow.
     device : str, optional
         PyTorch device string. ``"auto"`` selects CUDA when available and
         otherwise selects CPU.

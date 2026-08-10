@@ -6,11 +6,13 @@ validation, and test examples from the in-memory normalized-space losses,
 reconstructs only those memory-mapped samples, and writes one consolidated
 ``reconstruction_examples.png`` figure.
 
-Raw panels restore the current middle-``vy`` log10 input to physical VDF
-density, then use the same preparation and drawing operations as extraction
-Stage 6. Hermite panels retain the central third-axis plane of the signed
-physical-VDF coefficient cube. Original and reconstructed values share a
-color scale, while a third panel shows absolute error in the same units.
+Raw panels restore one complete logarithmic ``(vx, vy, vz)`` pair at a time
+to physical VDF density, locate the original volume's three-dimensional peak,
+and retain only the two x-z display planes through that fixed ``vy`` index.
+This keeps figure preparation bounded to one full raw pair plus compact saved
+planes. Hermite panels display the central plane of each complete signed
+coefficient cube. Plane selection is visualization only; training and loss
+always use every voxel or coefficient.
 """
 
 from dataclasses import replace
@@ -26,7 +28,7 @@ import pandas as pd
 import torch
 
 from src.autoencoder.step_01_load_autoencoder_data import (
-    restore_autoencoder_raw_plane,
+    restore_autoencoder_raw_volume,
 )
 from src.data.load_velocity_grid import load_velocity_grid
 from src.plotting.vdf_slices import (
@@ -56,10 +58,12 @@ def save_autoencoder_reconstruction_figure(
     examples, source VLSV paths and CIDs are passed to the extraction Stage 6
     threshold loader, which groups rows by source and reads the supported
     physical producer once for each displayed cell. Log10 values are restored
-    to physical phase-space density and rendered with that threshold,
-    logarithmic scale, transparent mask, white background, and velocity axes.
-    Hermite values remain denormalized signed physical-VDF coefficients on
-    the central third-axis plane and require no source threshold read.
+    to physical phase-space density. The original full-volume peak selects
+    one common x-z display plane for original, reconstruction, and absolute
+    error. Each raw pair is reduced to those two display planes before the
+    next selected sample is reconstructed, while Hermite values remain
+    complete denormalized signed coefficient cubes until their central
+    display plane is selected.
 
     Parameters
     ----------
@@ -73,7 +77,8 @@ def save_autoencoder_reconstruction_figure(
         Final split results containing sample indices and normalized-space
         reconstruction MSE values.
     device : str or torch.device
-        Device hosting the restored autoencoder.
+        Input device for the restored autoencoder. Later model-parallel
+        stages may occupy other devices.
     max_per_class : int
         Historical maximum number of deterministic examples displayed for
         each physical class in each split.
@@ -92,7 +97,9 @@ def save_autoencoder_reconstruction_figure(
     selection. Source VLSV reads are limited to selected raw examples; model
     training, evaluation, and Hermite plotting do not open those sources. The
     operation reads only selected representation rows and does not persist
-    reconstruction arrays.
+    reconstruction arrays. Raw figure preparation keeps one complete
+    original/reconstruction pair active at a time rather than retaining all
+    selected 268-cubed volumes in memory.
     """
 
     selected = select_autoencoder_reconstruction_examples(
@@ -182,7 +189,13 @@ def select_autoencoder_reconstruction_examples(
 
 
 def _reconstruct_selected_examples(model, data, selected, device):
-    """Reconstruct only selected memory-mapped representation rows.
+    """Reconstruct selected rows with bounded raw figure memory.
+
+    A raw row is reconstructed as a complete ``(vx, vy, vz)`` volume. Its
+    full original volume determines the three-dimensional peak, and both
+    physical volumes are immediately copied to the same peak-``vy`` x-z
+    plane before the next row is loaded. Hermite examples retain their much
+    smaller complete signed coefficient cubes until figure composition.
 
     Parameters
     ----------
@@ -193,13 +206,21 @@ def _reconstruct_selected_examples(model, data, selected, device):
     selected : pandas.DataFrame
         Deterministically selected sample identity and reporting rows.
     device : str or torch.device
-        Device hosting the model and one-sample inference tensors.
+        Model input device receiving each one-sample inference tensor. Later
+        stages may occupy other model-parallel devices.
 
     Returns
     -------
     list of dict
-        Selected metadata plus two-dimensional original and reconstructed
-        display planes in physical raw units or denormalized Hermite units.
+        Selected metadata plus compact raw display planes and their full
+        original peak index, or complete original and reconstructed Hermite
+        cubes. Raw plane copies do not retain references to full volumes.
+
+    Notes
+    -----
+    Full-volume inference and reconstruction values are unchanged. Reducing
+    completed raw examples to visualization planes bounds ordinary memory to
+    one active full pair instead of one pair for every selected plot row.
     """
 
     device = torch.device(device)
@@ -217,18 +238,43 @@ def _reconstruct_selected_examples(model, data, selected, device):
                 output["reconstruction"]
             )[0, 0].detach().cpu().numpy()
             if data.representation == "raw":
-                original = restore_autoencoder_raw_plane(original)
-                reconstructed = restore_autoencoder_raw_plane(reconstructed)
+                original = restore_autoencoder_raw_volume(original)
+                reconstructed = restore_autoencoder_raw_volume(reconstructed)
+                peak_index = tuple(
+                    int(value)
+                    for value in np.unravel_index(
+                        int(np.argmax(original)),
+                        original.shape,
+                    )
+                )
+                examples.append(
+                    {
+                        "row": row,
+                        "peak_index": peak_index,
+                        "original_plane_values": np.array(
+                            original[:, peak_index[1], :],
+                            dtype=np.float32,
+                            order="C",
+                            copy=True,
+                        ),
+                        "reconstructed_plane_values": np.array(
+                            reconstructed[:, peak_index[1], :],
+                            dtype=np.float32,
+                            order="C",
+                            copy=True,
+                        ),
+                    }
+                )
+                del original, reconstructed
             else:
-                original = _display_hermite_plane(original)
-                reconstructed = _display_hermite_plane(reconstructed)
-            examples.append(
-                {
-                    "row": row,
-                    "original": original,
-                    "reconstructed": reconstructed,
-                }
-            )
+                examples.append(
+                    {
+                        "row": row,
+                        "original": original,
+                        "reconstructed": reconstructed,
+                    }
+                )
+            del inputs, output
     reader.close()
     return examples
 
@@ -239,8 +285,8 @@ def _create_reconstruction_figure(examples, data):
     Parameters
     ----------
     examples : sequence of mapping
-        Original and reconstructed two-dimensional planes plus reporting
-        identity for each selected sample.
+        Raw display-plane values with their full original peak index, or
+        complete Hermite cubes, plus reporting identity for each sample.
     data : AutoencoderTrainingData
         Representation and velocity-grid identity controlling axes, units,
         and color conventions.
@@ -286,13 +332,10 @@ def _create_reconstruction_figure(examples, data):
 def _draw_raw_reconstruction_row(figure, axes, example, data, velocity_grid):
     """Render raw reconstruction examples with the extraction VDF style.
 
-    Raw originals and reconstructions are restored from the autoencoder's
-    normalized log10 representation and displayed through the same physical
-    VDF preparation and drawing functions used by extraction Stage 6. The
-    live autoencoder input is already a two-dimensional ``(vx, vz)`` target,
-    so its fixed middle-``vy`` plane supplies physical velocity axes and the
-    sample threshold while the original supplies the logarithmic color range
-    shared by both panels.
+    Upstream preparation restores complete normalized logarithmic volumes,
+    derives the original's full three-dimensional peak, and copies the same
+    peak-``vy`` x-z plane from both volumes. This renderer applies the
+    extraction-style physical display to those bounded plane copies.
 
     Parameters
     ----------
@@ -301,12 +344,12 @@ def _draw_raw_reconstruction_row(figure, axes, example, data, velocity_grid):
     axes : sequence of matplotlib.axes.Axes
         Original, reconstruction, and absolute-error axes.
     example : mapping
-        Physical original and reconstruction planes with shape ``(vx, vz)``
-        and density units ``s^3 m^-6``, plus reporting identity whose
-        ``min_value`` field is the same-cell sparsity threshold in those
-        units.
+        Physical original and reconstruction x-z plane values with shape
+        ``(vx, vz)``, their full-volume original peak index, and identity
+        whose ``min_value`` field is the same-cell sparsity threshold in
+        ``s^3 m^-6``.
     data : AutoencoderTrainingData
-        Raw model-plane convention and saved velocity-grid identity.
+        Complete raw model convention and saved velocity-grid identity.
     velocity_grid : mapping
         Physical velocity extents in metres per second and regular grid shape.
 
@@ -318,36 +361,22 @@ def _draw_raw_reconstruction_row(figure, axes, example, data, velocity_grid):
     Notes
     -----
     Masked and below-threshold values remain transparent over white axes.
-    The original and reconstruction use the same fixed middle-``vy`` model
-    plane, physical ``min_value`` threshold, and exact original-derived
-    logarithmic normalization; a separate nonnegative panel shows absolute
-    physical-space error. Historical code was inspected only as a read-only
-    visual reference, while current combined-artifact and data owners remain
-    authoritative. Plotting does not import legacy code or modify model
-    tensors, saved VDFs, normalized-space reconstruction loss, or checkpoint
-    selection.
+    The selected plane is a visualization only. The original and
+    reconstruction use the same peak-derived ``vy`` index, physical
+    ``min_value`` threshold, and original-derived logarithmic normalization;
+    a separate panel shows plane-wise absolute physical-space error.
     """
 
-    original = example["original"]
-    reconstructed = example["reconstructed"]
-    peak_vx, peak_vz = np.unravel_index(
-        int(np.argmax(original)),
-        original.shape,
-    )
-    peak_index = (
-        int(peak_vx),
-        int(data.representation_metadata["slice_index"]),
-        int(peak_vz),
-    )
+    peak_index = example["peak_index"]
     original_plane = create_physical_vdf_plane(
         "xz",
-        original,
+        example["original_plane_values"],
         peak_index,
         velocity_grid["extent_mps"],
     )
     reconstructed_plane = create_physical_vdf_plane(
         "xz",
-        reconstructed,
+        example["reconstructed_plane_values"],
         peak_index,
         velocity_grid["extent_mps"],
     )
@@ -383,7 +412,9 @@ def _draw_raw_reconstruction_row(figure, axes, example, data, velocity_grid):
         "Original\n" + _row_label(example["row"], "raw")
     )
     axes[1].set_title("Reconstructed")
-    absolute_error = np.abs(reconstructed - original)
+    absolute_error = np.abs(
+        reconstructed_plane.values - original_plane.values
+    )
     visible_error = np.ma.masked_less_equal(absolute_error, 0.0)
     error_image = axes[2].imshow(
         visible_error.T,
@@ -411,7 +442,8 @@ def _draw_hermite_reconstruction_row(figure, axes, example, data):
     axes : sequence of matplotlib.axes.Axes
         Original, reconstruction, and absolute-error axes.
     example : mapping
-        Central coefficient planes plus reporting identity.
+        Complete signed coefficient cubes plus reporting identity. The
+        central plane is selected here for visualization only.
     data : AutoencoderTrainingData
         Hermite coefficient shape used for image extents.
 
@@ -421,8 +453,8 @@ def _draw_hermite_reconstruction_row(figure, axes, example, data):
         Matplotlib artists for the original, reconstruction, and error panels.
     """
 
-    original = example["original"]
-    reconstructed = example["reconstructed"]
+    original = _display_hermite_plane(example["original"])
+    reconstructed = _display_hermite_plane(example["reconstructed"])
     absolute_error = np.abs(reconstructed - original)
     value_limit = max(
         float(np.abs(original).max()),

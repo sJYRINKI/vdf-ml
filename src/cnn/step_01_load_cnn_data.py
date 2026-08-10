@@ -21,7 +21,6 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from src.cnn.class_mapping import ClassMapping, as_integer_array
-from src.data.metadata_columns import TOPOLOGY_TARGET_COLUMNS
 from src.representations.model_input import (
     RepresentationTensorSpec,
     create_representation_tensor_sample,
@@ -29,6 +28,9 @@ from src.representations.model_input import (
 )
 from src.representations.step_01_load_saved_representation import (
     load_saved_representation,
+)
+from src.learning.topology_supervision import (
+    create_topology_targets as _create_topology_targets,
 )
 
 
@@ -391,7 +393,7 @@ def load_cnn_data(
         )
         project_class_ids = as_integer_array(metadata["class_id"])
         class_targets = class_mapping.encode(project_class_ids)
-        topology_targets, topology_mask = create_topology_targets(metadata)
+        topology_targets, topology_mask = _create_topology_targets(metadata)
         sample_index = as_integer_array(metadata["sample_index"])
         cid = as_integer_array(metadata["cid"])
         source_path = dataset_dir / representation_spec.source_filename
@@ -471,40 +473,10 @@ def create_cnn_dataloader(
     )
 
 
-def create_topology_targets(metadata):
-    """Create the six topology targets and their missing-value mask.
-
-    CNN stage 1 calls this after aligning physical classes. The returned
-    arrays keep the metadata row order and use a Boolean mask so stage 5
-    excludes unavailable X- or O-point values from the auxiliary loss.
-
-    Parameters
-    ----------
-    metadata : pandas.DataFrame
-        Saved rows containing topology values in Earth radii.
-
-    Returns
-    -------
-    targets : numpy.ndarray
-        Earth-radius values with shape ``(n_samples, 6)`` in topology
-        schema order, with missing entries filled by zero.
-    mask : numpy.ndarray
-        Boolean validity mask with the same shape.
-    """
-
-    values = np.asarray(
-        metadata.loc[:, TOPOLOGY_TARGET_COLUMNS],
-        dtype=np.float64,
-    )
-    mask = np.isfinite(values)
-    return np.where(mask, values, 0.0), mask
-
-
 __all__ = [
     "CnnTrainingData",
     "CnnTrainingDataset",
     "RepresentationMemmapReader",
     "create_cnn_dataloader",
-    "create_topology_targets",
     "load_cnn_data",
 ]

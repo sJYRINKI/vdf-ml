@@ -16,6 +16,10 @@ from dataclasses import dataclass
 import torch
 from torch.nn import functional
 
+from src.learning.topology_supervision import (
+    calculate_masked_topology_loss,
+)
+
 
 @dataclass(frozen=True)
 class CnnLossResult:
@@ -97,15 +101,11 @@ def calculate_cnn_loss(
         valid_count = 0
         topology_loss = topology_predictions.sum() * 0.0
     else:
-        valid_count = int(torch.count_nonzero(topology_mask).item())
-        if valid_count:
-            topology_loss = functional.smooth_l1_loss(
-                topology_predictions[topology_mask],
-                topology_targets[topology_mask],
-                reduction="sum",
-            ) / valid_count
-        else:
-            topology_loss = topology_predictions.sum() * 0.0
+        topology_loss, valid_count = calculate_masked_topology_loss(
+            topology_predictions,
+            topology_targets,
+            topology_mask,
+        )
     total_loss = (
         classification_loss
         + float(topology_loss_weight) * topology_loss

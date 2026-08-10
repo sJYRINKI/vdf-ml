@@ -1,15 +1,16 @@
-"""Train the VDF autoencoder through eight ordered stages.
+"""Train the full-volume topology-aware VDF autoencoder in eight stages.
 
 Workflow
 --------
 Stage 0 orchestrates the complete reconstruction training run.
-Stage 1 loads saved raw or Hermite samples without supervised targets.
+Stage 1 reads complete raw or Hermite volumes on demand from read-only
+memory maps and aligns their topology targets.
 Stage 2 splits complete timesteps into three partitions.
-Stage 3 fits training-only feature normalization.
-Stage 4 constructs the representation-specific autoencoder.
-Stage 5 optimizes parameters and selects by validation MSE.
-Stage 6 calculates sample, split, and physical-class reconstruction MSE.
-Stage 7 saves the checkpoint, text metrics report, and training history.
+Stage 3 fits training-only representation normalization.
+Stage 4 constructs and places one Conv3d latent multitask autoencoder.
+Stage 5 optimizes combined reconstruction and masked topology loss.
+Stage 6 reports reconstruction, topology, and total objectives.
+Stage 7 saves the checkpoint and four established artifacts.
 """
 
 from src.autoencoder.load_autoencoder_checkpoint import (

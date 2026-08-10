@@ -1,48 +1,44 @@
-"""Stage 5: optimize the autoencoder and select by validation MSE.
+"""Stage 5: optimize and select the full-volume multitask autoencoder.
 
-This stage follows model construction and calls stage 6 after each epoch.
-It performs AdamW updates with normalized-space MSE, tracks the established
-early-stopping state, restores the best parameter state, and returns the
-history consumed by the final saving stage.
+One optimizer owns every encoder, bottleneck, decoder, reconstruction, and
+topology parameter even when those modules occupy several CUDA devices.
+Each batch is normalized once, passed sequentially through the placed
+Conv3d stages, and updated from one backward call on the combined objective.
 
-The stage receives the stage-4 model, AdamW optimizer, training and
-validation loaders, device, and stopping settings. It mutates the supplied
-model and leaves it in evaluation mode with the lowest-validation-MSE
-parameters restored.
+Validation total loss, rather than reconstruction MSE alone, selects the
+best epoch. The selected state is copied to CPU so checkpoint content is
+independent from runtime CUDA stage ownership.
 """
 
 from dataclasses import dataclass
 import time
 
 import torch
-from torch.nn import functional
 
-from src.autoencoder.step_06_evaluate_autoencoder import (
-    evaluate_autoencoder,
-)
+from src.autoencoder.autoencoder_loss import calculate_autoencoder_loss
+from src.autoencoder.step_06_evaluate_autoencoder import evaluate_autoencoder
 
 
 @dataclass(frozen=True)
 class AutoencoderFitResult:
-    """Record selected-epoch metadata and autoencoder training history.
-
-    Stage 5 returns this immutable summary after restoring the selected
-    parameter state directly into the supplied model. It contains no model
-    or optimizer tensors; stage 7 serializes the history and selected epoch.
+    """Record validation-total-loss selection and epoch history.
 
     Parameters
     ----------
     best_epoch : int
-        One-based epoch with the lowest selected validation MSE.
+        One-based epoch with the lowest qualifying validation total loss.
+    best_validation_total_loss : float
+        Selected complete-volume MSE plus weighted masked topology loss.
     history : tuple of dict
-        One serializable row per completed optimizer epoch.
+        Per-epoch reconstruction, topology, and total objectives plus timing.
     epochs_completed : int
-        Number of complete epochs.
+        Number of complete optimization epochs.
     total_seconds : float
-        Wall time for the optimization loop.
+        Wall time for optimization in seconds.
     """
 
     best_epoch: int
+    best_validation_total_loss: float
     history: tuple
     epochs_completed: int
     total_seconds: float
@@ -54,73 +50,78 @@ def optimize_autoencoder(
     validation_loader,
     *,
     optimizer,
-    device,
+    topology_scaler,
+    topology_loss_weight,
     max_epochs,
     patience,
     min_delta,
 ):
-    """Fit an autoencoder and restore its best validation state.
+    """Fit one placed autoencoder and restore its best total-loss state.
 
-    Each epoch performs one complete normalized-space MSE optimizer pass,
-    then stage 6 evaluates the validation partition. The function mutates
-    ``model`` and restores a CPU-cloned copy of the lowest-MSE parameters
-    before returning.
+    Every epoch performs one combined-objective optimizer pass and then
+    evaluates validation rows. A CPU-cloned state replaces the live mixed-
+    device parameters only when validation total loss improves sufficiently.
 
     Parameters
     ----------
     model : VdfAutoencoder
-        Raw or Hermite reconstruction model.
+        Full-volume Conv3d model whose consecutive stages may span devices.
     train_loader : torch.utils.data.DataLoader
-        Shuffled training partition.
+        Shuffled complete-timestep training partition.
     validation_loader : torch.utils.data.DataLoader
         Stable validation partition.
     optimizer : torch.optim.AdamW
-        Optimizer whose state is local to this fit.
-    device : str or torch.device
-        Single training device.
+        Single optimizer owning every trainable model parameter once.
+    topology_scaler : TopologyTargetScaler
+        Scaling fitted only from valid training topology entries.
+    topology_loss_weight : float
+        Weight in ``MSE + weight * masked Smooth L1``.
     max_epochs : int
         Maximum complete optimizer epochs.
     patience : int
-        Epochs without MSE improvement before stopping.
+        Epochs without sufficient validation-total-loss improvement.
     min_delta : float
-        Required validation-MSE improvement.
+        Required decrease in validation total loss.
 
     Returns
     -------
     AutoencoderFitResult
-        Selected epoch and complete training history.
+        Best epoch, best validation total objective, and complete history.
 
     Notes
     -----
-    ``min_delta`` defines the required MSE decrease. ``patience`` counts
-    complete epochs without that decrease, and timing values use wall-clock
-    seconds.
+    Test data is never passed to this function. One ``backward`` call lets
+    autograd traverse activation transfers between model-stage devices.
     """
 
     history = []
     best_epoch = 0
-    best_mse = float("inf")
+    best_total_loss = float("inf")
     best_state_dict = None
     epochs_without_improvement = 0
     training_start = time.perf_counter()
     for epoch in range(1, int(max_epochs) + 1):
         epoch_start = time.perf_counter()
-        train_mse = train_autoencoder_epoch(
+        train_metrics = train_autoencoder_epoch(
             model,
             train_loader,
             optimizer,
-            device,
+            topology_loss_weight,
         )
         validation = evaluate_autoencoder(
             model,
             validation_loader,
-            device,
+            topology_scaler,
             "validation",
+            topology_loss_weight,
         )
-        improved = validation["mse"] < best_mse - float(min_delta)
+        improved = (
+            validation["total_loss"]
+            < best_total_loss - float(min_delta)
+        )
         if improved:
             best_epoch = epoch
-            best_mse = validation["mse"]
+            best_total_loss = validation["total_loss"]
             best_state_dict = {
                 name: value.detach().cpu().clone()
                 for name, value in model.state_dict().items()
@@ -131,11 +132,17 @@ def optimize_autoencoder(
         history.append(
             {
                 "epoch": epoch,
-                "learning_rate": float(
-                    optimizer.param_groups[0]["lr"]
-                ),
-                "train_reconstruction_mse": train_mse,
-                "validation_reconstruction_mse": validation["mse"],
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                "train_reconstruction_loss": train_metrics[
+                    "reconstruction_loss"
+                ],
+                "train_topology_loss": train_metrics["topology_loss"],
+                "train_total_loss": train_metrics["total_loss"],
+                "validation_reconstruction_loss": validation[
+                    "reconstruction_mse"
+                ],
+                "validation_topology_loss": validation["topology_loss"],
+                "validation_total_loss": validation["total_loss"],
                 "is_best": False,
                 "epochs_without_improvement": epochs_without_improvement,
                 "epoch_seconds": time.perf_counter() - epoch_start,
@@ -147,66 +154,108 @@ def optimize_autoencoder(
     model.load_state_dict(best_state_dict, strict=True)
     model.eval()
     history = tuple(
-        {
-            **row,
-            "is_best": row["epoch"] == best_epoch,
-        }
+        {**row, "is_best": row["epoch"] == best_epoch}
         for row in history
     )
     return AutoencoderFitResult(
         best_epoch=best_epoch,
+        best_validation_total_loss=best_total_loss,
         history=history,
         epochs_completed=len(history),
         total_seconds=time.perf_counter() - training_start,
     )
 
 
-def train_autoencoder_epoch(model, loader, optimizer, device):
-    """Run one normalized-space MSE optimizer epoch.
+def train_autoencoder_epoch(
+    model,
+    loader,
+    optimizer,
+    topology_loss_weight,
+):
+    """Run one full-volume reconstruction and topology optimizer epoch.
 
-    This inner stage-5 operation reads every training sample, normalizes it
-    with the model's stored training statistics, backpropagates mean-squared
-    reconstruction error, and applies one AdamW update per batch. It mutates
-    both model parameters and optimizer state.
+    Each batch crosses the placed stages once and contributes one backward
+    call. Scalar sums are accumulated separately so epoch reconstruction and
+    topology means remain correct for unequal batch sizes and mask counts.
 
     Parameters
     ----------
     model : VdfAutoencoder
-        Reconstruction model updated in place.
+        Placed raw or Hermite Conv3d model updated in place.
     loader : torch.utils.data.DataLoader
-        Shuffled training partition.
+        On-demand memory-mapped complete-volume training partition.
     optimizer : torch.optim.Optimizer
-        Optimizer for ``model`` parameters.
-    device : str or torch.device
-        Device hosting the model and batches.
+        One optimizer containing each mixed-device parameter exactly once.
+    topology_loss_weight : float
+        Multiplier applied to globally masked topology Smooth L1.
 
     Returns
     -------
-    float
-        Mean squared error over every reconstructed scalar in normalized
-        representation space.
+    dict
+        Aggregate reconstruction loss, topology loss, and weighted total
+        objective over the epoch.
+
+    Notes
+    -----
+    Reconstruction MSE covers every normalized voxel or coefficient.
+    Missing topology entries contribute no auxiliary loss, while their
+    samples continue to update the reconstruction branch.
     """
 
-    device = torch.device(device)
     model.train()
-    squared_error = 0.0
-    value_count = 0
+    reconstruction_error = 0.0
+    reconstruction_value_count = 0
+    topology_error = 0.0
+    valid_topology_count = 0
     for batch in loader:
-        inputs = batch["inputs"].to(device)
-        normalized = model.normalize_inputs(inputs)
-        output = model._forward_normalized(normalized)
-        loss = functional.mse_loss(output["reconstruction"], normalized)
+        normalized = model.normalize_inputs(batch["inputs"])
+        output = model.forward_from_normalized(normalized)
+        target_inputs = normalized.to(model.output_device)
+        topology_targets = batch["topology_targets"].to(model.output_device)
+        topology_mask = batch["topology_mask"].to(model.output_device)
+        losses = calculate_autoencoder_loss(
+            output["reconstruction"],
+            target_inputs,
+            output["topology_predictions"],
+            topology_targets,
+            topology_mask,
+            topology_loss_weight,
+        )
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        losses["total_loss"].backward()
         optimizer.step()
-        difference = output["reconstruction"] - normalized
-        squared_error += float(
+
+        difference = output["reconstruction"] - target_inputs
+        reconstruction_error += float(
             torch.sum(
-                torch.square(difference.detach().to(dtype=torch.float64))
+                torch.square(
+                    difference.detach().to(dtype=torch.float64)
+                )
             )
         )
-        value_count += normalized.numel()
-    return squared_error / value_count
+        reconstruction_value_count += target_inputs.numel()
+        batch_valid_count = losses["valid_topology_count"]
+        topology_error += (
+            float(losses["topology_loss"].detach()) * batch_valid_count
+        )
+        valid_topology_count += batch_valid_count
+
+    reconstruction_loss = (
+        reconstruction_error / reconstruction_value_count
+    )
+    topology_loss = (
+        topology_error / valid_topology_count
+        if valid_topology_count
+        else 0.0
+    )
+    return {
+        "reconstruction_loss": reconstruction_loss,
+        "topology_loss": topology_loss,
+        "total_loss": (
+            reconstruction_loss
+            + float(topology_loss_weight) * topology_loss
+        ),
+    }
 
 
 __all__ = [

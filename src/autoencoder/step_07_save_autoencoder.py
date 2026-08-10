@@ -1,14 +1,14 @@
-"""Stage 7: save the autoencoder and reconstruction metrics report.
+"""Stage 7: save the full-volume topology-aware autoencoder artifacts.
 
-This final stage follows evaluation of the restored validation-selected
-model. It writes the version-1 reconstruction checkpoint, one human-readable
-``metrics.txt`` report, the established per-epoch training history, and one
-consolidated reconstruction-example figure.
+The final stage writes the established ``autoencoder.pt``, ``metrics.txt``,
+``training_history.csv``, and ``reconstruction_examples.png`` files. The
+checkpoint contains complete three-dimensional architecture,
+training-derived representation and topology scaling, selection metadata,
+and CPU model tensors, but no runtime device identifiers or stage mapping.
 
-The report describes the run and architecture, chronological partitions,
-and normalized-space reconstruction MSE by split and current physical class.
-No sample-level metric array, JSON report, or class-conditioned model output
-is persisted.
+The text report retains reconstruction summaries and adds combined objective,
+physical topology error, and one-process model-parallel placement sections.
+No JSON report or per-sample topology output is created.
 """
 
 from pathlib import Path
@@ -16,19 +16,13 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-from src.autoencoder.step_01_load_autoencoder_data import (
-    AUTOENCODER_RAW_XZ_FULL,
-)
-from src.autoencoder.step_06_evaluate_autoencoder import (
-    create_autoencoder_reconstruction_tables,
-)
 from src.autoencoder.reconstruction_plots import (
     save_autoencoder_reconstruction_figure,
 )
-from src.data.metadata_columns import HERMITE
-
-
-AUTOENCODER_CHECKPOINT_VERSION = 1
+from src.autoencoder.step_06_evaluate_autoencoder import (
+    create_autoencoder_objective_tables,
+    create_autoencoder_reconstruction_tables,
+)
 
 
 def save_autoencoder_outputs(
@@ -36,6 +30,7 @@ def save_autoencoder_outputs(
     *,
     model,
     input_scaler,
+    topology_scaler,
     data,
     config,
     fit_result,
@@ -45,41 +40,37 @@ def save_autoencoder_outputs(
 ):
     """Save the checkpoint, metrics, history, and reconstruction figure.
 
-    This final side-effecting stage writes the version-1 inference
-    checkpoint, aggregated normalized-space MSE tables, one CSV row per
-    completed optimizer epoch, and deterministic original/reconstructed/error
-    panels from the restored best model. Physical labels are introduced only
-    while grouping final sample losses and titling the figure.
+    This is the sole publication owner for autoencoder training. It converts
+    final in-memory evaluation results into aggregate text/CSV content and
+    asks the focused plot owner to render selected full-volume examples.
 
     Parameters
     ----------
     output_dir : str or pathlib.Path
-        Directory receiving the four final autoencoder files.
+        Directory receiving the four established autoencoder artifacts.
     model : VdfAutoencoder
-        Validation-selected reconstruction model.
+        Validation-total-loss-selected full-volume model.
     input_scaler : InputFeatureScaler
-        Training-only feature normalization.
+        Training-only per-voxel or per-coefficient normalization.
+    topology_scaler : TopologyTargetScaler
+        Training-only scaling for six Earth-radius auxiliary targets.
     data : AutoencoderTrainingData
-        Loaded representation identity.
+        Memory-mapped complete representation and sample identity.
     config : mapping
-        Successful-path training configuration.
+        Successful run configuration including topology loss weight.
     fit_result : AutoencoderFitResult
-        Selected epoch and history.
+        Selected epoch, best validation total loss, and history.
     evaluations : mapping
-        Final train, validation, and test reconstruction results from the
-        restored validation-selected model, including in-memory sample MSE.
+        Final train, validation, and test objective results.
     split : CnnTimestepSplit
-        Chronological sample indices, timestep partitions, and excluded
-        boundary gaps.
+        Unchanged chronological complete-timestep partitions.
     selected_device : str or torch.device
-        Effective device used for optimization and final reconstruction.
+        Input device used by this run; output ownership is read from model.
 
     Returns
     -------
     dict
-        Checkpoint, report, and reconstruction-figure paths, representation,
-        selected epoch, epoch count, and final train/validation/test
-        normalized-space MSE values.
+        All four artifact paths and final split objective values.
     """
 
     output_dir = Path(output_dir)
@@ -88,14 +79,21 @@ def save_autoencoder_outputs(
         model,
         output_dir / "autoencoder.pt",
         input_scaler=input_scaler,
+        topology_scaler=topology_scaler,
+        topology_loss_weight=config["topology"]["loss_weight"],
         representation_metadata=data.representation_metadata,
         random_seed=config["random_state"],
+        best_epoch=fit_result.best_epoch,
+        best_validation_total_loss=(
+            fit_result.best_validation_total_loss
+        ),
     )
-    split_metrics, class_metrics = (
-        create_autoencoder_reconstruction_tables(
-            evaluations,
-            data.sample_identity,
-        )
+    split_metrics, class_metrics = create_autoencoder_reconstruction_tables(
+        evaluations,
+        data.sample_identity,
+    )
+    objective_metrics, topology_metrics = create_autoencoder_objective_tables(
+        evaluations
     )
     metrics_path = output_dir / "metrics.txt"
     metrics_path.write_text(
@@ -103,6 +101,7 @@ def save_autoencoder_outputs(
             output_dir,
             model=model,
             input_scaler=input_scaler,
+            topology_scaler=topology_scaler,
             data=data,
             config=config,
             fit_result=fit_result,
@@ -110,6 +109,8 @@ def save_autoencoder_outputs(
             split=split,
             split_metrics=split_metrics,
             class_metrics=class_metrics,
+            objective_metrics=objective_metrics,
+            topology_metrics=topology_metrics,
             selected_device=selected_device,
         ),
         encoding="utf-8",
@@ -124,7 +125,7 @@ def save_autoencoder_outputs(
         model=model,
         data=data,
         evaluations=evaluations,
-        device=selected_device,
+        device=model.input_device,
         max_per_class=config["plot"]["max_per_class"],
         dpi=config["plot"]["dpi"],
     )
@@ -136,12 +137,27 @@ def save_autoencoder_outputs(
         "reconstruction_figure_path": str(reconstruction_figure_path),
         "representation": data.representation,
         "best_epoch": fit_result.best_epoch,
-        "epochs_completed": fit_result.epochs_completed,
-        "train_reconstruction_mse": evaluations["train"]["mse"],
-        "validation_reconstruction_mse": (
-            evaluations["validation"]["mse"]
+        "best_validation_total_loss": (
+            fit_result.best_validation_total_loss
         ),
-        "test_reconstruction_mse": evaluations["test"]["mse"],
+        "epochs_completed": fit_result.epochs_completed,
+        "train_reconstruction_mse": evaluations["train"][
+            "reconstruction_mse"
+        ],
+        "validation_reconstruction_mse": evaluations["validation"][
+            "reconstruction_mse"
+        ],
+        "test_reconstruction_mse": evaluations["test"][
+            "reconstruction_mse"
+        ],
+        "train_topology_loss": evaluations["train"]["topology_loss"],
+        "validation_topology_loss": evaluations["validation"][
+            "topology_loss"
+        ],
+        "test_topology_loss": evaluations["test"]["topology_loss"],
+        "train_total_loss": evaluations["train"]["total_loss"],
+        "validation_total_loss": evaluations["validation"]["total_loss"],
+        "test_total_loss": evaluations["test"]["total_loss"],
     }
 
 
@@ -150,6 +166,7 @@ def create_autoencoder_metrics_text(
     *,
     model,
     input_scaler,
+    topology_scaler,
     data,
     config,
     fit_result,
@@ -157,58 +174,57 @@ def create_autoencoder_metrics_text(
     split,
     split_metrics,
     class_metrics,
+    objective_metrics,
+    topology_metrics,
     selected_device,
 ):
-    """Create the autoencoder model and reconstruction metrics report.
+    """Create the architecture, objective, and physical-error report.
 
-    The report describes the best validation-selected autoencoder and
-    summarizes reconstruction error from its unchanged normalized-space MSE
-    objective. Split statistics show train, validation, and test behavior,
-    while class statistics reveal which physical VDF populations are easier
-    or harder to reconstruct.
-
-    Physical class labels are used only after reconstruction for reporting.
-    They do not enter the autoencoder input, loss, optimizer, or checkpoint
-    selection.
+    The report makes representation shape, normalization, stage placement,
+    target order and units, loss composition, selection, and final aggregate
+    errors understandable without reopening the checkpoint or source data.
 
     Parameters
     ----------
     output_dir : str or pathlib.Path
-        Training-artifact directory receiving ``autoencoder.pt``,
-        ``metrics.txt``, ``training_history.csv``, and
-        ``reconstruction_examples.png``.
+        Directory containing the four final artifacts.
     model : VdfAutoencoder
-        Best validation-selected raw or Hermite autoencoder.
+        Selected complete-volume Conv3d autoencoder.
     input_scaler : InputFeatureScaler
-        Training-only per-feature population mean and standard deviation.
+        Training-only representation normalization.
+    topology_scaler : TopologyTargetScaler
+        Six-target mean and scale fitted from valid training values only.
     data : AutoencoderTrainingData
-        Dataset identity, source-array shape, and reporting metadata.
+        Source-array shape, axis, and identity description.
     config : mapping
-        Resolved architecture, optimizer, loader, and split settings.
+        Resolved loader, architecture, optimizer, topology, and split values.
     fit_result : AutoencoderFitResult
-        Current optimization history and selected epoch.
+        Selected epoch and per-epoch objective history.
     evaluations : mapping
-        Final restored-model reconstruction results for every split.
+        Final aggregate objectives for train, validation, and test.
     split : CnnTimestepSplit
-        Chronological partition timesteps and sample indices.
+        Chronological timestep and sample partitions.
     split_metrics : pandas.DataFrame
-        Count and normalized-space MSE statistics by partition.
+        Existing reconstruction statistics by split.
     class_metrics : pandas.DataFrame
-        Count and normalized-space MSE statistics by physical class.
+        Existing reconstruction statistics by physical class.
+    objective_metrics : pandas.DataFrame
+        Reconstruction, topology, and total objectives by split.
+    topology_metrics : pandas.DataFrame
+        Per-target valid count, MAE, and RMSE in Earth radii.
     selected_device : str or torch.device
-        Effective PyTorch device used by this training run.
+        Input-stage runtime device.
 
     Returns
     -------
     str
-        UTF-8 report text ending with one newline.
+        UTF-8 ``metrics.txt`` content ending with one newline.
 
     Notes
     -----
-    The report contains aggregated tables only. It does not persist
-    sample-level reconstruction errors or use class labels to modify model
-    behavior. Raw MSE describes the normalized middle-``vy`` log plane;
-    Hermite MSE describes the normalized complete coefficient volume.
+    Physical class remains reporting-only. Topology is auxiliary supervision
+    from the shared latent vector and is never concatenated to raw voxels,
+    Hermite coefficients, encoder inputs, or decoder inputs.
     """
 
     output_dir = Path(output_dir)
@@ -219,73 +235,111 @@ def create_autoencoder_metrics_text(
         .sort_values("class_id", kind="stable")["class_name"]
         .tolist()
     )
-    encoder_channels = (
-        model.raw_channels
-        if model.representation == "raw"
-        else model.hermite_channels
-    )
-    decoder_channels = (*reversed(encoder_channels), 1)
+    decoder_channels = (*reversed(model.channels), 1)
     selected_history = fit_result.history[fit_result.best_epoch - 1]
     final_history = fit_result.history[-1]
     separator = "=" * 70
-    representation_details = []
+    stage_mapping = pd.DataFrame(
+        {
+            "stage": model.stage_names,
+            "device": tuple(str(value) for value in model.stage_devices),
+        }
+    )
+    representation_details = [
+        "Full three-dimensional representation",
+        separator,
+        f"Representation: {data.representation}",
+        f"Complete input volume shape: {model.input_shape}",
+        "Model tensor shape: "
+        f"(batch, 1, {', '.join(str(value) for value in model.input_shape)})",
+        "Raw axis order: (vx, vy, vz)",
+        "Hermite axis order: saved unrotated or rotated coefficient order",
+        "Training slices or downsampling: none",
+    ]
     if data.representation == "hermite":
-        representation_details = [
-            "Hermite quantity: physical-VDF Hermite coefficients",
-            f"Hermite volume shape: {spec.tensor_shape}",
-            "Hermite order: "
-            f"{data.representation_metadata['hermite_order']}",
-            "Hermite rotated: "
-            f"{data.representation_metadata['hermite_rotate']}",
-        ]
+        representation_details.extend(
+            (
+                "Hermite quantity: signed physical-VDF coefficients",
+                "Hermite order: "
+                f"{data.representation_metadata['hermite_order']}",
+                "Hermite rotated: "
+                f"{data.representation_metadata['hermite_rotate']}",
+            )
+        )
     lines = [
         "Autoencoder training run",
         separator,
         f"Dataset directory: {data.dataset_dir}",
         f"Output directory: {output_dir}",
-        f"Representation: {data.representation}",
         f"Source array: {data.source_path}",
         f"Source array shape: {spec.source_shape}",
         f"Source array dtype: {spec.source_dtype}",
-        *representation_details,
         f"Samples: {len(data)}",
         f"Unique timesteps: {data.sample_identity['timestep'].nunique()}",
         f"Unique cell IDs: {data.sample_identity['cid'].nunique()}",
         f"Physical class names: {', '.join(class_names)}",
-        f"Checkpoint version: {AUTOENCODER_CHECKPOINT_VERSION}",
-        "Saved checkpoint filename: autoencoder.pt",
-        f"Device: {selected_device}",
+        "Saved artifacts: autoencoder.pt, metrics.txt, "
+        "training_history.csv, reconstruction_examples.png",
         f"PyTorch version: {torch.__version__}",
         f"Random seed: {config['random_state']}",
         f"Raw positive log floor: {config['raw']['log_eps']}",
         f"Data-loader batch size: {config['data_loader']['batch_size']}",
+        f"Data-loader workers: {config['data_loader']['num_workers']}",
         "Normalization sample batch size: "
         f"{config['data_loader']['normalization_batch_size']}",
-        f"Data-loader workers: {config['data_loader']['num_workers']}",
         f"Pinned memory: {config['data_loader']['pin_memory']}",
-        "Optimizer: AdamW",
+        f"Optimizer: AdamW",
         f"Learning rate: {config['optimizer']['learning_rate']}",
         f"Weight decay: {config['optimizer']['weight_decay']}",
         f"AdamW betas: {tuple(config['optimizer']['betas'])}",
         f"AdamW epsilon: {config['optimizer']['epsilon']}",
         f"Maximum epochs: {config['training']['max_epochs']}",
         f"Early-stopping patience: {config['training']['patience']}",
-        f"Minimum validation-MSE decrease: {config['training']['min_delta']}",
+        f"Minimum total-loss decrease: {config['training']['min_delta']}",
+        "",
+        *representation_details,
         "",
         "Model architecture",
         separator,
-        f"Input shape: {model.input_shape}",
-        f"Encoder channels: {encoder_channels}",
-        f"Decoder channels: {decoder_channels}",
-        f"Latent dimension: {model.latent_dim}",
+        f"Conv3d encoder channels: {model.channels}",
+        f"Conv3d decoder channels: {decoder_channels}",
+        "Configured bottleneck spatial maximum: "
+        f"{model.configured_bottleneck_shape}",
+        f"Effective bottleneck spatial shape: {model.bottleneck_shape}",
+        f"Latent size: {model.latent_size}",
         f"Pooling: {model.pooling}",
         "Trainable parameters: "
-        f"{sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)}",
-        "Normalization convention: training-only per-feature population "
-        "mean and standard deviation in normalized representation space",
-        f"Normalization epsilon: {input_scaler.epsilon}",
-        "Reconstruction objective: mean squared error in normalized "
-        "representation space",
+        f"{sum(value.numel() for value in model.parameters() if value.requires_grad)}",
+        "Representation normalization: training-only per-feature population "
+        "mean and standard deviation",
+        f"Representation normalization epsilon: {input_scaler.epsilon}",
+        "Reconstruction objective: complete normalized-volume MSE",
+        "",
+        "Model-parallel stage placement",
+        separator,
+        "Parallelism: one process, one model, consecutive layer stages",
+        "Requested model_parallel_gpus: "
+        f"{model.requested_model_parallel_gpus}",
+        "Effective model_parallel_gpus: "
+        f"{model.effective_model_parallel_gpus}",
+        f"Input device: {selected_device}",
+        f"Output device: {model.output_device}",
+        stage_mapping.to_string(index=False),
+        "",
+        "Auxiliary topology task",
+        separator,
+        "Topology role: latent-space auxiliary target, never model input",
+        "Topology target order: "
+        f"{tuple(topology_scaler.target_names)}",
+        "Topology units after inverse scaling: Earth radii",
+        f"Topology hidden size: {model.topology_hidden_size}",
+        f"Topology loss weight: {config['topology']['loss_weight']}",
+        f"Topology scaling centre: {topology_scaler.mean.tolist()}",
+        f"Topology scaling scale: {topology_scaler.scale.tolist()}",
+        "Topology scaling fit: finite training-partition values only",
+        "Missing topology: independently masked per target",
+        "Total loss: reconstruction_mse + topology_loss_weight * "
+        "masked_topology_smooth_l1",
         "",
         "Dataset partitions",
         separator,
@@ -296,13 +350,16 @@ def create_autoencoder_metrics_text(
         f"Train timestep count: {len(split.train_timesteps)}",
         f"Validation timestep count: {len(split.validation_timesteps)}",
         f"Test timestep count: {len(split.test_timesteps)}",
-        "Train-validation gap timestep count: "
-        f"{len(split.train_validation_gap)}",
-        "Validation-test gap timestep count: "
-        f"{len(split.validation_test_gap)}",
         f"Train sample count: {len(split.train_indices)}",
         f"Validation sample count: {len(split.validation_indices)}",
         f"Test sample count: {len(split.test_indices)}",
+        "",
+        "Combined objective by split",
+        separator,
+        objective_metrics.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.8e}",
+        ),
         "",
         "Reconstruction loss by split",
         separator,
@@ -318,26 +375,41 @@ def create_autoencoder_metrics_text(
             float_format=lambda value: f"{value:.8e}",
         ),
         "",
+        "Topology error by split and target",
+        separator,
+        topology_metrics.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.8e}",
+        ),
+        "",
         "Training history summary",
         separator,
-        "Selection metric: validation reconstruction MSE",
+        "Selection metric: validation total loss",
         f"Epochs completed: {fit_result.epochs_completed}",
         f"Best epoch: {fit_result.best_epoch}",
+        "Best validation total loss: "
+        f"{fit_result.best_validation_total_loss}",
         f"Training seconds: {fit_result.total_seconds}",
         "Best-epoch train reconstruction loss: "
-        f"{selected_history['train_reconstruction_mse']}",
+        f"{selected_history['train_reconstruction_loss']}",
+        "Best-epoch train topology loss: "
+        f"{selected_history['train_topology_loss']}",
+        "Best-epoch train total loss: "
+        f"{selected_history['train_total_loss']}",
         "Best-epoch validation reconstruction loss: "
-        f"{selected_history['validation_reconstruction_mse']}",
-        "Final optimization-epoch train reconstruction loss: "
-        f"{final_history['train_reconstruction_mse']}",
-        "Final optimization-epoch validation reconstruction loss: "
-        f"{final_history['validation_reconstruction_mse']}",
-        "Final train reconstruction loss: "
-        f"{evaluations['train']['mse']}",
-        "Final validation reconstruction loss: "
-        f"{evaluations['validation']['mse']}",
-        "Final test reconstruction loss: "
-        f"{evaluations['test']['mse']}",
+        f"{selected_history['validation_reconstruction_loss']}",
+        "Best-epoch validation topology loss: "
+        f"{selected_history['validation_topology_loss']}",
+        "Best-epoch validation total loss: "
+        f"{selected_history['validation_total_loss']}",
+        "Final optimization-epoch total loss: "
+        f"{final_history['train_total_loss']}",
+        "Final train total loss: "
+        f"{evaluations['train']['total_loss']}",
+        "Final validation total loss: "
+        f"{evaluations['validation']['total_loss']}",
+        "Final test total loss: "
+        f"{evaluations['test']['total_loss']}",
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -347,61 +419,84 @@ def save_autoencoder_checkpoint(
     checkpoint_path,
     *,
     input_scaler,
+    topology_scaler,
+    topology_loss_weight,
     representation_metadata,
     random_seed,
+    best_epoch,
+    best_validation_total_loss,
 ):
-    """Save one optimizer-independent autoencoder checkpoint.
+    """Save one device-independent autoencoder checkpoint.
 
-    The checkpoint loader reconstructs the architecture and feature
-    normalization directly from this dictionary before restoring learned
-    tensors. Optimizer state is intentionally absent because the file is
-    intended for reconstruction, not resumed training.
+    Architecture and both training-derived scalers are serialized beside a
+    CPU copy of every learned tensor. Runtime stage ownership is deliberately
+    reconstructed by the loader instead of becoming saved model structure.
 
     Parameters
     ----------
     model : VdfAutoencoder
-        Trained raw or Hermite reconstruction model.
+        Selected complete-volume Conv3d model.
     checkpoint_path : str or pathlib.Path
-        Destination checkpoint file.
+        Destination ``autoencoder.pt`` path.
     input_scaler : InputFeatureScaler
-        Training-derived feature normalization.
+        Training-derived full-volume normalization.
+    topology_scaler : TopologyTargetScaler
+        Training-derived six-target Earth-radius scaling.
+    topology_loss_weight : float
+        Fixed multiplier used in validation selection.
     representation_metadata : mapping
-        Saved representation description. Hermite checkpoints retain the
-        actual coefficient volume shape, physical mode order, and optional
-        rotation setting derived from ``X_hermite.npy`` and aligned dataset
-        metadata.
+        Complete raw axis or Hermite order/rotation description.
     random_seed : int
         Training random seed.
+    best_epoch : int
+        One-based validation-total-loss-selected epoch.
+    best_validation_total_loss : float
+        Selected combined validation objective.
 
     Returns
     -------
     pathlib.Path
         Saved checkpoint path.
+
+    Notes
+    -----
+    State tensors are copied to CPU. Runtime CUDA IDs, stage mapping,
+    requested GPU count, DataLoader workers, and optimizer state are absent,
+    so runtime placement is reconstructed for CPU, one GPU, or several GPUs.
+    ``model_architecture.bottleneck_shape`` stores the configured per-axis
+    maximum needed to rebuild the dense projections, while
+    ``effective_bottleneck_shape`` records the resulting capped shape.
     """
 
     checkpoint = {
-        "autoencoder_checkpoint_version": (
-            AUTOENCODER_CHECKPOINT_VERSION
-        ),
         "model_state_dict": {
-            name: value.detach().cpu()
+            name: value.detach().cpu().clone()
             for name, value in model.state_dict().items()
         },
         "representation": model.representation,
-        "representation_version": (
-            AUTOENCODER_RAW_XZ_FULL
-            if model.representation == "raw"
-            else HERMITE
-        ),
-        "expected_input_shape": list(model.input_shape),
-        "input_normalization": input_scaler.to_dict(),
+        "input_volume_shape": list(model.input_shape),
+        "encoder_channels": list(model.channels),
+        "decoder_channels": [*reversed(model.channels), 1],
+        "latent_size": model.latent_size,
+        "effective_bottleneck_shape": list(model.bottleneck_shape),
+        "input_normalization": {
+            "mean": torch.from_numpy(input_scaler.mean.copy()),
+            "scale": torch.from_numpy(input_scaler.scale.copy()),
+            "epsilon": input_scaler.epsilon,
+            "shape": list(input_scaler.mean.shape),
+        },
+        "topology_target_order": list(model.topology_target_names),
+        "topology_scaler": topology_scaler.to_dict(),
+        "topology_hidden_size": model.topology_hidden_size,
+        "topology_loss_weight": float(topology_loss_weight),
         "model_architecture": model.constructor_config(),
         "random_seed": int(random_seed),
+        "best_epoch": int(best_epoch),
+        "best_validation_total_loss": float(best_validation_total_loss),
     }
     if model.representation == "hermite":
         checkpoint.update(
             {
-                "volume_shape": list(model.input_shape),
                 "hermite_order": int(model.input_shape[0]),
                 "hermite_rotate": bool(
                     representation_metadata["hermite_rotate"]
@@ -415,7 +510,6 @@ def save_autoencoder_checkpoint(
 
 
 __all__ = [
-    "AUTOENCODER_CHECKPOINT_VERSION",
     "create_autoencoder_metrics_text",
     "save_autoencoder_checkpoint",
     "save_autoencoder_outputs",

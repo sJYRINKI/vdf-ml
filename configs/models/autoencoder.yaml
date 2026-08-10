@@ -1,13 +1,11 @@
 # Autoencoder training configuration. The command separately selects the
 # dataset, output directory, and representation (raw or hermite). Physical
-# class and topology values never enter the model input or reconstruction
-# target. Training writes autoencoder.pt, metrics.txt, training_history.csv,
-# and one consolidated reconstruction_examples.png; metrics.txt reports
-# normalized-space reconstruction MSE by chronological split and class, with
-# class labels introduced only after inference for reporting and plot titles.
-# Hermite input is the complete signed physical-VDF coefficient cube. Its
-# order and optional rotation come from the saved dataset rather than this
-# model configuration; Hermite values are not logged or thresholded.
+# class and topology values never enter the model input. Raw uses every voxel
+# in X.npy with model shape (batch, 1, vx, vy, vz); Hermite uses every signed
+# coefficient in X_hermite.npy with shape (batch, 1, n1, n2, n3). Both use the
+# same Conv3d autoencoder. The latent vector also predicts six masked topology
+# targets, and training writes autoencoder.pt, metrics.txt,
+# training_history.csv, and reconstruction_examples.png.
 
 random_state: 1234
 # Device choices are auto, cpu, cuda, or cuda:N. auto selects the current
@@ -15,29 +13,45 @@ random_state: 1234
 # cuda:N selects visible accelerator index N.
 device: auto
 
-# Raw-only preprocessing applied to the middle-vy physical VDF plane before
-# training-derived per-pixel normalization; Hermite coefficients skip it.
+# Number of visible CUDA devices used for consecutive Conv3d model stages in
+# one Python process. 1 keeps all stages on one selected device. Larger values
+# distribute encoder, bottleneck, decoder, reconstruction, and topology stages
+# without model replication or data-parallel training.
+model_parallel_gpus: 1
+
+# Raw-only preprocessing applied voxelwise to the complete physical VDF before
+# training-derived per-voxel normalization; Hermite coefficients skip it.
 raw:
   # Positive physical VDF floor in s^3 m^-6. Nonpositive raw values are
   # replaced by this value before log10, preventing undefined logarithms.
   log_eps: 1.0e-30
 
-# Encoder, decoder, and deterministic latent-vector architecture. These
-# choices affect parameter count, activation memory, and reconstruction
-# capacity for the selected raw or Hermite representation.
+# One Conv3d encoder, bottleneck, decoder, and deterministic shared latent
+# vector for complete raw and Hermite volumes.
 model:
-  # Nonempty list of positive integers; each value is the output-channel
-  # count of one successive 2-D raw Conv/ReLU/average-pooling block.
-  raw_channels: [8, 16, 32]
-  # Nonempty list of positive integers; each value is the output-channel
-  # count of one successive 3-D Hermite Conv/ReLU/average-pooling block.
-  hermite_channels: [8, 16, 32]
-  # Positive integer giving the learned latent-vector width; larger values
-  # increase embedding capacity and dense-layer parameter memory.
-  latent_dim: 64
+  # Ordered Conv3d encoder widths. The decoder reverses these widths for both
+  # complete raw and complete Hermite inputs.
+  channels: [8, 16, 32]
+  # Maximum spatial cells retained after encoding along the three saved model
+  # axes. The effective shape is capped by the encoded volume on each axis.
+  # Smaller values reduce dense bottleneck parameters and memory use.
+  bottleneck_shape: [10, 10, 10]
+  # Size of the shared reconstruction/topology latent vector.
+  latent_size: 64
   # Pooling choice; average is the only supported option and halves every
   # spatial axis that is still large enough for another reduction.
   pooling: average
+
+# Auxiliary targets in fixed project order: X distance, O distance, X dx,
+# X dz, O dx, and O dz, all in Earth radii. Finite training values alone fit
+# scaling; missing values are independently masked and remain reconstruction
+# samples. Topology values are supervised targets, never model inputs.
+topology:
+  # Hidden width of the small latent-space topology head.
+  hidden_size: 64
+  # Weight applied to globally masked Smooth L1 in
+  # total_loss = reconstruction_mse + loss_weight * topology_smooth_l1.
+  loss_weight: 0.1
 
 # Chronological complete-timestep partitioning. Two boundary gaps are
 # excluded first; fractions then assign leading usable timesteps to train
@@ -54,24 +68,24 @@ split:
   # train-validation and validation-test boundaries to reduce leakage.
   gap_timesteps: 1
 
-# Memory-mapped sample loading and bounded float64 normalization. Batch and
-# worker choices trade throughput against accelerator and host-memory use.
+# On-demand memory-mapped sample loading and bounded float64 normalization.
+# Batch and worker choices trade throughput against accelerator and host memory.
 data_loader:
   # Positive integer samples per optimizer update; larger batches may improve
   # throughput but increase activation and accelerator memory use.
-  batch_size: 8
-  # Nonnegative integer PyTorch reader-process count. 0 reads in the training
-  # process; larger values load samples concurrently and use more host memory.
+  batch_size: 1
+  # Number of DataLoader worker processes used only for loading and
+  # preprocessing samples. This does not distribute model training.
   num_workers: 0
   # Positive integer samples per float64 normalization-statistics batch;
   # smaller values reduce peak host memory without changing the statistics.
-  normalization_batch_size: 8
+  normalization_batch_size: 1
   # Choices are true, false, or auto. true pins loader tensors in host memory,
   # false disables pinning, and auto pins only for CUDA/ROCm execution.
   pin_memory: auto
 
-# AdamW parameter-update settings used for every trainable encoder, latent,
-# and decoder parameter.
+# One AdamW optimizer owns every encoder, bottleneck, decoder, reconstruction,
+# and topology-head parameter across all occupied model-stage devices.
 optimizer:
   # Positive float AdamW step size; larger values make faster but potentially
   # less stable parameter updates.
@@ -86,16 +100,16 @@ optimizer:
   # it does not alter the reconstruction-loss definition.
   epsilon: 1.0e-8
 
-# Training duration and early stopping. The best checkpoint is the epoch
-# with the lowest normalized-space validation reconstruction MSE.
+# Training duration and early stopping. Validation total loss, including the
+# configured masked topology term, selects the best checkpoint.
 training:
   # Positive integer maximum number of complete training epochs.
   max_epochs: 50
-  # Positive integer consecutive epochs without a sufficient validation-MSE
-  # decrease before training stops early.
+  # Positive integer consecutive epochs without a sufficient validation
+  # total-loss decrease before training stops early.
   patience: 10
-  # Nonnegative float minimum normalized-space validation-MSE decrease that
-  # counts as an improvement and resets the patience counter.
+  # Nonnegative float minimum validation total-loss decrease that counts as
+  # an improvement and resets the patience counter.
   min_delta: 1.0e-6
 
 # reconstruction_examples.png contains deterministic original,

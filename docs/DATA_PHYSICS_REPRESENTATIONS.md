@@ -297,7 +297,7 @@ shape: (n_samples, vx, vy, vz)
 axis order: [vx, vy, vz]
 ```
 
-The raw PCA and CNN transformation is:
+The raw PCA, CNN, and autoencoder transformation is:
 
 ```text
 X.npy sample [vx, vy, vz]
@@ -308,16 +308,12 @@ X.npy sample [vx, vy, vz]
 
 Values above the floor retain their values, the source sample is not
 mutated, and the complete volume remains in saved axis order. PCA
-flattens all `vx * vy * vz` values in stable C order. CNN training and raw
-prediction add one channel to produce `(batch, 1, vx, vy, vz)` and use
-`Conv3d`. These raw model-input paths perform no velocity-plane slicing,
-projection, cropping, averaging, or downsampling.
-
-The raw autoencoder remains a separate exception: it reconstructs its
-existing full-resolution middle-`vy` plane with `Conv2d`. Peak-centred
-`vx-vy`, `vx-vz`, and `vy-vz` planes also remain visualization products.
-Neither the autoencoder plane nor the plotted planes are PCA or CNN model
-inputs.
+flattens all `vx * vy * vz` values in stable C order. CNN training,
+autoencoder training, and raw prediction add one channel to produce
+`(batch, 1, vx, vy, vz)` and use `Conv3d`. These raw model-input paths perform
+no velocity-plane slicing, projection, cropping, averaging, or downsampling.
+Peak-centred `vx-vy`, `vx-vz`, and `vy-vz` planes remain visualization
+products only; no plotted plane is a model input or reconstruction target.
 
 ## Hermite representation: `hermite`
 
@@ -331,8 +327,10 @@ default order: 22
 saved dtype: float32
 ```
 
-The complete coefficient cube is used by PCA, CNN, and autoencoder
-workflows. It is not sliced, transposed, normalized per sample, or augmented
+The complete signed coefficient cube is used by PCA, CNN, and autoencoder
+workflows. CNN and autoencoder batches have shape `(batch, 1, n1, n2, n3)`
+and use `Conv3d`. The cube is not sliced, truncated, downsampled, transposed,
+converted to absolute values, logged, normalized per sample, or augmented
 with metadata. Consumers derive the complete volume shape and order from the
 saved array; new model checkpoints record that actual shape, order, and
 rotation setting.

@@ -1,4 +1,4 @@
-"""Predict the VDF nearest one requested coordinate with a version-6 CNN.
+"""Predict the VDF nearest one requested coordinate with a trained CNN.
 
 The command loads prediction settings and delegates source-cell selection,
 representation construction, inference, physical-unit topology output, and
@@ -33,7 +33,7 @@ def main(argv=None):
     """
 
     parser = argparse.ArgumentParser(
-        description="Predict the nearest VDF cell with a version-6 CNN.",
+        description="Predict the nearest VDF cell with a trained CNN.",
     )
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)

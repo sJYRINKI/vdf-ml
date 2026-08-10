@@ -65,7 +65,7 @@ def run_coordinate_prediction(
     config : mapping
         Current coordinate-prediction configuration.
     checkpoint_path : str or pathlib.Path
-        Current version-6 CNN checkpoint.
+        Current CNN checkpoint.
     output_dir : str or pathlib.Path
         Directory that receives ``predictions_<timestep>.csv`` and an
         optional combined PNG.

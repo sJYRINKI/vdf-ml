@@ -20,7 +20,7 @@ Prediction directly reads:
 - representation name and input shape;
 - input normalization;
 - class mapping and output order;
-- topology schema and exact six-target order;
+- exact six-target order and topology scaler;
 - topology scaler;
 - architecture;
 - raw training velocity grid or Hermite actual shape, order, and optional

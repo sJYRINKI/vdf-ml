@@ -1,13 +1,12 @@
 """Name current dataset metadata fields and representation constants.
 
 These constants define the row order written to ``metadata.csv`` and the
-six auxiliary topology targets consumed by the CNN. They describe core
-saved data ownership.
+six auxiliary topology targets consumed by the CNN and autoencoder. They
+describe core saved data ownership.
 """
 
 
 METADATA_SCHEMA_VERSION = "1.0"
-TOPOLOGY_SCHEMA_VERSION = "1.0"
 HERMITE = "hermite"
 
 SAMPLE_IDENTITY_COLUMNS = (
