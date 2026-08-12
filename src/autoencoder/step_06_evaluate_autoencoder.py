@@ -7,7 +7,8 @@ MSE. Finite topology entries determine globally masked scaled Smooth L1 and
 per-target MAE/RMSE after inverse conversion to Earth radii.
 
 Physical class identity is introduced only after inference to retain the
-existing reconstruction report. Neither class nor topology is a model input.
+existing reconstruction report. Plasma context is part of the current model
+input; neither class nor topology is a model input.
 """
 
 import numpy as np
@@ -55,9 +56,9 @@ def evaluate_autoencoder(
     Notes
     -----
     All returned objective values aggregate scalar errors across the complete
-    partition. The model receives only representation tensors; topology
-    targets and masks move to :attr:`VdfAutoencoder.output_device` solely for
-    loss calculation.
+    partition. The model receives the VDF representation and aligned
+    training-scaled 16-value plasma context. Topology targets and masks move
+    to :attr:`VdfAutoencoder.output_device` solely for loss calculation.
     """
 
     model.eval()
@@ -73,8 +74,11 @@ def evaluate_autoencoder(
     target_squared_error = np.zeros_like(target_count, dtype=np.float64)
     with torch.no_grad():
         for batch in loader:
-            normalized = model.normalize_inputs(batch["inputs"])
-            output = model.forward_from_normalized(normalized)
+            normalized = model.normalize_inputs(batch["vdf_input"])
+            output = model.forward_from_normalized(
+                normalized,
+                batch["plasma_context"],
+            )
             target_inputs = normalized.to(model.output_device)
             topology_targets = batch["topology_targets"].to(
                 model.output_device

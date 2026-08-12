@@ -5,18 +5,18 @@
 `vdf-ml` studies plasma velocity-distribution functions (VDFs) in
 [Vlasiator](https://github.com/fmihpc/vlasiator) simulation output. It
 extracts VDF-bearing spatial cells, assigns physics-based plasma-region and
-X/O-point labels, stores aligned raw and Hermite data, and provides focused
-analysis and machine-learning workflows.
+X/O-point labels, stores aligned raw, same-cell plasma context, and
+Hermite data, and provides focused analysis and machine-learning workflows.
 
 The scientific goal is to compare label-blind structure in VDFs with
 physical classes and to predict both a physical class and auxiliary X/O
-topology from a VDF. The project also supports bounded prediction at one
+topology from a VDF plus same-cell plasma context. The project also supports bounded prediction at one
 coordinate or through a spatial region, with figures that connect spatial
 results to representative source VDFs.
 
 ```text
 Vlasiator VLSV + flux file
-    -> VDF extraction and physical labeling
+    -> VDF extraction, vector-component plasma context, and physical labeling
     -> saved dataset
     -> raw or Hermite representation
     -> PCA, CNN, or autoencoder
@@ -36,6 +36,8 @@ superseded workflows.
 - complete three-dimensional `raw` VDF features with no input slicing
 - dimensional `hermite` coefficients from the physical VDF, in the original
   velocity frame by default or an optional magnetic/bulk-flow frame
+- aligned Cartesian B, E, and bulk-velocity components, number density, and
+  six pressure-tensor components for neural-model context
 - three-pass, sample-batched PyTorch feature standardization and incremental
   full or low-rank PCA, followed by physical-class plots and internal
   KMeans, nearest-neighbor, and t-SNE diagnostics
@@ -55,8 +57,8 @@ superseded workflows.
 
 | Path | Responsibility |
 |---|---|
-| `src/physics/` | X/O topology, labels, physical context, and Hermite mathematics |
-| `src/representations/` | ordered loading plus shared raw and Hermite preparation |
+| `src/physics/` | X/O topology, labels, same-cell plasma source resolution, and Hermite mathematics |
+| `src/representations/` | ordered raw/Hermite preparation plus shared plasma-context loading and scaling |
 | `src/analysis/` | ordered PCA, physical-label diagnostics, t-SNE, and output stages |
 | `src/cnn/` | ordered CNN loading, splitting, scaling, training, evaluation, and saving |
 | `src/autoencoder/` | ordered reconstruction loading, training, evaluation, and saving |
@@ -148,7 +150,7 @@ export PTNONINTERACTIVE=1
 ```
 
 They are optional when the host already provides a suitable plotting
-environment. There are no mandatory project-specific environment variables;
+environment. Project-specific environment variables need not be set;
 source and output locations are CLI arguments or YAML values.
 
 ### CPU and optional CUDA
@@ -283,15 +285,22 @@ scientific conventions.
 A raw dataset contains:
 
 ```text
-X.npy
-metadata.csv
-velocity_grid.npz
+dataset/
+├── X.npy
+├── plasma_context.npy
+├── metadata.csv
+└── velocity_grid.npz
 ```
 
-When Hermite generation is enabled, it also contains:
+When Hermite generation is enabled, the complete core layout is:
 
 ```text
-X_hermite.npy
+dataset/
+├── X.npy
+├── X_hermite.npy
+├── plasma_context.npy
+├── metadata.csv
+└── velocity_grid.npz
 ```
 
 Optional extraction postprocessing adds only:
@@ -307,15 +316,45 @@ dataset layout is unchanged by postprocessing.
 `X.npy` stores complete VDFs in `[vx, vy, vz]` order. `metadata.csv` owns
 physical `class_id` and `class_name`. Current workflows trust these saved
 files and directly load the data they need. Planning and extraction use
-separate `planning_n_jobs` and `extraction_n_jobs` settings. The parent
-streams the first nonempty timestep used to discover the raw shape. With
-more than one extraction job, remaining timesteps run in Joblib workers;
-each worker reuses one source reader and VDF extractor while processing its
-samples sequentially into worker-local raw and optional Hermite memory maps.
-Only the parent copies those aligned rows into the hidden sibling staging
-directory in planned timestep and sample order, flushes and closes the final
-arrays, and renames the directory to the final path. Setting
+separate `planning_n_jobs` and `extraction_n_jobs` settings. The planned
+velocity-grid descriptor supplies the raw shape. With more than one
+extraction job, every timestep runs in a Joblib worker; each worker reuses
+one source reader and VDF extractor while processing its
+samples sequentially into worker-local raw, plasma-context, and
+optional Hermite memory maps. Only the parent copies all aligned rows into the
+hidden sibling staging directory at the same planned slice, flushes and closes
+the final arrays, and renames the directory to the final path. Setting
 `extraction_n_jobs: 1` keeps extraction serial.
+
+`configs/data/extraction.yaml` selects one `population` for both the VDF and
+its fluid moments. `auto` retains the historical `avgs` preference and then
+`proton`; setting an explicit active population keeps multi-population VDF,
+velocity, density, and pressure reads in the same namespace.
+
+Current datasets include `plasma_context.npy` with float32 shape
+`(n_samples, 16)`, aligned row for row with the VDF arrays and metadata. Its
+fixed SI feature order is:
+
+1. `magnetic_field_x_t`, `magnetic_field_y_t`, `magnetic_field_z_t` (tesla);
+2. `electric_field_x_vm`, `electric_field_y_vm`, `electric_field_z_vm`
+   (volts per metre);
+3. `bulk_velocity_x_ms`, `bulk_velocity_y_ms`, `bulk_velocity_z_ms`
+   (metres per second);
+4. `number_density_m3` (particles per cubic metre); and
+5. `pressure_xx_pa`, `pressure_yy_pa`, `pressure_zz_pa`, `pressure_xy_pa`,
+   `pressure_xz_pa`, `pressure_yz_pa` (pascals).
+
+The three Cartesian components preserve each vector's direction and
+magnitude, so no redundant B, E, or bulk-speed magnitudes are stored. The
+configured population owns bulk velocity, number density, and the total
+symmetric pressure tensor.
+Field-grid producers are centred and sampled at the selected VDF cells. The
+Analysator operation temporarily materializes one source grid at a time;
+only the selected three-component vectors are retained before the grid is
+released. Historical and current producer families are resolved once per
+open source.
+Datasets with an earlier context layout, or without this current array, must
+be regenerated; the loaders do not synthesize or migrate context.
 
 The current physical-class IDs are:
 
@@ -391,8 +430,10 @@ Hermite datasets and Hermite-trained checkpoints created before this
 physical-VDF convention must be regenerated and retrained. The active code
 does not adapt or migrate the retired compact-log representation.
 
-Neither representation appends labels, topology, coordinates, moments, or
-other metadata.
+Neither VDF representation appends labels, topology, coordinates, or
+metadata. Same-cell plasma context remains a separate aligned
+array rather than being broadcast over the velocity-space volume. PCA stays
+representation-only; CNN and autoencoder training consume the context.
 
 | Workflow | Raw input | Hermite input |
 |---|---|---|
@@ -477,18 +518,24 @@ only or are not produced.
 
 ## CNN
 
-`VdfCNN` accepts one representation tensor and returns dataset-derived
-physical-class logits, six auxiliary topology predictions, and an embedding.
-The classification width and explicit output order come from the class IDs
-present in dataset metadata; topology is an output, never an input.
+`VdfCNN` requires one representation tensor plus the aligned 16-value plasma
+context. A small dense context branch is concatenated with the Conv3d VDF
+embedding; the combined embedding feeds dataset-derived physical-class logits
+and six auxiliary topology predictions and is also returned. The
+classification width and explicit output order come from the class IDs
+present in dataset metadata. Topology remains an output, never an input.
 
 Training uses complete-timestep train/validation/test partitions with gaps,
-training-only input normalization and topology scaling, natural sample
+training-only representation, plasma-context, and topology scaling, natural sample
 frequency, AdamW, unweighted cross-entropy plus masked Smooth L1 loss, and
 validation macro-F1 checkpoint selection. The CNN checkpoint stores the
-representation, input shape and normalization, class mapping, topology
-scaling and order, architecture, and training velocity grid. A training run
+representation, input shape and normalization, exact plasma-context names,
+training context mean and scale, context hidden width, combined embedding
+width, class mapping, topology scaling and order, architecture, training
+velocity grid, and CPU model parameters under `state_dict`. A training run
 writes only `model.pt` and `metrics.txt`.
+Earlier context-layout or context-free CNN models require retraining; no
+migration or versioned checkpoint filename is used.
 
 With `model_parallel_gpus` greater than one, one Python process places
 consecutive encoder stages and the output stage on several visible CUDA
@@ -500,26 +547,32 @@ does not spatially shard an individual `Conv3d`; each individual stage and
 its activation must still fit on its assigned GPU. Runtime placement is not
 stored in checkpoint tensor names, so the same checkpoint can be loaded with
 one or several GPUs.
+The context branch, fusion, class head, and topology head reside on the output
+device; only the small scaled `(batch, 16)` context tensor moves there.
 
 ## Autoencoder
 
 `VdfAutoencoder` is one Conv3d model for both representations. Raw batches
 contain every `X.npy` voxel in `(batch, 1, vx, vy, vz)` order; Hermite batches
 contain every signed coefficient in `(batch, 1, n1, n2, n3)` order. Its
-encoder creates one latent vector that feeds both the Conv3d decoder and a
-small auxiliary topology head. The head predicts, in order,
+encoder creates a VDF latent vector. A dense branch encodes the 16-value
+plasma context, and the two vectors are concatenated on the
+bottleneck device. This combined latent feeds both the Conv3d decoder and a
+small auxiliary topology head. The decoder reconstructs only the VDF, never
+the context. The head predicts, in order,
 `distance_to_x_point_re`, `distance_to_o_point_re`,
 `vdf_to_x_point_dx_re`, `vdf_to_x_point_dz_re`,
 `vdf_to_o_point_dx_re`, and `vdf_to_o_point_dz_re`. These Earth-radius values
 come from metadata, are scaled from valid training entries only, and remain
-masked where missing. They supervise the latent space but never enter the
-model input or decoder.
+masked where missing. They supervise the latent space but are never model
+inputs. Plasma context is a physical input; topology metadata is not.
 
 Autoencoder samples use on-demand memory-mapped loading. Each DataLoader
-process opens `X.npy` or `X_hermite.npy` read-only on its first sample request,
-reuses that mapping, and has `__getitem__` copy and preprocess only the
-requested row. The complete prepared dataset is never materialized in RAM;
-the model still receives an ordinary complete three-dimensional batch.
+process opens `X.npy` or `X_hermite.npy` and `plasma_context.npy` read-only on
+its first sample request, reuses those mappings, and has `__getitem__` copy
+and preprocess only the requested aligned rows. The complete prepared dataset
+is never materialized in RAM; the model still receives an ordinary complete
+three-dimensional batch and a small `(batch, 16)` context tensor.
 
 `model.bottleneck_shape` configures the maximum retained spatial cells along
 the three model axes after encoding. The effective shape is capped by the
@@ -540,15 +593,19 @@ With `model_parallel_gpus` greater than one, one process can place consecutive
 encoder, bottleneck, decoder, reconstruction, and topology stages across
 several visible GPUs. Activations move only when stage ownership changes, and
 one optimizer owns every parameter. The same placement path supports CPU and
-one GPU. `data_loader.num_workers` controls loading and preprocessing only.
+one GPU. `loader.num_workers` controls loading and preprocessing only.
 This is layer model parallelism, not DDP, model replication, or data
 parallelism.
 
-The autoencoder checkpoint stores architecture, complete input
-shape, representation and topology scaling, selection metadata, and a CPU
-state dictionary. Runtime CUDA IDs and stage mapping are not stored. Direct
-representation and topology-order fields define model identity.
+The autoencoder checkpoint stores architecture, complete input shape,
+representation, the exact context order and training scaling, the context and
+combined latent widths, topology scaling, selection metadata, and CPU model
+parameters under `state_dict`. Runtime CUDA IDs and stage mapping are not stored. Direct
+representation, context-order, and topology-order fields define model
+identity.
 Existing two-dimensional reconstruction-only checkpoints require retraining.
+Earlier context-layout and context-free autoencoder checkpoints likewise
+require retraining, and the artifact name remains `autoencoder.pt`.
 A run writes `autoencoder.pt`, `metrics.txt`, `training_history.csv`, and
 `reconstruction_examples.png`. Raw figures restore complete physical volumes,
 then display one x-z plane through the original volume's three-dimensional
@@ -571,8 +628,15 @@ prediction continues to stream per-timestep CSV rows in stable cell order and
 bounded batches. Both outputs retain checkpoint-ordered class probabilities,
 `predicted_probability`, and all six inverse-scaled topology values.
 
+Prediction resolves the same supported B/E/V/density/pressure producers once
+per open VLSV source, builds the same 16 component/density/pressure values
+at each predicted CID, and applies the CNN checkpoint's training context
+scaler. No redundant vector magnitudes are added. Rotated Hermite preparation
+reuses the same B/V vectors. Context is not loaded from a dataset file and
+does not alter CSV columns or figures.
+
 Optional combined figures prefer a directly stored x velocity in this order:
-`<population>/vg_v`, `<population>/V`, `vg_v`, and `V`. BCH-style sources
+`<population>/vg_v`, `<population>/V`, `vg_v`, `V`, and `fg_v`. BCH-style sources
 without a direct producer use the legacy `rho_v / rho` ratio. The result stays
 in m/s on a symmetric red-white-blue scale with black magnetic streamlines and
 the fixed `[-30, 30, -15, 15]` x-z Earth-radii view. A dedicated legend row

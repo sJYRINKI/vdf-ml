@@ -1,8 +1,9 @@
 """Load the current CNN checkpoint for evaluation and prediction.
 
 Checkpoint loading is reusable rather than a numbered training stage. It
-directly reconstructs the model and training-derived scalers saved by stage
-8, then places contiguous model stages on the requested runtime devices.
+directly reconstructs the fused VDF/context model and training-derived
+representation, plasma-context, and topology scalers saved by stage 8, then
+places contiguous model stages on the requested runtime devices.
 """
 
 from copy import deepcopy
@@ -13,6 +14,7 @@ import torch
 from src.cnn.step_03_scale_cnn_inputs import InputFeatureScaler
 from src.cnn.step_04_build_cnn import VdfCNN
 from src.learning.topology_supervision import TopologyTargetScaler
+from src.representations.plasma_context import PlasmaContextScaler
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class LoadedCnnCheckpoint:
         Evaluation-mode raw or Hermite model.
     input_scaler : InputFeatureScaler
         Training-derived feature normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-derived scaling for the 16 plasma-context inputs.
     topology_scaler : TopologyTargetScaler
         Scaling used to restore auxiliary outputs to Earth radii.
     checkpoint : dict
@@ -42,6 +46,7 @@ class LoadedCnnCheckpoint:
 
     model: VdfCNN
     input_scaler: InputFeatureScaler
+    plasma_context_scaler: PlasmaContextScaler
     topology_scaler: TopologyTargetScaler
     checkpoint: dict
 
@@ -71,7 +76,8 @@ def load_cnn_checkpoint(
     Returns
     -------
     LoadedCnnCheckpoint
-        Evaluation model, feature scaler, topology scaler, and saved record.
+        Evaluation model, representation/context/topology scalers, and saved
+        record.
     """
 
     device = torch.device(map_location)
@@ -83,16 +89,21 @@ def load_cnn_checkpoint(
     input_scaler = InputFeatureScaler.from_dict(
         checkpoint["input_normalization"]
     )
+    plasma_context_scaler = PlasmaContextScaler(
+        mean=checkpoint["plasma_context_mean"],
+        scale=checkpoint["plasma_context_scale"],
+    )
     topology_scaler = TopologyTargetScaler.from_dict(
         checkpoint["topology_scaler"]
     )
     model = VdfCNN(**deepcopy(checkpoint["model_architecture"]))
     model.place_model_parallel(device, model_parallel_gpus)
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.eval()
     return LoadedCnnCheckpoint(
         model=model,
         input_scaler=input_scaler,
+        plasma_context_scaler=plasma_context_scaler,
         topology_scaler=topology_scaler,
         checkpoint=checkpoint,
     )

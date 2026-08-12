@@ -23,9 +23,9 @@ def load_prediction_model(
 
     Coordinate and region prediction share this first stage so checkpoint
     reconstruction, device placement, and evaluation mode are identical.
-    The returned object retains the checkpoint mapping used by later stages
-    for representation preparation, class order, and inverse topology
-    scaling.
+    The returned object retains representation and 16-feature plasma
+    context scaling, class order, and inverse topology scaling used by later
+    stages.
 
     Parameters
     ----------
@@ -40,8 +40,8 @@ def load_prediction_model(
     Returns
     -------
     LoadedCnnCheckpoint
-        Reconstructed model, input scaler, topology scaler, and checkpoint
-        mapping on the selected runtime devices.
+        Reconstructed model, representation/context/topology scalers, and
+        checkpoint mapping on the selected runtime devices.
     """
 
     resolved_device = (

@@ -7,29 +7,56 @@ Extraction uses:
 - a Vlasiator VLSV bulk file for each requested timestep;
 - the matching flux-function file used by X/O detection;
 - configured physical regions and class coordinates; and
-- the VDF population and velocity mesh exposed by the source reader.
+- the configured VDF population and its velocity mesh exposed by the source
+  reader.
 
 Source templates in `configs/data/extraction.yaml` are site-specific and
-must be reviewed before use. A simulation timestep is an index, not
-automatically a time in seconds.
+must be reviewed before use. Its `population` setting applies consistently to
+the VDF, bulk velocity, number density, and pressure tensor. `auto` preserves
+the historical `avgs`-then-`proton` selection; an explicit active population
+selects that species in a multi-population file. A simulation timestep is an
+index, not automatically a time in seconds.
 
 ## VLSV input boundary
 
 Producers and the selected population's velocity mesh are resolved once per
-opened VLSV file, not once per sample.
+opened VLSV file, not once per sample. Every selected VDF cell also receives
+same-cell plasma context. Magnetic and electric fields prefer current
+SpatialGrid volumetric producers, then historical volumetric names, then
+field-grid producers sampled at the VDF-cell centre, and finally supported
+legacy names. Analysator temporarily materializes one field grid at a time;
+the context reader copies only vectors for the selected CIDs, releases that
+spatial array before preparing another producer, and removes each selected
+vector after its aligned sample consumes it. Bulk velocity prefers `<population>/vg_v`,
+`<population>/V`, `vg_v`, `V`, then `fg_v`; historical `rho_v / rho` is the
+final supported velocity source. Number density prefers
+`<population>/vg_rho`, `<population>/rho`, then `rho`. Population-prefixed
+names always use the configured VDF population.
+
+The explicit field priorities are `vg_b_vol`, `B_vol`, `fg_b_vol`, `fg_b`,
+`B` for magnetic field and `vg_e_vol`, `E_vol`, `fg_e_vol`, `fg_e`, `E` for
+electric field. SpatialGrid values are read by CID. Field-grid volumetric
+values are indexed at the VDF-cell centre; raw face-centred `fg_b` and
+edge-centred `fg_e` are first converted with Analysator's established
+volumetric centring. Supported legacy face-centred B reconstruction is reused
+rather than duplicated.
 
 The velocity mesh must have exactly three positive dimensions. Spatial maps
 prefer stored three-component bulk velocity in this order:
-`<population>/vg_v`, `<population>/V`, `vg_v`, then `V`. Older files without
-one of those producers use the matched legacy pair `rho_v / rho`. Thermal,
+`<population>/vg_v`, `<population>/V`, `vg_v`, `V`, then `fg_v`. Older files
+without one of those producers use the matched legacy pair `rho_v / rho`. Thermal,
 nonthermal, backstream, and drift velocities are not substituted for total
 bulk flow.
 
-Unrotated Hermite generation reads only the physical VDF and velocity grid.
-When `representations.hermite.rotate` is true, the same source must also
-provide the current cell-centred magnetic-field and total bulk-velocity
-producers used to construct the optional rotation frame. `MinValue` is never
-an input to the physical-VDF Hermite transform.
+Pressure uses the first complete family in this order: configured-population
+`vg_ptensor_diagonal` plus `vg_ptensor_offdiagonal`, population-prefixed
+`PTensorDiagonal` plus `PTensorOffDiagonal`, the corresponding unprefixed
+historical pair, configured-population thermal plus nonthermal `vg_ptensor`
+pairs, then population-prefixed or unprefixed Backstream plus NonBackstream
+pairs. Analysator's three stored
+off-diagonal values are `(Pyz, Pxz, Pxy)` and are mapped to the fixed saved
+`(Pxy, Pxz, Pyz)` order. Scalar pressure, mass density, temperature,
+anisotropy, agyrotropy, and `vg_e_gradpe` are not substitutes.
 
 The workflow reads the configured producers directly and lets Analysator
 propagate its ordinary exception if an expected variable is unavailable.
@@ -38,10 +65,11 @@ Physical VDF plotting resolves the threshold producer in Analysator-era order:
 `<population>/EffectiveSparsityThreshold`, then
 `<population>/vg_effectivesparsitythreshold`. Prediction retains that
 selection once per open source and reads its value from the same VLSV cell as
-every displayed VDF. Raw-only extraction with VDF plotting disabled and
-unrotated Hermite generation do not read a magnetic field or sparsity
-threshold. Plotting's threshold read does not make that quantity a raw or
-Hermite representation input.
+every displayed VDF. Raw-only and unrotated Hermite extraction still read B
+for plasma context, but do not use its direction in representation
+mathematics. With VDF plotting disabled they do not read a sparsity threshold.
+Plotting's threshold read does not make that quantity a raw,
+Hermite, or plasma-context input.
 
 ## VDF cells and velocity grids
 
@@ -188,7 +216,35 @@ Availability fields and an aligned Boolean mask describe valid targets.
 Missing topology remains missing; it is not physical zero. Optional `dy`
 metadata is not part of the six-target ML schema.
 
-## Physical context for Hermite
+## Same-cell plasma context and Hermite rotation
+
+Each sample has one float32 row in `plasma_context.npy` with fixed order:
+
+1. `magnetic_field_x_t` (tesla)
+2. `magnetic_field_y_t` (tesla)
+3. `magnetic_field_z_t` (tesla)
+4. `electric_field_x_vm` (volts per metre)
+5. `electric_field_y_vm` (volts per metre)
+6. `electric_field_z_vm` (volts per metre)
+7. `bulk_velocity_x_ms` (metres per second)
+8. `bulk_velocity_y_ms` (metres per second)
+9. `bulk_velocity_z_ms` (metres per second)
+10. `number_density_m3` (particles per cubic metre)
+11. `pressure_xx_pa` (pascals)
+12. `pressure_yy_pa` (pascals)
+13. `pressure_zz_pa` (pascals)
+14. `pressure_xy_pa` (pascals)
+15. `pressure_xz_pa` (pascals)
+16. `pressure_yz_pa` (pascals)
+
+B, E, and fluid V are read as complete three-component vectors at the
+selected spatial CID, and all nine Cartesian components enter the saved row.
+These components preserve vector direction and magnitude, so separate
+magnetic-field, electric-field, and bulk-speed magnitudes are not stored.
+The same in-memory B and V vectors support optional Hermite rotation for that
+sample. Field-grid arrays are centred and prepared once per source, then
+indexed at each selected cell centre; they are not reread or interpolated
+into spatial image patches per sample.
 
 Hermite moments and coefficients use the physical linear VDF exactly as
 supplied. The drift is calculated from its first moment; it is not read from
@@ -196,10 +252,10 @@ fluid `rho_v / rho` or a stored velocity producer. The transform applies no
 sparsity threshold, logarithm, negative-value cleanup, or density
 renormalization.
 
-The original `[vx, vy, vz]` frame is the default and requires no magnetic
-field or fluid velocity. Optional rotation reads the same selected CID's
-current magnetic-field and total-bulk-velocity producers. Its orthonormal
-rows are:
+The original `[vx, vy, vz]` Hermite frame is the default. Context extraction
+still reads and stores B and fluid V, but the unrotated transform does not use
+them. Optional rotation reuses those same vectors without a second source
+read. Its orthonormal rows are:
 
 ```text
 parallel = B / |B|
@@ -218,19 +274,27 @@ renormalize density, or apply a density tolerance.
 A raw dataset contains:
 
 ```text
-X.npy
-metadata.csv
-velocity_grid.npz
+dataset/
+├── X.npy
+├── plasma_context.npy
+├── metadata.csv
+└── velocity_grid.npz
 ```
 
-When Hermite is enabled it also contains:
+When Hermite is enabled the complete core layout is:
 
 ```text
-X_hermite.npy
+dataset/
+├── X.npy
+├── X_hermite.npy
+├── plasma_context.npy
+├── metadata.csv
+└── velocity_grid.npz
 ```
 
 `X.npy` stores complete physical VDFs without slicing, logarithms,
-normalization, rotation, or downsampling. `X_hermite.npy` stores aligned
+normalization, rotation, or downsampling. `plasma_context.npy` stores aligned
+float32 rows with shape `(n_samples, 16)`. `X_hermite.npy` stores aligned
 coefficient volumes. `metadata.csv` stores sample identity, provenance,
 physical class, selected-cell coordinates, and topology. It is the sole
 classification-target source for current dataset consumers.
@@ -238,6 +302,9 @@ classification-target source for current dataset consumers.
 Current workflows assume these saved files are correctly formed. They load
 only the arrays, metadata, and velocity-grid values needed for their
 operation. A missing requested file produces a direct error.
+Datasets using an earlier context layout, or predating `plasma_context.npy`,
+must be regenerated; no zero-filled context,
+compatibility array, or migration step is provided.
 
 Optional extraction postprocessing may add:
 
@@ -264,25 +331,27 @@ columns remain unchanged.
 ## Transactional writing
 
 The writer creates one hidden sibling staging directory and allocates final
-`X.npy` and optional `X_hermite.npy` memory maps. The parent process streams
-the first nonempty timestep while discovering the raw VDF shape. With
-`extraction_n_jobs: 1`, it continues serially. With more than one extraction
-job, each remaining timestep is one Joblib task for raw-only or paired
-raw-plus-Hermite output. One worker opens the timestep source once, reuses
-one VDF extractor, and processes its planned samples sequentially. Each raw
-VDF is extracted once and its raw and Hermite rows are written at the same
-local index in worker-owned memory maps beneath a staging-local temporary
-directory, so large arrays do not travel through process IPC.
+`X.npy`, `plasma_context.npy`, and optional `X_hermite.npy` memory
+maps. The planned velocity-grid descriptor supplies the raw VDF shape. With
+`extraction_n_jobs: 1`, the parent streams timesteps serially. With more than
+one extraction job, each timestep is one Joblib task for raw-plus-context or
+raw-plus-context-plus-Hermite output. One worker opens the timestep source
+once, reuses one VDF extractor, resolves its plasma producers once, and
+processes its planned samples sequentially. Each raw VDF and same-cell
+context are read once and their raw, context, and optional Hermite rows are
+written at the same local index in worker-owned memory maps beneath a
+staging-local temporary directory, so large arrays do not travel through
+process IPC.
 
 Workers never receive the final staged memory maps. The parent consumes
-timestep descriptors in submission order and copies raw and optional
-Hermite blocks into the same next final slice, placing metadata at the
+timestep descriptors in submission order and copies raw, context, and
+optional Hermite blocks into the same next final slice, placing metadata at the
 corresponding indexes. Planned timestep order followed by within-timestep
 sample order is therefore stable even when workers complete out of order.
 The parent then writes `metadata.csv` and `velocity_grid.npz`, flushes and
 closes the final maps, and renames the staging directory to the final path.
-This execution-only change leaves raw-only numerical output and Hermite
-coefficient values unchanged.
+This preserves raw and Hermite numerical values while adding aligned
+same-row vector-component context.
 
 The writer does not reopen or scan the complete staged dataset before the
 final rename. It uses only the staging directory, direct destination checks,
@@ -410,9 +479,10 @@ Hermite datasets and Hermite-trained CNN or autoencoder checkpoints created
 before this physical-VDF convention must be regenerated and retrained. No
 old/new dispatch, migration, or compatibility adaptation is active.
 
-Neither current representation includes labels, topology, spatial
-coordinates, magnetic field, fluid velocity, or physical moments as
-features.
+Neither current VDF representation embeds labels, topology, spatial
+coordinates, or plasma values in its velocity-space array. The CNN and
+autoencoder instead receive the separate vector-component/density/pressure
+row from `plasma_context.npy`; PCA does not consume that context.
 
 ## Extraction configuration
 

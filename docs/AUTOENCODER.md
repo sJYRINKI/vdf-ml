@@ -2,17 +2,18 @@
 
 ## Purpose
 
-The autoencoder learns one compact latent representation from either complete
-three-dimensional VDF representation. It reconstructs the normalized input and
-uses six masked topology targets to encourage the same latent vector to retain
-physical X/O geometry.
+The autoencoder learns one compact combined latent representation from either
+complete three-dimensional VDF representation and aligned plasma
+context. It reconstructs the normalized VDF input and uses six masked topology
+targets to encourage that representation to retain physical X/O geometry.
 
 It is:
 
 - deterministic and non-variational;
 - one Conv3d encoder/decoder model for both representations;
 - trained on complete volumes without raw slicing or downsampling;
-- topology-aware without using topology as an input; and
+- topology-aware without using topology as an input;
+- conditioned on aligned 16-value plasma context;
 - optionally layer-model-parallel in one Python process.
 
 It is not adversarial, a physical-class predictor, or currently a generative
@@ -20,6 +21,18 @@ model. It does not use DDP, `DataParallel`, FSDP, model replication, or
 sample-level training pools.
 
 ## Inputs
+
+Every raw or Hermite sample is paired with one float32
+`plasma_context.npy` row of shape `(16,)`. Its exact SI order is
+`magnetic_field_x_t`, `magnetic_field_y_t`, `magnetic_field_z_t`,
+`electric_field_x_vm`, `electric_field_y_vm`, `electric_field_z_vm`,
+`bulk_velocity_x_ms`, `bulk_velocity_y_ms`, `bulk_velocity_z_ms`,
+`number_density_m3`, `pressure_xx_pa`, `pressure_yy_pa`, `pressure_zz_pa`,
+`pressure_xy_pa`, `pressure_xz_pa`, and `pressure_yz_pa`. B uses tesla, E
+uses volts per metre, V uses metres per second, density uses particles per
+cubic metre, and pressure uses pascals. The components preserve direction and
+magnitude, so the model does not receive redundant vector magnitudes.
+Topology remains supervised metadata rather than context.
 
 ### Raw
 
@@ -58,13 +71,19 @@ coefficients, or apply the raw-VDF logarithm.
 
 ## On-demand memory-mapped loading and normalization
 
-Each DataLoader process opens the representation file as a read-only NumPy
-memory map on its first sample request and reuses that mapping. A partition
-dataset retains the file path, selected sample indices, small topology target
+Each DataLoader process opens the representation and plasma-context files as
+read-only NumPy memory maps on its first sample request and reuses those
+mappings. A partition dataset retains the paths, selected sample indices,
+small topology target
 and mask arrays, normalization values, and reporting identity. Each
 `__getitem__` call reads, copies, and preprocesses only the requested saved
 row. This is on-demand memory-mapped sample loading: the workflow never
 materializes a complete `(n_samples, 1, vx, vy, vz)` raw tensor in RAM.
+
+The same training indices fit the context mean and population standard
+deviation in float64. Validation, test, plotting, and checkpoint reload apply
+those training values to aligned context rows without changing the physical
+saved array.
 
 Input normalization uses the established bounded float64 accumulation:
 
@@ -79,7 +98,7 @@ training-derived feature scaling. Hermite normalization acts directly on the
 complete signed coefficient cube. Neither representation is normalized per
 sample.
 
-`data_loader.num_workers` controls only PyTorch worker processes that load and
+`loader.num_workers` controls only PyTorch worker processes that load and
 preprocess samples. It does not place or replicate model stages, and extraction
 worker settings do not control autoencoder training.
 
@@ -122,8 +141,9 @@ established architecture:
 complete one-channel volume
     -> Conv3d / ReLU / conditional AvgPool3d encoder blocks
     -> flattened spatially reduced bottleneck
-    -> Linear latent projection
-    -> latent_embedding
+    -> Linear VDF latent projection
+16-value context -> Linear / ReLU context embedding
+    -> concatenate on bottleneck device -> combined_latent
        |-> Linear / ReLU / Linear topology head -> 6 predictions
        `-> Linear decoder projection
            -> trilinear interpolation / Conv3d decoder blocks
@@ -141,7 +161,8 @@ retained by `AdaptiveAvgPool3d`. Raw values follow `(vx, vy, vz)`; Hermite
 values follow the saved unrotated `(n_x, n_y, n_z)` or rotated
 `(n_parallel, n_perp1, n_perp2)` coefficient order. The effective bottleneck
 shape is the per-axis minimum of the configured maximum and encoded volume,
-so pooling never expands a smaller encoded axis. The default `[4, 4, 4]`
+so pooling never expands a smaller encoded axis. The direct constructor
+default `[4, 4, 4]`
 therefore preserves the existing behavior for encoded volumes smaller than
 four cells along any axis.
 
@@ -151,19 +172,21 @@ checkpoint size, bottleneck-stage memory, and compute at the cost of stronger
 spatial compression. Larger settings retain more encoded spatial information;
 the complete bottleneck stage must still fit on one owning device.
 
-The forward method accepts only `inputs` and returns this mapping:
+The forward method requires `vdf_input` and aligned `plasma_context` and returns
+this mapping:
 
 ```text
 reconstruction
 topology_predictions
-latent_embedding
+combined_latent
 ```
 
-`reconstruction` has the same shape as `inputs`, topology predictions have
-shape `(batch_size, 6)`, and the non-detached latent embedding has shape
-`(batch_size, latent_size)`. Reconstruction gradients reach the decoder,
-latent projection, and encoder. Topology gradients reach the topology head,
-latent projection, and encoder.
+`reconstruction` has the same shape as `vdf_input`, topology predictions have
+shape `(batch_size, 6)`, and the non-detached combined latent has width
+`model.latent_size + plasma_context.hidden_size`. Both losses reach the
+context branch and shared VDF encoder through the combined latent. The
+decoder reconstructs only the normalized VDF and has no context output or
+context reconstruction loss.
 
 ## One-process model parallelism
 
@@ -183,13 +206,15 @@ and meaningful stage count. CPU and one-GPU runs use the same placement path
 with every stage on one device. Runtime attributes describe the input device,
 output device, and stage devices.
 
-The input batch moves to the input device, normalization runs there, and an
-activation moves only when the next stage has another owner. Reconstruction,
+The VDF input batch moves to the input device, normalization runs there, and
+an activation moves only when the next stage has another owner. The small
+scaled context batch and its dense branch move to the bottleneck device,
+where fusion occurs. Reconstruction,
 topology predictions, and the exposed latent vector finish on the output
 device. PyTorch autograd follows those transfers during one backward pass.
-One AdamW optimizer owns every encoder, latent, decoder, reconstruction, and
-topology parameter exactly once, including when parameter groups reside on
-several devices.
+One AdamW optimizer owns every encoder, VDF latent, context branch, decoder,
+reconstruction, and topology parameter exactly once, including when parameter
+groups reside on several devices.
 
 This design does not schedule microbatches, replicate the model, all-reduce
 gradients, or spatially shard one convolution. Each individual Conv3d stage
@@ -274,11 +299,14 @@ with the CNN.
 - encoder and decoder channels, configured bottleneck maximum, effective
   bottleneck shape, latent size, and pooling architecture;
 - training-derived representation mean, scale, and epsilon;
+- exact 16 plasma-context names, training mean and scale, dense-branch
+  hidden width, VDF latent width, and combined latent width;
 - exact topology target order, scaler mean and scale, hidden size, and loss
   weight;
-- random seed and retained dataset identity fields;
+- random seed;
 - best epoch and best validation total loss; and
-- a device-independent CPU state dictionary.
+- device-independent CPU model parameters under the direct `state_dict`
+  field.
 
 Runtime CUDA IDs, stage mapping, requested GPU count, Slurm state, and
 DataLoader worker process IDs are not stored. Direct representation and
@@ -288,12 +316,16 @@ currently visible devices. The same checkpoint therefore loads on CPU, one
 GPU, or several GPUs. Retired two-dimensional or reconstruction-only
 checkpoints are not migrated or repaired; retrain them with the current
 architecture.
+Earlier context-layout and context-free checkpoints also require retraining.
+The current direct artifact remains `autoencoder.pt`; no versioned checkpoint
+name or migration path is used.
 
 ## Configuration
 
 `configs/models/autoencoder.yaml` owns the default seed, device, model,
-topology task, timestep split, loader, AdamW, training, and plot settings. The
-command separately selects the dataset, output directory, and representation.
+plasma-context branch, topology task, timestep split, loader,
+AdamW, training, and plot settings. The command separately selects the
+dataset, output directory, and representation.
 
 The important settings are:
 
@@ -302,20 +334,24 @@ The important settings are:
 | `raw.log_eps` | positive physical VDF floor before `log10` |
 | `model.channels` | ordered Conv3d encoder/decoder widths |
 | `model.bottleneck_shape` | maximum retained spatial cells on each encoded axis |
-| `model.latent_size` | shared reconstruction/topology latent width |
+| `model.latent_size` | VDF latent width before plasma-context fusion |
 | `model.pooling` | conditional three-dimensional pooling convention |
 | `model_parallel_gpus` | visible devices used by consecutive model stages |
+| `plasma_context.hidden_size` | dense 16-feature branch width before latent fusion |
 | `topology.hidden_size` | hidden width of the auxiliary topology head |
 | `topology.loss_weight` | multiplier for globally masked Smooth L1 |
 | `split` | train and validation fractions plus gap timesteps |
-| `data_loader` | sample batches, worker count, normalization batch size, pinning |
+| `loader` | sample batches, worker count, normalization batch size, pinning |
 | `optimizer` | AdamW learning rate, weight decay, betas, and epsilon |
 | `training` | maximum epochs, patience, and minimum total-loss improvement |
 
-`model.bottleneck_shape: [4, 4, 4]`, `model_parallel_gpus: 1`,
-`topology.hidden_size: 64`, and `topology.loss_weight: 1.0` are the defaults.
-`data_loader.num_workers` affects loading and preprocessing only; it is
-independent from stage placement. The configuration has no 2-D, raw-slice,
+The checked-in configuration uses `model.bottleneck_shape: [10, 10, 10]`,
+`model_parallel_gpus: 1`, `plasma_context.hidden_size: 32`,
+`topology.hidden_size: 64`, and `topology.loss_weight: 0.1`.
+`loader.num_workers` affects loading and preprocessing only; it is
+independent from stage placement. Dataset `creation.extraction_n_jobs` is a
+separate timestep-extraction process count and does not control training. The
+configuration has no 2-D, raw-slice,
 downsampling, convolution-dimensionality, topology-input, class-objective,
 DDP, world-size, or local-rank option.
 

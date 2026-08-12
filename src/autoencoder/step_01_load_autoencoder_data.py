@@ -7,9 +7,10 @@ rotated ``(n_parallel, n_perp1, n_perp2)`` coefficient order. Dataset
 workers copy and preprocess one row only when PyTorch requests it, so a
 complete sample partition is never materialized in ordinary RAM.
 
-The same saved row supplies the reconstruction input, six Earth-radius
-topology targets, their finite-value mask, and sample identity. Topology is
-an auxiliary target and is never appended to the physical model input.
+The same saved row supplies the reconstruction input, 16-value plasma
+context, six Earth-radius topology targets, their finite-value mask,
+and sample identity. Plasma context is read from its own float32 memory map
+and scaled with training rows only. Topology remains an auxiliary target.
 """
 
 from copy import deepcopy
@@ -26,6 +27,10 @@ from src.representations.step_01_load_saved_representation import (
     load_saved_representation,
 )
 from src.learning.topology_supervision import create_topology_targets
+from src.representations.plasma_context import (
+    PLASMA_CONTEXT_FILENAME,
+    PlasmaContextMemmapReader,
+)
 
 
 RAW_AXIS_ORDER = ("vx", "vy", "vz")
@@ -102,6 +107,9 @@ class AutoencoderTrainingData:
         Complete physical representation reconstructed by the model.
     source_path : pathlib.Path
         Read-only ``X.npy`` or ``X_hermite.npy`` source.
+    plasma_context_path : pathlib.Path
+        Read-only ``plasma_context.npy`` source with shape ``(n_samples, 16)``
+        and float32 storage.
     representation_spec : RepresentationTensorSpec
         Sample count, full spatial shape, dtype, axes, and preprocessing.
     topology_targets : torch.Tensor
@@ -118,15 +126,20 @@ class AutoencoderTrainingData:
 
     Notes
     -----
-    The large representation stays on disk. Small topology and identity
-    arrays stay in CPU memory and remain row aligned with the memory map.
-    Topology supervises the shared latent vector but never enters model
-    inputs, split selection, or reconstruction weighting.
+    The large representation and small plasma-context array stay on disk as
+    separate read-only mappings. Topology and identity arrays stay in CPU
+    memory. All sources use the same saved sample index. The context contains
+    ``(Bx, By, Bz)`` in teslas, ``(Ex, Ey, Ez)`` in volts per metre,
+    configured-population fluid velocity ``(Vx, Vy, Vz)`` in metres per
+    second, number density in particles per cubic metre, and pressure
+    ``(Pxx, Pyy, Pzz, Pxy, Pxz, Pyz)`` in pascals. No redundant vector
+    magnitude is included.
     """
 
     dataset_dir: Path
     representation: str
     source_path: Path
+    plasma_context_path: Path
     representation_spec: object
     topology_targets: torch.Tensor
     topology_mask: torch.Tensor
@@ -138,6 +151,11 @@ class AutoencoderTrainingData:
 
         object.__setattr__(self, "dataset_dir", Path(self.dataset_dir))
         object.__setattr__(self, "source_path", Path(self.source_path))
+        object.__setattr__(
+            self,
+            "plasma_context_path",
+            Path(self.plasma_context_path),
+        )
 
     @property
     def input_shape(self):
@@ -170,6 +188,18 @@ class AutoencoderTrainingData:
             self.source_path,
             self.representation_spec,
         )
+
+    def create_plasma_context_reader(self):
+        """Create one process-local plasma-context reader.
+
+        Returns
+        -------
+        PlasmaContextMemmapReader
+            Read-only reader whose rows stay aligned with the representation
+            and metadata mappings.
+        """
+
+        return PlasmaContextMemmapReader(self.plasma_context_path)
 
 
 class AutoencoderRepresentationMemmapReader(RepresentationMemmapReader):
@@ -229,16 +259,25 @@ class AutoencoderTrainingDataset(Dataset):
         Saved row positions in stable partition order.
     topology_scaler : TopologyTargetScaler
         Scaler fitted from valid training-partition targets only.
+    plasma_context_scaler : PlasmaContextScaler
+        16-feature scaler fitted from the training partition only.
 
     Notes
     -----
-    Every item has input shape ``(1, d1, d2, d3)`` and aligned topology
-    target and mask shape ``(6,)``. Class identity is not yielded and cannot
-    become a model input or loss target.
+    Every item has input shape ``(1, d1, d2, d3)``, context shape ``(16,)``,
+    and aligned topology target and mask shape ``(6,)``. Class identity is
+    not yielded and cannot become a model input or loss target.
     """
 
-    def __init__(self, data, indices, *, topology_scaler):
-        """Bind selected rows and training-derived topology scaling."""
+    def __init__(
+        self,
+        data,
+        indices,
+        *,
+        topology_scaler,
+        plasma_context_scaler,
+    ):
+        """Bind selected rows and training-derived topology/context scaling."""
 
         self.data = data
         self.indices = np.asarray(indices, dtype=np.int64)
@@ -250,6 +289,10 @@ class AutoencoderTrainingDataset(Dataset):
             data.topology_mask[self.indices],
         )
         self._reader = data.create_reader()
+        self.plasma_context_scaler = plasma_context_scaler
+        self._plasma_context_reader = (
+            data.create_plasma_context_reader()
+        )
 
     def __len__(self):
         """Return the selected sample count."""
@@ -267,15 +310,21 @@ class AutoencoderTrainingDataset(Dataset):
         Returns
         -------
         dict
-            One-channel full volume, scaled topology values and mask, and
-            scalar ``sample_index`` and ``cid`` from the same saved row.
+            ``vdf_input`` is the one-channel full volume,
+            ``plasma_context`` is the scaled 16-value context, topology
+            values and mask are aligned auxiliary targets, and scalar
+            ``sample_index`` and ``cid`` identify the same saved row.
         """
 
         source_index = int(self.indices[index])
         identity = self.data.sample_identity.iloc[source_index]
         values = self._reader.read(source_index)
+        plasma_context = self.plasma_context_scaler.transform(
+            self._plasma_context_reader.read(source_index)
+        )
         return {
-            "inputs": torch.from_numpy(values[np.newaxis, ...]),
+            "vdf_input": torch.from_numpy(values[np.newaxis, ...]),
+            "plasma_context": torch.from_numpy(plasma_context),
             "topology_targets": self.topology_targets[index],
             "topology_mask": self.topology_mask[index],
             "sample_index": torch.tensor(
@@ -286,15 +335,19 @@ class AutoencoderTrainingDataset(Dataset):
         }
 
     def close(self):
-        """Close the process-local representation memory map."""
+        """Close both process-local input memory maps."""
 
         self._reader.close()
+        self._plasma_context_reader.close()
 
     def __getstate__(self):
         """Return worker-safe state with a closed replacement reader."""
 
         state = self.__dict__.copy()
         state["_reader"] = self.data.create_reader()
+        state["_plasma_context_reader"] = (
+            self.data.create_plasma_context_reader()
+        )
         return state
 
 
@@ -345,6 +398,7 @@ def load_autoencoder_data(dataset_dir, representation, *, raw_config=None):
         dataset_dir=dataset_dir,
         representation=representation,
         source_path=dataset_dir / spec.source_filename,
+        plasma_context_path=dataset_dir / PLASMA_CONTEXT_FILENAME,
         representation_spec=spec,
         topology_targets=torch.from_numpy(
             topology_targets.astype(np.float32)
@@ -360,6 +414,7 @@ def create_autoencoder_dataloader(
     indices,
     *,
     topology_scaler,
+    plasma_context_scaler,
     batch_size,
     shuffle=False,
     random_seed=1234,
@@ -380,6 +435,8 @@ def create_autoencoder_dataloader(
         Saved rows in one chronological timestep partition.
     topology_scaler : TopologyTargetScaler
         Scaling fitted from valid training targets only.
+    plasma_context_scaler : PlasmaContextScaler
+        Scaling fitted from the 16 context columns at training indices only.
     batch_size : int
         Number of complete volumes per batch.
     shuffle : bool, optional
@@ -394,7 +451,8 @@ def create_autoencoder_dataloader(
     Returns
     -------
     torch.utils.data.DataLoader
-        Loader yielding complete inputs and aligned six-value targets.
+        Loader yielding complete VDF inputs, aligned 16-value context,
+        six-value topology targets and masks, and saved sample identity.
 
     Notes
     -----
@@ -409,6 +467,7 @@ def create_autoencoder_dataloader(
             data,
             indices,
             topology_scaler=topology_scaler,
+            plasma_context_scaler=plasma_context_scaler,
         ),
         batch_size=int(batch_size),
         shuffle=bool(shuffle),

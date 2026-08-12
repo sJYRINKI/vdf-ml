@@ -1,10 +1,11 @@
 """Stage 0: orchestrate full-volume topology-aware autoencoder training.
 
-The ordered workflow reads complete raw or Hermite volumes on demand from
-read-only memory maps, splits complete timesteps, fits representation and
-topology scaling from training rows only, places one Conv3d model across
-consecutive devices, optimizes one combined objective, evaluates the selected
-state, and writes the four established artifacts.
+The ordered workflow reads complete raw or Hermite volumes and aligned scalar
+plasma context on demand from read-only memory maps, splits complete
+timesteps, fits representation, context, and topology scaling from training
+rows only, places one Conv3d model across consecutive devices, optimizes one
+combined objective, evaluates the selected state, and writes the four
+established artifacts.
 
 One Python process owns one model and one AdamW optimizer. DataLoader worker
 processes only read and preprocess samples; they do not distribute training.
@@ -33,6 +34,7 @@ from src.cnn.step_06_optimize_cnn import (
     set_training_seed,
 )
 from src.learning.topology_supervision import TopologyTargetScaler
+from src.representations.plasma_context import PlasmaContextScaler
 
 
 def run_autoencoder_training(
@@ -49,8 +51,10 @@ def run_autoencoder_training(
     Raw inputs are complete logarithmic ``X.npy`` volumes with model shape
     ``(batch, 1, vx, vy, vz)``. Hermite inputs are complete signed
     ``X_hermite.npy`` cubes with model shape ``(batch, 1, n1, n2, n3)``.
-    Both use the same Conv3d architecture and share one latent vector between
-    reconstruction and the six-target topology head.
+    Both use the same Conv3d architecture. A training-scaled 16-value plasma
+    context branch is fused with the VDF latent before reconstruction and the
+    six-target topology head. Cartesian B, E, and configured-population fluid
+    velocity components are context features; redundant magnitudes are not.
 
     Parameters
     ----------
@@ -98,17 +102,22 @@ def run_autoencoder_training(
     input_scaler = scale_autoencoder_inputs(
         data,
         split.train_indices,
-        resolved["data_loader"],
+        resolved["loader"],
     )
     topology_scaler = TopologyTargetScaler.fit(
         data.topology_targets,
         data.topology_mask,
         split.train_indices,
     )
+    plasma_context_scaler = PlasmaContextScaler.fit(
+        data.plasma_context_path,
+        split.train_indices,
+    )
     train_loader = _create_loader(
         data,
         split.train_indices,
         topology_scaler,
+        plasma_context_scaler,
         resolved,
         shuffle=True,
         device=effective_device,
@@ -117,6 +126,7 @@ def run_autoencoder_training(
         data,
         split.validation_indices,
         topology_scaler,
+        plasma_context_scaler,
         resolved,
         shuffle=False,
         device=effective_device,
@@ -125,6 +135,7 @@ def run_autoencoder_training(
         data,
         input_scaler,
         resolved["model"],
+        resolved["plasma_context"],
         resolved["topology"],
     ).place_model_parallel(
         effective_device,
@@ -150,6 +161,7 @@ def run_autoencoder_training(
             data,
             indices,
             topology_scaler,
+            plasma_context_scaler,
             resolved,
             shuffle=False,
             device=effective_device,
@@ -177,6 +189,7 @@ def run_autoencoder_training(
         output_dir,
         model=model,
         input_scaler=input_scaler,
+        plasma_context_scaler=plasma_context_scaler,
         topology_scaler=topology_scaler,
         data=data,
         config=resolved,
@@ -243,6 +256,7 @@ def _create_loader(
     data,
     indices,
     topology_scaler,
+    plasma_context_scaler,
     config,
     *,
     shuffle,
@@ -258,6 +272,8 @@ def _create_loader(
         Stable saved rows assigned to one timestep partition.
     topology_scaler : TopologyTargetScaler
         Training-fitted six-target scaler.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-fitted 16-feature same-cell context scaler.
     config : mapping
         Batch, worker, pinned-memory, and seed settings.
     shuffle : bool
@@ -271,17 +287,18 @@ def _create_loader(
         Loader yielding full-volume input and aligned auxiliary targets.
     """
 
-    pin_memory = config["data_loader"]["pin_memory"]
+    pin_memory = config["loader"]["pin_memory"]
     if pin_memory == "auto":
         pin_memory = device.type == "cuda"
     return create_autoencoder_dataloader(
         data,
         indices,
         topology_scaler=topology_scaler,
-        batch_size=config["data_loader"]["batch_size"],
+        plasma_context_scaler=plasma_context_scaler,
+        batch_size=config["loader"]["batch_size"],
         shuffle=shuffle,
         random_seed=config["random_state"],
-        num_workers=config["data_loader"]["num_workers"],
+        num_workers=config["loader"]["num_workers"],
         pin_memory=pin_memory,
     )
 

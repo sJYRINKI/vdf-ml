@@ -6,8 +6,9 @@ file writing in numeric stage order. When configured, it then calls Stage 6
 for dataset frames and Stage 7 for time-evolution animations.
 
 Inputs are the loaded extraction configuration and timestep range. The
-returned path contains aligned raw, optional Hermite, metadata, and
-velocity-grid files plus optional plot and animation directories.
+returned path contains aligned raw, sixteen-value plasma context, optional
+Hermite, metadata, and velocity-grid files plus optional plot and animation
+directories.
 """
 
 from functools import partial
@@ -22,19 +23,18 @@ from src.data.step_01_open_vlsv_files import create_timestep_list
 from src.data.step_03_plan_dataset_samples import (
     count_sample_counts,
     count_sample_specs_by_timestep,
-    extract_first_sample_from_specs,
-    find_first_nonempty_timestep,
     get_planned_velocity_grid,
     plan_dataset_sample_specs,
 )
 from src.data.step_04_extract_vdf_samples import (
-    iter_timestep_sample_specs,
-    write_extracted_sample_hermite,
-    write_remaining_timesteps,
-    write_timestep_samples,
+    write_planned_timesteps,
 )
 from src.data.step_05_write_dataset_files import write_dataset
+from src.data.timestep_sample_extraction import (
+    write_extracted_sample_hermite,
+)
 from src.physics.hermite_basis import DEFAULT_HERMITE_ORDER
+from src.physics.plasma_context import PLASMA_CONTEXT_FEATURE_NAMES
 
 
 def create_dataset(
@@ -47,11 +47,12 @@ def create_dataset(
     """Create one raw or raw-plus-Hermite dataset.
 
     This public orchestration stage plans samples, determines the shared
-    velocity grid from the first nonempty timestep, streams raw and optional
-    Hermite rows into staged arrays, and delegates final file ownership to
-    stage 5. Optional frame rendering and animation begin only after that
-    stage renames the completed core dataset. The function writes no
-    representation preprocessing used by ML consumers.
+    velocity grid from the first nonempty timestep, streams raw, sixteen-value
+    plasma-context, and optional Hermite rows into staged arrays,
+    and delegates final file ownership to stage 5. Optional frame rendering
+    and animation begin only after that stage renames the completed core
+    dataset. The function writes no representation preprocessing used by ML
+    consumers.
 
     Parameters
     ----------
@@ -129,30 +130,42 @@ def create_dataset(
     sample_index = 0
     hermite_enabled = storage_config["hermite_enabled"]
     hermite_rotate = storage_config["hermite_rotate"]
-    first_timestep_index, first_timestep = find_first_nonempty_timestep(
-        sample_counts_by_timestep=sample_counts_by_timestep,
-        timesteps=timesteps,
-    )
-    first_sample_specs = sample_specs_by_timestep[first_timestep]
-    first_sample, first_sample_iter = extract_first_sample_from_specs(
-        first_sample_specs,
-        include_rotation_context=hermite_enabled and hermite_rotate,
-    )
-    first_sample_shape = tuple(
-        int(value) for value in first_sample["vdf"].shape
+    sample_shape = tuple(
+        int(value) for value in velocity_grid["shape"]
     )
     raw_write_elapsed = 0.0
 
-    def write_extraction_samples(raw_output, hermite_output=None):
+    def write_extraction_samples(
+        raw_output,
+        plasma_context_output,
+        hermite_output=None,
+    ):
         """Stream all planned rows into aligned staged representation sinks.
 
         Stage 5 calls this closure after allocating the final-shape memory
-        maps. It writes the already-extracted first timestep, streams the
-        remaining timesteps in order, and returns a metadata frame whose row
-        indices match both writable arrays.
+        maps. Serial execution streams all timesteps in order; parallel
+        execution stages every timestep in a worker and merges preplanned row
+        slices in the parent. The returned metadata indexes match every
+        writable representation array.
+
+        Parameters
+        ----------
+        raw_output : numpy.memmap
+            Final raw-VDF sink with shape ``(samples, vx, vy, vz)`` and
+            float32 dtype.
+        plasma_context_output : numpy.memmap
+            Final context sink with shape ``(samples, 16)`` and float32 dtype,
+            row-aligned with ``raw_output``.
+        hermite_output : numpy.memmap, optional
+            Final Hermite sink with shape ``(samples, order, order, order)``
+            when Hermite extraction is enabled.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Metadata rows in the same final order as every output array.
         """
 
-        nonlocal first_sample
         nonlocal metadata
         nonlocal sample_index
         nonlocal raw_write_elapsed
@@ -170,31 +183,15 @@ def create_dataset(
             if hermite_enabled
             else None
         )
-        sample_index = write_timestep_samples(
-            X=raw_output,
-            metadata=metadata,
-            timestep_samples=[first_sample],
-            sample_index=sample_index,
-            sample_callback=sample_callback,
-        )
-        first_sample = None
-        sample_index = write_timestep_samples(
-            X=raw_output,
-            metadata=metadata,
-            timestep_samples=first_sample_iter,
-            sample_index=sample_index,
-            sample_callback=sample_callback,
-        )
-        sample_specs_by_timestep.pop(first_timestep, None)
-        sample_index = write_remaining_timesteps(
+        sample_index = write_planned_timesteps(
             sample_specs_by_timestep=sample_specs_by_timestep,
             X=raw_output,
+            plasma_context=plasma_context_output,
             metadata=metadata,
             sample_index=sample_index,
-            timesteps=timesteps[first_timestep_index + 1:],
+            timesteps=timesteps,
             extraction_n_jobs=extraction_n_jobs,
             extraction_worker_count=extraction_worker_count,
-            include_rotation_context=hermite_enabled and hermite_rotate,
             sample_callback=(
                 sample_callback if extraction_n_jobs == 1 else None
             ),
@@ -211,8 +208,13 @@ def create_dataset(
     writer_start = time.perf_counter()
     writer_arguments = {
         "dataset_dir": outdir,
-        "raw_shape": (n_samples, *first_sample_shape),
+        "raw_shape": (n_samples, *sample_shape),
         "raw_dtype": np.float32,
+        "plasma_context_shape": (
+            n_samples,
+            len(PLASMA_CONTEXT_FEATURE_NAMES),
+        ),
+        "plasma_context_dtype": np.float32,
         "velocity_grid": velocity_grid,
         "sample_writer": write_extraction_samples,
     }
@@ -232,12 +234,16 @@ def create_dataset(
     finalize_elapsed = max(0.0, writer_elapsed - raw_write_elapsed)
     total_elapsed = time.perf_counter() - total_start
 
-    print(f"X shape: {(n_samples, *first_sample_shape)}")
+    print(f"X shape: {(n_samples, *sample_shape)}")
     print(f"Samples written: {sample_index}")
     print(f"Timing extraction/write: {extraction_elapsed:.2f} s")
     print(f"Timing finalize/rename: {finalize_elapsed:.2f} s")
     print(f"Timing total: {total_elapsed:.2f} s")
     print(f"Saved X: {result_path / 'X.npy'}")
+    print(
+        "Saved plasma context: "
+        f"{result_path / 'plasma_context.npy'}"
+    )
     print(f"Saved metadata: {result_path / 'metadata.csv'}")
     print(f"Saved velocity grid: {result_path / 'velocity_grid.npz'}")
     if hermite_enabled:

@@ -1,11 +1,17 @@
 """Read typed same-cell physical values from an open VLSV reader.
 
-Hermite rotation, magnetic-field reconstruction, and plotting use these
-focused adapters after selecting explicit Vlasiator producer names. Direct
-bulk-velocity vectors are preferred; legacy ``rho_v / rho`` sources retain
-their established number-flux convention. Values remain in the reader's
-physical units while scalar and vector results become stable Python or
-float64 forms.
+Plasma-context extraction, Hermite rotation, prediction, and plotting reuse
+these focused adapters after file-scoped source resolution.
+Configured-population bulk velocity prefers ``<population>/vg_v``,
+``<population>/V``, ``vg_v``, ``V``, and field-grid ``fg_v``; historical
+files derive the complete metres-per-second vector from the matched
+``rho_v/rho`` number-flux relation. Scalar, vector, and pressure producers
+remain on their owning SpatialGrid or field grid as selected by the caller.
+
+Values stay in the reader's physical units and become Python scalars or
+float64 vectors. The saved float32 ``(n_samples, 16)`` context is assembled
+elsewhere from complete B/E/V components, number density, and six pressure
+components. Separate B/E/V magnitudes are not stored.
 """
 
 import numpy as np
@@ -43,6 +49,7 @@ def resolve_bulk_velocity_source(reader, population):
         f"{population}/V",
         "vg_v",
         "V",
+        "fg_v",
     )
     direct_variable = next(
         (

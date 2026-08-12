@@ -7,19 +7,28 @@ from either the raw or Hermite representation. Its classification width is
 derived from the stable class IDs present in training metadata rather than a
 hard-coded class count.
 
-The model receives exactly one tensor:
+The model requires two aligned tensors:
 
 ```text
-representation tensor
+complete 3-D representation tensor + 16-value plasma context
+    -> Conv3d VDF embedding + dense context embedding
+    -> combined embedding
     -> class logits
     -> topology predictions
-    -> learned embedding
+    -> returned combined embedding
 ```
 
-Labels, topology targets, masks, coordinates, magnetic field, fluid
-velocity, VDF sparsity thresholds, moments, and requested prediction
-coordinates are never
-model inputs.
+The exact SI order is `magnetic_field_x_t`, `magnetic_field_y_t`,
+`magnetic_field_z_t`, `electric_field_x_vm`, `electric_field_y_vm`,
+`electric_field_z_vm`, `bulk_velocity_x_ms`, `bulk_velocity_y_ms`,
+`bulk_velocity_z_ms`, `number_density_m3`, `pressure_xx_pa`,
+`pressure_yy_pa`, `pressure_zz_pa`, `pressure_xy_pa`, `pressure_xz_pa`, and
+`pressure_yz_pa`. B uses tesla, E uses volts per metre, V uses metres per
+second, density uses particles per cubic metre, and pressure uses pascals.
+The components preserve direction and magnitude, so separate vector
+magnitudes are not features. Labels, topology targets, masks, coordinates,
+VDF sparsity
+thresholds, and requested prediction coordinates are never model inputs.
 
 ## Input representations
 
@@ -58,6 +67,12 @@ Training opens the selected saved representation as a read-only memory map.
 Each dataset item reads and prepares only its requested row, avoiding
 materialization of the complete processed tensor.
 
+The same item reads the identical row from `plasma_context.npy`, whose saved
+shape is `(n_samples, 16)` and dtype is float32. Context mean and
+population standard deviation are fitted from training indices only and then
+applied to validation, test, checkpoint reload, and live VLSV prediction.
+The physical file is never modified.
+
 ## Model
 
 The raw encoder repeats:
@@ -72,7 +87,14 @@ axis smaller than the configured adaptive-pooling target. Three-dimensional
 adaptive average pooling gives a fixed encoder output without assuming a
 hardcoded input size.
 
-Both encoders feed a shared hidden layer. Separate linear heads produce:
+Both encoders produce a VDF embedding. The context branch is:
+
+```text
+Linear(16, plasma_context.hidden_size) -> ReLU
+```
+
+The context embedding is concatenated with the VDF embedding. Separate
+linear heads consume that combined embedding and produce:
 
 - one class logit per mapped dataset class in explicit checkpoint order; and
 - six scaled topology values.
@@ -87,8 +109,10 @@ encoder blocks and the shared output stage on consecutive visible CUDA
 devices. The input-normalization buffers and first encoder stage use the
 first device. Each activation moves only when the next consecutive stage is
 on another device, and the shared embedding, class head, and topology head
-remain on the final occupied device. PyTorch autograd propagates gradients
-through these transfers.
+remain on the final occupied device. The context branch and concatenation
+also live there, so only the small scaled `(batch, 16)` context tensor moves
+to the output device. PyTorch autograd propagates gradients through these
+transfers.
 
 This layout distributes layer parameters, AdamW optimizer state, and saved
 intermediate activations across GPU memories. It is model parallelism, not
@@ -189,8 +213,11 @@ The configured split produces:
 - no gap timestep in a partition;
 - stable row order within each partition.
 
-Input normalization and topology scaling use training indices only. Test
-results do not influence checkpoint selection.
+Representation normalization, context scaling, and topology scaling use
+training indices only. The identical chronological indexes select every
+input, target, and metadata row; context is never used for balancing,
+filtering, or split selection. Test results do not influence checkpoint
+selection.
 
 ## Ordered modules
 
@@ -271,9 +298,12 @@ model.
 - complete raw training velocity-grid shape and extent or Hermite actual
   volume shape, order, and optional rotation setting;
 - input mean, scale, and epsilon;
+- the exact 16 plasma-context feature names, training mean and scale,
+  dense-branch hidden width, and combined embedding width;
 - class IDs, names, and output mapping;
 - topology order and scaler;
 - model architecture;
+- CPU model parameters under the direct `state_dict` field;
 - topology loss weight;
 - random seed.
 
@@ -284,6 +314,9 @@ The loader accesses these fields directly, reconstructs the model and
 scalers, loads the state dictionary, and selects evaluation mode.
 Checkpoints are expected to come from the current workflow and use `raw` or
 `hermite`. Current loading does not adapt earlier sliced raw checkpoints.
+It also does not adapt earlier context-layout or context-free checkpoints:
+regenerate the dataset and retrain, while retaining the direct filename
+`model.pt` rather than creating a versioned filename.
 It also does not adapt Hermite checkpoints trained on the retired compact-log
 or fixed-order convention; regenerate the Hermite dataset and retrain the
 model.
@@ -295,9 +328,9 @@ GPU, another supported multi-GPU layout, or CPU inference.
 ## Configuration
 
 `configs/models/cnn.yaml` owns the default seed, device,
-`model_parallel_gpus`, model, topology loss, timestep split, loader, AdamW,
-and training settings. The command selects the dataset, output directory,
-and raw or Hermite representation.
+`model_parallel_gpus`, model, plasma-context branch, topology loss,
+timestep split, loader, AdamW, and training settings. The command selects the
+dataset, output directory, and raw or Hermite representation.
 
 The important sections are:
 
@@ -305,9 +338,10 @@ The important sections are:
 |---|---|
 | `raw` | positive `log_eps` used as the complete-volume lower bound |
 | `model` | raw/Hermite Conv3d channels, three-dimensional adaptive pool shapes, shared hidden width, dropout |
+| `plasma_context` | dense 16-feature branch hidden width for the current two-input model |
 | `topology` | fixed Smooth L1 loss, loss weight, scaler epsilon |
 | `split` | train and validation fractions plus gap timesteps |
-| `data_loader` | batch sizes, workers, normalization batch size, pinning |
+| `loader` | batch sizes, workers, normalization batch size, pinning |
 | `optimizer` | AdamW rate, decay, betas, epsilon, optional clipping |
 | `training` | maximum epochs, patience, minimum improvement |
 The configuration is expected to contain values accepted by the successful
@@ -326,6 +360,11 @@ channels, or worker counts.
 
 Comments immediately above each YAML key are the quickest reference for
 accepted choices, training effects, and memory-sensitive settings.
+
+`loader.num_workers` controls only independent sample-loading and
+preprocessing processes. `model_parallel_gpus` controls consecutive GPU
+stage placement in one training process. Dataset `extraction_n_jobs`
+controls only timestep extraction and has no CNN training role.
 
 ## Command
 

@@ -170,24 +170,27 @@ class VdfExtractor:
 
 
 def resolve_velocity_population(reader, pop=None):
-    """Resolve the equivalent proton VDF population in one VLSV source.
+    """Resolve the configured VDF population in one VLSV source.
 
     Dense extraction and VDF-cell discovery call this once per reader so all
-    later velocity operations use the same population namespace. Automatic
-    selection preserves the established ``avgs`` preference over ``proton``.
+    later velocity and fluid-moment operations use the same population
+    namespace. Automatic selection preserves the established ``avgs``
+    preference over ``proton``; an explicit active name supports
+    multi-population files without substituting an equivalent proton species.
 
     Parameters
     ----------
     reader : analysator.vlsvfile.VlsvReader
         Open VLSV reader exposing active velocity populations.
     pop : str, optional
-        Explicit population; ``None`` or ``"auto"`` prefers ``avgs`` and
-        otherwise selects ``proton``.
+        Explicit active population; ``None`` or ``"auto"`` prefers ``avgs``
+        and otherwise selects ``proton``.
 
     Returns
     -------
     str
-        Population name accepted by the reader.
+        Population name accepted by the reader and reused for VDF extraction,
+        velocity, number density, and pressure moments.
     """
 
     requested_population = None if pop is None else str(pop).strip()

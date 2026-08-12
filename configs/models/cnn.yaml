@@ -18,6 +18,16 @@ device: auto
 # activations between them without DDP. Surplus devices remain unused.
 model_parallel_gpus: 1
 
+# The final model stage embeds 16 same-cell plasma values: Bx, By, Bz in T;
+# Ex, Ey, Ez in V/m; Vx, Vy, Vz in m/s; number density in m^-3; and pressure
+# components [Pxx, Pyy, Pzz, Pxy, Pxz, Pyz] in Pa. No redundant vector
+# magnitudes are included. Mean and scale are fitted from chronological
+# training rows only.
+plasma_context:
+  # Width of the dense branch that encodes the 16 same-cell plasma values
+  # before fusion with the VDF embedding.
+  hidden_size: 32
+
 # Raw-only preprocessing applied to the complete (vx, vy, vz) VDF before
 # training-derived per-feature normalization; Hermite coefficients skip it.
 raw:
@@ -41,8 +51,8 @@ model:
   # shape before flattening. Input axes come from the saved cube:
   # [n_x, n_y, n_z] unrotated or [n_parallel, n_perp1, n_perp2] rotated.
   adaptive_pool_shape_3d: [2, 2, 2]
-  # Positive integer width of the dense embedding shared by the class and
-  # six-value topology heads; larger widths increase capacity and parameters.
+  # Positive integer width of the VDF embedding before plasma-context fusion;
+  # the class and topology heads consume the wider combined embedding.
   shared_hidden_size: 64
   # Float from 0 to 1 giving the training-time dropout probability before
   # both output heads; 0 disables dropout and evaluation always disables it.
@@ -75,13 +85,14 @@ split:
 
 # Memory-mapped sample loading and bounded float64 normalization. Batch and
 # worker choices trade throughput against accelerator and host-memory use.
-data_loader:
+loader:
   # Positive integer samples per optimizer update; larger batches may improve
   # throughput but increase activation memory. Full raw VDFs commonly require
   # a smaller value than Hermite inputs on the same device layout.
   batch_size: 16
   # Nonnegative integer PyTorch reader-process count. 0 reads in the training
   # process; larger values load samples concurrently and use more host memory.
+  # This is independent of one-process model-stage GPU parallelism.
   num_workers: 0
   # Positive integer samples per float64 normalization-statistics batch;
   # smaller values reduce peak host memory without changing the statistics.

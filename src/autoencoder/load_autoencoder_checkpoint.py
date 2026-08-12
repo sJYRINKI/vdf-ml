@@ -1,9 +1,10 @@
 """Load and place a full-volume autoencoder checkpoint.
 
 Checkpoint tensors are always read on CPU before the saved Conv3d
-architecture and both training-derived scalers are reconstructed. Runtime
-CPU, one-GPU, or multi-GPU stage ownership is then assigned from caller
-arguments; CUDA identifiers are not persisted architecture.
+architecture and representation, plasma-context, and topology scalers are
+reconstructed. Runtime CPU, one-GPU, or multi-GPU stage ownership is then
+assigned from caller arguments; CUDA identifiers are not persisted
+architecture.
 """
 
 from copy import deepcopy
@@ -14,11 +15,12 @@ import torch
 from src.autoencoder.step_04_build_autoencoder import VdfAutoencoder
 from src.cnn.step_03_scale_cnn_inputs import InputFeatureScaler
 from src.learning.topology_supervision import TopologyTargetScaler
+from src.representations.plasma_context import PlasmaContextScaler
 
 
 @dataclass(frozen=True)
 class LoadedAutoencoderCheckpoint:
-    """Hold a reconstructed model and its two preprocessing scalers.
+    """Hold a reconstructed model and its preprocessing scalers.
 
     Parameters
     ----------
@@ -26,6 +28,8 @@ class LoadedAutoencoderCheckpoint:
         Evaluation-mode complete-volume model on requested runtime stages.
     input_scaler : InputFeatureScaler
         Training-only raw-voxel or Hermite-coefficient normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-only normalization for the 16 plasma-context features.
     topology_scaler : TopologyTargetScaler
         Training-only six-target scaler used to recover Earth radii.
     checkpoint : dict
@@ -34,12 +38,14 @@ class LoadedAutoencoderCheckpoint:
     Notes
     -----
     Raw model inputs have shape ``(batch, 1, vx, vy, vz)`` and Hermite
-    inputs have ``(batch, 1, n1, n2, n3)``. Topology remains an auxiliary
-    output and is never required as model input during reconstruction.
+    inputs have ``(batch, 1, n1, n2, n3)``. Both receive aligned context with
+    shape ``(batch, 16)``. Topology remains an auxiliary output and is never
+    required as model input during reconstruction.
     """
 
     model: VdfAutoencoder
     input_scaler: InputFeatureScaler
+    plasma_context_scaler: PlasmaContextScaler
     topology_scaler: TopologyTargetScaler
     checkpoint: dict
 
@@ -52,9 +58,9 @@ def load_autoencoder_checkpoint(
 ):
     """Load one full-volume checkpoint with fresh runtime stage placement.
 
-    The loader rebuilds representation normalization, topology scaling, and
-    the Conv3d architecture on CPU, restores learned values, then applies the
-    caller's current one-process stage placement before inference.
+    The loader rebuilds representation, plasma-context, and topology
+    scaling plus the Conv3d architecture on CPU, restores learned values,
+    then applies the caller's current one-process stage placement.
 
     Parameters
     ----------
@@ -69,8 +75,8 @@ def load_autoencoder_checkpoint(
     Returns
     -------
     LoadedAutoencoderCheckpoint
-        Placed evaluation model, representation scaler, topology scaler, and
-        saved device-independent checkpoint dictionary.
+        Placed evaluation model, representation, plasma-context, and topology
+        scalers, and saved device-independent checkpoint dictionary.
 
     Notes
     -----
@@ -86,6 +92,12 @@ def load_autoencoder_checkpoint(
     input_scaler = InputFeatureScaler.from_dict(
         checkpoint["input_normalization"]
     )
+    plasma_context_scaler = PlasmaContextScaler.from_dict(
+        {
+            "mean": checkpoint["plasma_context_mean"],
+            "scale": checkpoint["plasma_context_scale"],
+        }
+    )
     topology_scaler = TopologyTargetScaler.from_dict(
         checkpoint["topology_scaler"]
     )
@@ -94,12 +106,13 @@ def load_autoencoder_checkpoint(
         input_scale=input_scaler.scale,
         **deepcopy(checkpoint["model_architecture"]),
     )
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.place_model_parallel(map_location, model_parallel_gpus)
     model.eval()
     return LoadedAutoencoderCheckpoint(
         model=model,
         input_scaler=input_scaler,
+        plasma_context_scaler=plasma_context_scaler,
         topology_scaler=topology_scaler,
         checkpoint=checkpoint,
     )

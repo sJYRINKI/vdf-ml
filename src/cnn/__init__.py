@@ -3,10 +3,10 @@
 Workflow
 --------
 Stage 0 orchestrates the complete training run.
-Stage 1 loads saved raw or Hermite samples and targets.
+Stage 1 loads aligned raw or Hermite samples, 16-value context, and targets.
 Stage 2 splits complete timesteps into three partitions.
 Stage 3 fits training-only feature and topology scaling.
-Stage 4 constructs the representation-specific CNN.
+Stage 4 constructs the VDF encoder and vector-component context fusion CNN.
 Stage 5 calculates classification and topology loss.
 Stage 6 optimizes parameters and selects the best epoch.
 Stage 7 calculates final physical-unit evaluation metrics.

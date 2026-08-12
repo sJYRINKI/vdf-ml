@@ -3,8 +3,9 @@
 The final stage writes the established ``autoencoder.pt``, ``metrics.txt``,
 ``training_history.csv``, and ``reconstruction_examples.png`` files. The
 checkpoint contains complete three-dimensional architecture,
-training-derived representation and topology scaling, selection metadata,
-and CPU model tensors, but no runtime device identifiers or stage mapping.
+training-derived representation, plasma-context, and topology scaling,
+selection metadata, and CPU model tensors, but no runtime device identifiers
+or stage mapping.
 
 The text report retains reconstruction summaries and adds combined objective,
 physical topology error, and one-process model-parallel placement sections.
@@ -30,6 +31,7 @@ def save_autoencoder_outputs(
     *,
     model,
     input_scaler,
+    plasma_context_scaler,
     topology_scaler,
     data,
     config,
@@ -52,6 +54,8 @@ def save_autoencoder_outputs(
         Validation-total-loss-selected full-volume model.
     input_scaler : InputFeatureScaler
         Training-only per-voxel or per-coefficient normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-only normalization for the fixed 16 context values.
     topology_scaler : TopologyTargetScaler
         Training-only scaling for six Earth-radius auxiliary targets.
     data : AutoencoderTrainingData
@@ -79,6 +83,7 @@ def save_autoencoder_outputs(
         model,
         output_dir / "autoencoder.pt",
         input_scaler=input_scaler,
+        plasma_context_scaler=plasma_context_scaler,
         topology_scaler=topology_scaler,
         topology_loss_weight=config["topology"]["loss_weight"],
         representation_metadata=data.representation_metadata,
@@ -101,6 +106,7 @@ def save_autoencoder_outputs(
             output_dir,
             model=model,
             input_scaler=input_scaler,
+            plasma_context_scaler=plasma_context_scaler,
             topology_scaler=topology_scaler,
             data=data,
             config=config,
@@ -124,6 +130,7 @@ def save_autoencoder_outputs(
         output_dir / "reconstruction_examples.png",
         model=model,
         data=data,
+        plasma_context_scaler=plasma_context_scaler,
         evaluations=evaluations,
         device=model.input_device,
         max_per_class=config["plot"]["max_per_class"],
@@ -166,6 +173,7 @@ def create_autoencoder_metrics_text(
     *,
     model,
     input_scaler,
+    plasma_context_scaler,
     topology_scaler,
     data,
     config,
@@ -192,6 +200,8 @@ def create_autoencoder_metrics_text(
         Selected complete-volume Conv3d autoencoder.
     input_scaler : InputFeatureScaler
         Training-only representation normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        16-value context scaling fitted from training rows only.
     topology_scaler : TopologyTargetScaler
         Six-target mean and scale fitted from valid training values only.
     data : AutoencoderTrainingData
@@ -283,11 +293,11 @@ def create_autoencoder_metrics_text(
         f"PyTorch version: {torch.__version__}",
         f"Random seed: {config['random_state']}",
         f"Raw positive log floor: {config['raw']['log_eps']}",
-        f"Data-loader batch size: {config['data_loader']['batch_size']}",
-        f"Data-loader workers: {config['data_loader']['num_workers']}",
+        f"Data-loader batch size: {config['loader']['batch_size']}",
+        f"Data-loader workers: {config['loader']['num_workers']}",
         "Normalization sample batch size: "
-        f"{config['data_loader']['normalization_batch_size']}",
-        f"Pinned memory: {config['data_loader']['pin_memory']}",
+        f"{config['loader']['normalization_batch_size']}",
+        f"Pinned memory: {config['loader']['pin_memory']}",
         f"Optimizer: AdamW",
         f"Learning rate: {config['optimizer']['learning_rate']}",
         f"Weight decay: {config['optimizer']['weight_decay']}",
@@ -306,7 +316,9 @@ def create_autoencoder_metrics_text(
         "Configured bottleneck spatial maximum: "
         f"{model.configured_bottleneck_shape}",
         f"Effective bottleneck spatial shape: {model.bottleneck_shape}",
-        f"Latent size: {model.latent_size}",
+        f"VDF latent size: {model.latent_size}",
+        f"Plasma-context hidden size: {model.plasma_context_hidden_size}",
+        f"Combined latent size: {model.combined_latent_size}",
         f"Pooling: {model.pooling}",
         "Trainable parameters: "
         f"{sum(value.numel() for value in model.parameters() if value.requires_grad)}",
@@ -314,6 +326,20 @@ def create_autoencoder_metrics_text(
         "mean and standard deviation",
         f"Representation normalization epsilon: {input_scaler.epsilon}",
         "Reconstruction objective: complete normalized-volume MSE",
+        "Plasma-context feature order: "
+        f"{model.plasma_context_feature_names}",
+        "Plasma context: Bx/By/Bz [T], Ex/Ey/Ez [V/m], "
+        "Vx/Vy/Vz [m/s], number density [m^-3], and "
+        "Pxx/Pyy/Pzz/Pxy/Pxz/Pyz [Pa]",
+        "Saved B, E, and velocity components: Bx, By, Bz, Ex, Ey, Ez, "
+        "Vx, Vy, Vz",
+        "Redundant plasma vector magnitudes saved: no",
+        "Plasma-context scaling fit: training-partition rows only",
+        f"Plasma-context scaling mean: {plasma_context_scaler.mean.tolist()}",
+        "Plasma-context scaling scale: "
+        f"{plasma_context_scaler.scale.tolist()}",
+        "Fusion: dense context embedding concatenated with the VDF latent "
+        "on the bottleneck device",
         "",
         "Model-parallel stage placement",
         separator,
@@ -419,6 +445,7 @@ def save_autoencoder_checkpoint(
     checkpoint_path,
     *,
     input_scaler,
+    plasma_context_scaler,
     topology_scaler,
     topology_loss_weight,
     representation_metadata,
@@ -428,9 +455,10 @@ def save_autoencoder_checkpoint(
 ):
     """Save one device-independent autoencoder checkpoint.
 
-    Architecture and both training-derived scalers are serialized beside a
-    CPU copy of every learned tensor. Runtime stage ownership is deliberately
-    reconstructed by the loader instead of becoming saved model structure.
+    Architecture and the representation, plasma-context, and topology
+    scalers are serialized beside a CPU copy of every learned tensor. Runtime
+    stage ownership is deliberately reconstructed by the loader instead of
+    becoming saved model structure.
 
     Parameters
     ----------
@@ -440,6 +468,8 @@ def save_autoencoder_checkpoint(
         Destination ``autoencoder.pt`` path.
     input_scaler : InputFeatureScaler
         Training-derived full-volume normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-derived normalization for the 16 context features.
     topology_scaler : TopologyTargetScaler
         Training-derived six-target Earth-radius scaling.
     topology_loss_weight : float
@@ -469,15 +499,16 @@ def save_autoencoder_checkpoint(
     """
 
     checkpoint = {
-        "model_state_dict": {
+        "state_dict": {
             name: value.detach().cpu().clone()
             for name, value in model.state_dict().items()
         },
         "representation": model.representation,
-        "input_volume_shape": list(model.input_shape),
+        "input_shape": list(model.input_shape),
         "encoder_channels": list(model.channels),
         "decoder_channels": [*reversed(model.channels), 1],
-        "latent_size": model.latent_size,
+        "vdf_latent_size": model.latent_size,
+        "combined_latent_size": model.combined_latent_size,
         "effective_bottleneck_shape": list(model.bottleneck_shape),
         "input_normalization": {
             "mean": torch.from_numpy(input_scaler.mean.copy()),
@@ -485,6 +516,12 @@ def save_autoencoder_checkpoint(
             "epsilon": input_scaler.epsilon,
             "shape": list(input_scaler.mean.shape),
         },
+        "plasma_context_feature_names": list(
+            model.plasma_context_feature_names
+        ),
+        "plasma_context_mean": plasma_context_scaler.mean.tolist(),
+        "plasma_context_scale": plasma_context_scaler.scale.tolist(),
+        "plasma_context_hidden_size": model.plasma_context_hidden_size,
         "topology_target_order": list(model.topology_target_names),
         "topology_scaler": topology_scaler.to_dict(),
         "topology_hidden_size": model.topology_hidden_size,

@@ -1,9 +1,10 @@
 """Orchestrate the ordered stages for bounded region prediction.
 
 The public workflow loads the CNN once, repeats source loading and VDF
-preparation for each timestep, runs bounded inference batches, and streams
-Stage 5 rows to ``predictions_<timestep>.csv``. Enabled combined figures
-reuse those saved rows without rerunning the model.
+and same-cell context preparation for each timestep, runs bounded aligned
+inference batches, and streams Stage 5 rows to
+``predictions_<timestep>.csv``. Enabled combined figures reuse those saved
+rows without rerunning the model.
 """
 
 import csv
@@ -14,6 +15,9 @@ import numpy as np
 from src.data.step_02_find_vdf_cells import (
     create_region_mask_re,
     get_vdf_cells_with_coords_re,
+)
+from src.physics.plasma_context import (
+    prepare_plasma_context_sources_for_cells,
 )
 from src.prediction.step_01_load_cnn_model import (
     load_prediction_model,
@@ -131,6 +135,11 @@ def run_region_prediction(
         )
         selected_cellids = cellids[mask]
         selected_coordinates = coordinates_re[mask]
+        prepare_plasma_context_sources_for_cells(
+            prepared_source.reader,
+            prepared_source.plasma_context_sources,
+            selected_cellids,
+        )
         csv_path = output_dir / f"predictions_{timestep}.csv"
         _stream_timestep_predictions(
             csv_path,
@@ -222,7 +231,15 @@ def _stream_timestep_predictions(
                 [sample.tensor for sample in samples],
                 axis=0,
             )
-            predictions = run_cnn_prediction(loaded, tensors)
+            plasma_context = np.stack(
+                [sample.plasma_context for sample in samples],
+                axis=0,
+            )
+            predictions = run_cnn_prediction(
+                loaded,
+                tensors,
+                plasma_context,
+            )
             rows = create_prediction_rows(
                 predictions,
                 representation=loaded.checkpoint["representation"],

@@ -151,26 +151,30 @@ def evaluate_cnn(
     model.eval()
     with torch.inference_mode():
         for batch in loader:
-            inputs = batch["inputs"].to(
+            inputs = batch["vdf_input"].to(
                 device,
                 non_blocking=device.type == "cuda",
             )
-            outputs = model(inputs)
-            output_device = outputs["class_logits"].device
+            output_device = model.output_device
+            plasma_context = batch["plasma_context"].to(
+                output_device,
+                non_blocking=output_device.type == "cuda",
+            )
+            outputs = model(inputs, plasma_context)
             tensors = {
                 name: batch[name].to(
                     output_device,
                     non_blocking=output_device.type == "cuda",
                 )
                 for name in (
-                    "class_targets",
+                    "class_target",
                     "topology_targets",
                     "topology_mask",
                 )
             }
             loss = calculate_cnn_loss(
                 outputs,
-                tensors["class_targets"],
+                tensors["class_target"],
                 tensors["topology_targets"],
                 tensors["topology_mask"],
                 topology_loss_weight=topology_loss_weight,
@@ -179,7 +183,7 @@ def evaluate_cnn(
             predicted_indices = torch.argmax(probabilities, dim=1)
             true_project_ids.append(
                 class_mapping.decode(
-                    tensors["class_targets"].detach().cpu().numpy()
+                    tensors["class_target"].detach().cpu().numpy()
                 )
             )
             predicted_project_ids.append(

@@ -3,13 +3,16 @@
 ## Overview
 
 Coordinate and region prediction load a CNN checkpoint, construct
-the recorded representation from a source VDF, run bounded one-input
+the recorded representation and same-cell plasma context from a source
+VDF, run bounded two-input
 inference, inverse-scale topology outputs, and save structured results.
 
-The model receives only the representation tensor. Requested coordinates,
-selected coordinates, magnetic field, fluid velocity, the resolved VDF
-sparsity threshold, labels, and topology are provenance or outputs, never
-inputs.
+The model receives the representation tensor plus 16 scaled context values:
+`(Bx, By, Bz)`, `(Ex, Ey, Ez)`, `(Vx, Vy, Vz)`, number density, and
+`(Pxx, Pyy, Pzz, Pxy, Pxz, Pyz)`. The vector components preserve both
+direction and magnitude; no separate magnitude values are added. Requested
+and selected coordinates, the resolved VDF sparsity threshold, labels, and
+topology are provenance or outputs, never inputs.
 
 ## Checkpoint contents
 
@@ -19,13 +22,12 @@ Prediction directly reads:
 - `raw` or `hermite` representation;
 - representation name and input shape;
 - input normalization;
+- exact plasma-context feature order and training mean and scale;
 - class mapping and output order;
 - exact six-target order and topology scaler;
-- topology scaler;
 - architecture;
 - raw training velocity grid or Hermite actual shape, order, and optional
-  rotation setting; and
-- requested device.
+  rotation setting.
 
 The checkpoint is expected to have been written by the current training
 workflow and to use `raw` or `hermite`.
@@ -56,7 +58,8 @@ source physical VDF
     -> complete [vx, vy, vz] physical VDF
     -> positive floor applied to every velocity-space cell
     -> log10
-    -> [1, 1, vx, vy, vz] batch tensor
+same-CID B/E/V/density/pressure -> 16 context values
+    -> [1, 1, vx, vy, vz] VDF batch plus [1, 16] context batch
     -> checkpoint normalization
     -> Conv3d CNN
 ```
@@ -73,23 +76,45 @@ Hermite preprocessing follows:
 ```text
 source physical VDF
     -> original [vx, vy, vz] grid, or optional checkpoint-recorded rotation
-       from same-CID B and total bulk velocity
+       from transient same-CID B and total bulk velocity
     -> endpoint velocity axes and physical-VDF drift/thermal moments
     -> physical-velocity physicists' Hermite basis
     -> complete checkpoint-order dimensional coefficients using dv**3
-    -> one-channel tensor
+same-CID B/E/V/density/pressure -> 16 context values
+    -> one-channel tensor plus [batch, 16] context
     -> checkpoint normalization
     -> CNN
 ```
 
 No logarithm, `MinValue` threshold, clipping, or coefficient normalization
-is applied. When checkpoint rotation is false, prediction reads no magnetic
-field, fluid velocity, or `MinValue` for Hermite preparation. When rotation
-is true, it reproduces the checkpoint's
+is applied. Prediction always reads magnetic field and fluid velocity for
+the context, but an unrotated Hermite transform does not otherwise use those
+vectors. When rotation is true, it reuses the same vectors without
+a second source read and reproduces the checkpoint's
 `(parallel, perpendicular bulk flow, cross-product)` frame before calculating
 the VDF moments and coefficients. Prediction does not resample an already
 generated coefficient cube or create a rotated cache. Region prediction
 requires one full Hermite transform at a time.
+
+Producer names are resolved once for each open prediction VLSV reader.
+SpatialGrid values use the selected CID; field-grid B/E values are centred and
+sampled at that CID's cell centre. Analysator's complete source-grid
+allocation is temporary: prediction retains only selected vectors, releases
+each grid before reading the next producer, and discards each selected vector
+after its sample is prepared. Region prediction stacks
+context rows in the same order and batches as VDF tensors. It never reads a dataset
+`plasma_context.npy`, and context values are not appended to the prediction
+CSV or figures.
+
+The producer priorities match extraction: magnetic field uses
+`vg_b_vol`, `B_vol`, `fg_b_vol`, `fg_b`, `B`; electric field uses
+`vg_e_vol`, `E_vol`, `fg_e_vol`, `fg_e`, `E`; configured-population velocity
+uses direct `vg_v`/`V` families before historical `rho_v / rho`; density uses
+configured-population `vg_rho`/`rho` before unprefixed `rho`; and pressure
+uses a complete total tensor or the supported thermal/nonthermal or
+backstream/nonbackstream sum. This keeps training and live prediction
+scientifically identical without storing runtime producer names in the
+checkpoint.
 
 Hermite checkpoints created under the retired compact-log, fixed-order
 convention are not compatible with current prediction. Regenerate the
@@ -215,7 +240,7 @@ and model preprocessing, so the complete saved VDF and raw or Hermite
 machine-learning input are unchanged.
 
 Both spatial panels show x-directed bulk velocity in m/s. The shared resolver
-prefers `<population>/vg_v`, `<population>/V`, `vg_v`, then `V`; only older
+prefers `<population>/vg_v`, `<population>/V`, `vg_v`, `V`, then `fg_v`; only older
 files without direct velocity use `rho_v / rho`. EGI therefore uses
 `proton/vg_v`, BFA-style files use `proton/V` when available, and BCH-style
 files use the legacy ratio. Thermal, nonthermal, backstream, and drift
@@ -375,7 +400,8 @@ inclusive Earth-radii selection bounds and inference batch size. The command
 supplies the current checkpoint, output location, timestep or timestep
 range, requested coordinate for coordinate prediction, and device. The
 checkpoint owns `raw` or `hermite`, physical-class output order,
-normalization, and the raw training velocity grid or actual Hermite
+representation normalization, exact plasma-context feature order and training
+mean and scale, and the raw training velocity grid or actual Hermite
 shape/order/rotation. Raw resampling is trilinear on physical VDF values and
 uses zero outside the source grid.
 
@@ -392,6 +418,6 @@ outer process.
 
 CLI `--file-source` may override source selection. `--plot` and `--no-plot`
 override only configured plotting enablement. The checkpoint remains
-authoritative for representation, model, normalization, class-output order,
-and topology scaling. Comments in both YAML files are the quickest reference
+authoritative for representation, model, representation and plasma-context
+scaling, class-output order, and topology scaling. Comments in both YAML files are the quickest reference
 for coordinate units, plotting switches, and command-owned values.

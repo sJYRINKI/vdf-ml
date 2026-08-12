@@ -46,6 +46,7 @@ def save_autoencoder_reconstruction_figure(
     *,
     model,
     data,
+    plasma_context_scaler,
     evaluations,
     device,
     max_per_class,
@@ -73,6 +74,8 @@ def save_autoencoder_reconstruction_figure(
         Best validation-selected raw or Hermite autoencoder.
     data : AutoencoderTrainingData
         Memory-mapped representation and sample-aligned physical metadata.
+    plasma_context_scaler : PlasmaContextScaler
+        16-feature normalization fitted from training rows only.
     evaluations : mapping
         Final split results containing sample indices and normalized-space
         reconstruction MSE values.
@@ -112,6 +115,7 @@ def save_autoencoder_reconstruction_figure(
     examples = _reconstruct_selected_examples(
         model,
         data,
+        plasma_context_scaler,
         selected,
         device,
     )
@@ -188,7 +192,13 @@ def select_autoencoder_reconstruction_examples(
     return pd.concat(selected, ignore_index=True)
 
 
-def _reconstruct_selected_examples(model, data, selected, device):
+def _reconstruct_selected_examples(
+    model,
+    data,
+    plasma_context_scaler,
+    selected,
+    device,
+):
     """Reconstruct selected rows with bounded raw figure memory.
 
     A raw row is reconstructed as a complete ``(vx, vy, vz)`` volume. Its
@@ -203,6 +213,8 @@ def _reconstruct_selected_examples(model, data, selected, device):
         Best validation-selected model holding training normalization.
     data : AutoencoderTrainingData
         Memory-mapped representation description.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-only scaler applied to each aligned 16-value context row.
     selected : pandas.DataFrame
         Deterministically selected sample identity and reporting rows.
     device : str or torch.device
@@ -225,6 +237,7 @@ def _reconstruct_selected_examples(model, data, selected, device):
 
     device = torch.device(device)
     reader = data.create_reader()
+    plasma_context_reader = data.create_plasma_context_reader()
     examples = []
     model.eval()
     with torch.inference_mode():
@@ -233,7 +246,12 @@ def _reconstruct_selected_examples(model, data, selected, device):
             inputs = torch.from_numpy(
                 original[np.newaxis, np.newaxis, ...]
             ).to(device)
-            output = model(inputs)
+            plasma_context = torch.from_numpy(
+                plasma_context_scaler.transform(
+                    plasma_context_reader.read(int(row.sample_index))
+                )[np.newaxis, ...]
+            )
+            output = model(inputs, plasma_context)
             reconstructed = model.denormalize_reconstruction(
                 output["reconstruction"]
             )[0, 0].detach().cpu().numpy()
@@ -274,8 +292,9 @@ def _reconstruct_selected_examples(model, data, selected, device):
                         "reconstructed": reconstructed,
                     }
                 )
-            del inputs, output
+            del inputs, plasma_context, output
     reader.close()
+    plasma_context_reader.close()
     return examples
 
 

@@ -3,9 +3,9 @@
 Workflow
 --------
 Stage 1 loads the current CNN and its training-derived scalers.
-Stage 2 opens one timestep's VLSV source and prepares VDF access.
-Stage 3 creates a full-resolution raw or complete Hermite input tensor.
-Stage 4 runs CNN inference and restores physical topology units.
+Stage 2 opens one timestep's VLSV source and resolves VDF/context access.
+Stage 3 creates a full raw or Hermite tensor plus 16-value plasma context.
+Stage 4 scales context, runs CNN inference, and restores topology units.
 Stage 5 saves the shared per-timestep coordinate or region CSV.
 """
 

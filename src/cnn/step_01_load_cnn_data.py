@@ -6,9 +6,10 @@ memory-mapped, sample-wise access and reads the supervised targets from
 ``metadata.csv`` in saved row order.
 
 The stage returns a lightweight training-data record. Partition datasets
-created from that record open their own read-only memory map and yield one
-processed representation row, class target, topology target vector, and
-saved sample identity at a time.
+created from that record open process-local read-only memory maps and yield
+one processed representation row, its scaled 16-value plasma
+context, class target, topology target vector, and saved sample identity at a
+time.
 """
 
 from copy import deepcopy
@@ -32,6 +33,10 @@ from src.representations.step_01_load_saved_representation import (
 from src.learning.topology_supervision import (
     create_topology_targets as _create_topology_targets,
 )
+from src.representations.plasma_context import (
+    PLASMA_CONTEXT_FILENAME,
+    PlasmaContextMemmapReader,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,9 @@ class CnnTrainingData:
         Selected model representation.
     source_path : pathlib.Path
         Saved ``X.npy`` or ``X_hermite.npy`` path.
+    plasma_context_path : pathlib.Path
+        Aligned ``plasma_context.npy`` path with shape ``(n_samples, 16)``
+        and float32 dtype.
     representation_spec : RepresentationTensorSpec
         Sample tensor shape and preprocessing convention.
     class_targets : torch.Tensor
@@ -87,6 +95,7 @@ class CnnTrainingData:
     dataset_dir: Path
     representation: str
     source_path: Path
+    plasma_context_path: Path
     representation_spec: RepresentationTensorSpec
     class_targets: torch.Tensor
     project_class_ids: torch.Tensor
@@ -103,6 +112,11 @@ class CnnTrainingData:
 
         object.__setattr__(self, "dataset_dir", Path(self.dataset_dir))
         object.__setattr__(self, "source_path", Path(self.source_path))
+        object.__setattr__(
+            self,
+            "plasma_context_path",
+            Path(self.plasma_context_path),
+        )
 
     @property
     def input_shape(self):
@@ -140,6 +154,18 @@ class CnnTrainingData:
             self.source_path,
             self.representation_spec,
         )
+
+    def create_plasma_context_reader(self):
+        """Create a process-local reader for aligned plasma context.
+
+        Returns
+        -------
+        PlasmaContextMemmapReader
+            Read-only sample-wise access to the 16-value plasma-context
+            array.
+        """
+
+        return PlasmaContextMemmapReader(self.plasma_context_path)
 
 
 class RepresentationMemmapReader:
@@ -273,16 +299,26 @@ class CnnTrainingDataset(Dataset):
         Ordered row positions for one timestep partition.
     topology_scaler : TopologyTargetScaler
         Training-derived scaler applied to the six auxiliary targets.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-derived scaler applied to the 16 plasma features.
 
     Notes
     -----
     Each item contains an input tensor with shape ``(1, vx, vy, vz)`` for
-    raw data or ``(1, *saved_hermite_shape)`` for Hermite data,
-    followed by aligned scalar class and identity values and two
-    ``(6,)`` topology tensors.
+    raw data or ``(1, *saved_hermite_shape)`` for Hermite data, aligned
+    scaled context with shape ``(16,)``, scalar class and identity values,
+    and two ``(6,)`` topology tensors. Context is read independently from
+    the volume and is never broadcast over velocity space.
     """
 
-    def __init__(self, data, indices, *, topology_scaler):
+    def __init__(
+        self,
+        data,
+        indices,
+        *,
+        topology_scaler,
+        plasma_context_scaler,
+    ):
         """Bind selected saved rows and training-derived topology scaling."""
 
         self.data = data
@@ -294,7 +330,9 @@ class CnnTrainingDataset(Dataset):
             data.topology_targets[self.indices],
             data.topology_mask[self.indices],
         )
+        self.plasma_context_scaler = plasma_context_scaler
         self._reader = data.create_reader()
+        self._plasma_context_reader = data.create_plasma_context_reader()
 
     def __len__(self):
         """Return the selected sample count."""
@@ -312,16 +350,22 @@ class CnnTrainingDataset(Dataset):
         Returns
         -------
         dict
-            One-channel representation input, scalar class targets,
-            scaled topology values and mask with shape ``(6,)``, plus
-            ``sample_index`` and ``cid`` from the same saved row.
+            ``vdf_input`` is the one-channel representation,
+            ``plasma_context`` is the scaled context with shape ``(16,)``,
+            ``class_target`` is the scalar physical-class target, and the
+            topology values and mask have shape ``(6,)``. ``sample_index``
+            and ``cid`` identify the same saved row.
         """
 
         source_index = int(self.indices[index])
         input_tensor = self._reader.read(source_index)
+        plasma_context = self.plasma_context_scaler.transform(
+            self._plasma_context_reader.read(source_index)
+        )
         return {
-            "inputs": torch.from_numpy(input_tensor[np.newaxis, ...]),
-            "class_targets": self.data.class_targets[source_index],
+            "vdf_input": torch.from_numpy(input_tensor[np.newaxis, ...]),
+            "plasma_context": torch.from_numpy(plasma_context),
+            "class_target": self.data.class_targets[source_index],
             "project_class_ids": self.data.project_class_ids[source_index],
             "topology_targets": self.topology_targets[index],
             "topology_mask": self.topology_mask[index],
@@ -338,12 +382,16 @@ class CnnTrainingDataset(Dataset):
         """
 
         self._reader.close()
+        self._plasma_context_reader.close()
 
     def __getstate__(self):
         """Return worker-safe state with a closed replacement reader."""
 
         state = self.__dict__.copy()
         state["_reader"] = self.data.create_reader()
+        state["_plasma_context_reader"] = (
+            self.data.create_plasma_context_reader()
+        )
         return state
 
 
@@ -358,9 +406,10 @@ def load_cnn_data(
 
     This is the data-loading entry point for CNN stage 1. It reads metadata
     columns eagerly because they are small and shared by later stages, but
-    retains only the representation path and tensor convention for the
-    potentially large VDF array. Stage 2 uses the returned metadata for the
-    timestep split, and DataLoaders read representation rows on demand.
+    retains the representation and plasma-context paths together
+    with the tensor convention for the potentially large arrays. Stage 2
+    uses the returned metadata for the timestep split, and DataLoaders read
+    aligned representation and context rows on demand.
 
     Parameters
     ----------
@@ -402,6 +451,7 @@ def load_cnn_data(
         dataset_dir=dataset_dir,
         representation=representation,
         source_path=source_path,
+        plasma_context_path=dataset_dir / PLASMA_CONTEXT_FILENAME,
         representation_spec=representation_spec,
         class_targets=torch.from_numpy(class_targets.copy()),
         project_class_ids=torch.from_numpy(project_class_ids.copy()),
@@ -422,6 +472,7 @@ def create_cnn_dataloader(
     *,
     indices,
     topology_scaler,
+    plasma_context_scaler,
     batch_size,
     shuffle=False,
     random_seed=1234,
@@ -443,6 +494,8 @@ def create_cnn_dataloader(
         Partition row positions in saved order.
     topology_scaler : TopologyTargetScaler
         Training-fitted six-target scaler.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-fitted 16-feature plasma-context scaler.
     batch_size : int
         Number of samples per batch.
     shuffle : bool, optional
@@ -463,7 +516,12 @@ def create_cnn_dataloader(
     generator = torch.Generator()
     generator.manual_seed(int(random_seed))
     return DataLoader(
-        CnnTrainingDataset(data, indices, topology_scaler=topology_scaler),
+        CnnTrainingDataset(
+            data,
+            indices,
+            topology_scaler=topology_scaler,
+            plasma_context_scaler=plasma_context_scaler,
+        ),
         batch_size=int(batch_size),
         shuffle=bool(shuffle),
         drop_last=False,

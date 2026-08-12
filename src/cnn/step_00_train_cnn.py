@@ -32,6 +32,7 @@ from src.cnn.step_06_optimize_cnn import (
 from src.cnn.step_07_evaluate_cnn import evaluate_cnn
 from src.cnn.step_08_save_cnn import save_cnn_outputs
 from src.learning.topology_supervision import TopologyTargetScaler
+from src.representations.plasma_context import PlasmaContextScaler
 
 
 def run_cnn_training(
@@ -60,8 +61,10 @@ def run_cnn_training(
     output_dir : str or pathlib.Path
         Directory receiving ``model.pt`` and ``metrics.txt``.
     representation : {"raw", "hermite"}
-        Representation used as the only model input. Topology values remain
-        auxiliary targets and are never input features.
+        Complete raw or Hermite VDF representation fused with the aligned
+        16-value plasma context. The context stores Cartesian B, E, and fluid
+        bulk-velocity components, density, and six pressure components;
+        topology values remain auxiliary targets and are never inputs.
     device : str, optional
         CPU, CUDA, or automatic-device override.
     model_parallel_gpus : int, optional
@@ -101,8 +104,12 @@ def run_cnn_training(
     input_scaler = fit_input_scaler(
         data,
         split.train_indices,
-        batch_size=resolved["data_loader"]["normalization_batch_size"],
+        batch_size=resolved["loader"]["normalization_batch_size"],
         epsilon=DEFAULT_SCALER_EPSILON,
+    )
+    plasma_context_scaler = PlasmaContextScaler.fit(
+        data.plasma_context_path,
+        split.train_indices,
     )
     topology_scaler = TopologyTargetScaler.fit(
         data.topology_targets,
@@ -114,6 +121,7 @@ def run_cnn_training(
         data,
         split.train_indices,
         topology_scaler,
+        plasma_context_scaler,
         resolved,
         shuffle=True,
         device=effective_device,
@@ -122,6 +130,7 @@ def run_cnn_training(
         data,
         split.validation_indices,
         topology_scaler,
+        plasma_context_scaler,
         resolved,
         shuffle=False,
         device=effective_device,
@@ -170,6 +179,7 @@ def run_cnn_training(
             data,
             indices,
             topology_scaler,
+            plasma_context_scaler,
             resolved,
             shuffle=False,
             device=input_device,
@@ -200,6 +210,7 @@ def run_cnn_training(
         output_dir,
         model=model,
         input_scaler=input_scaler,
+        plasma_context_scaler=plasma_context_scaler,
         topology_scaler=topology_scaler,
         data=data,
         config=resolved,

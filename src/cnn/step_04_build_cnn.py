@@ -3,7 +3,8 @@
 This stage follows training-derived scaling and precedes loss calculation.
 It builds the representation-specific encoder, a shared learned projection,
 physical-class logits, and the six scaled auxiliary topology outputs used by
-training and prediction.
+training and prediction. A separate dense branch embeds the 16-value plasma
+context on the output stage before both heads.
 
 The stage receives the representation shape, class mapping,
 training-derived input normalization, and model configuration. It returns
@@ -17,6 +18,7 @@ import torch
 from torch import nn
 
 from src.data.metadata_columns import TOPOLOGY_TARGET_COLUMNS
+from src.physics.plasma_context import PLASMA_CONTEXT_FEATURE_NAMES
 
 
 TOPOLOGY_TARGET_NAMES = TOPOLOGY_TARGET_COLUMNS
@@ -31,13 +33,18 @@ DEFAULT_HERMITE_ENCODER_CONFIG = {
 
 
 class VdfCNN(nn.Module):
-    """Predict a physical class and six auxiliary topology values.
+    """Predict class and topology from a VDF plus plasma context.
 
     Stage 4 constructs this multitask network after all preprocessing
     statistics have been fitted from training rows. Separate 3-D encoders
     consume either the complete raw ``(vx, vy, vz)`` VDF or the complete
-    Hermite coefficient volume. Both feed a shared embedding, a
-    physical-class logit head, and a six-value topology head.
+    Hermite coefficient volume. A small dense branch separately consumes the
+    same-cell 16-value plasma context: ``(Bx, By, Bz)`` in teslas,
+    ``(Ex, Ey, Ez)`` in volts per metre, configured-population fluid velocity
+    ``(Vx, Vy, Vz)`` in metres per second, number density in particles per
+    cubic metre, and pressure ``(Pxx, Pyy, Pzz, Pxy, Pxz, Pyz)`` in pascals.
+    Training-only scaling is applied per component, and no redundant vector
+    magnitude is included.
 
     Parameters
     ----------
@@ -62,7 +69,9 @@ class VdfCNN(nn.Module):
     hermite_encoder_config : mapping, optional
         Hermite convolution channels and adaptive-pooling shape.
     shared_hidden_size : int, optional
-        Width of the shared learned representation.
+        Width of the VDF convolutional embedding.
+    plasma_context_hidden_size : int, optional
+        Width of the dense branch applied to the 16 scaled context values.
     dropout : float, optional
         Dropout probability before both output heads.
 
@@ -78,14 +87,15 @@ class VdfCNN(nn.Module):
 
     Notes
     -----
-    The model normalizes input tensors internally. Topology values are
-    auxiliary targets only and are never passed into the encoder. With
-    model-parallel placement, trainable parameters, their optimizer state,
-    and forward activations saved for backward are distributed across the
-    occupied stage devices. PyTorch autograd follows the explicit tensor
-    transfers between those devices in this one-process execution path.
-    Each Conv3d block remains an indivisible stage, so this placement cannot
-    reduce the peak memory required by one individual convolutional stage.
+    The model normalizes VDF tensors internally. Plasma context is a model
+    input, while topology values remain auxiliary targets and are never
+    supplied to the network. PyTorch DataLoader workers only read samples;
+    ``model_parallel_gpus`` places consecutive Conv3d and output stages in
+    one Python process, and dataset ``extraction_n_jobs`` is unrelated
+    timestep parallelism. The context branch and concatenation live on the
+    output device, so only the small ``(batch, 16)`` tensor crosses directly
+    to that device. Each Conv3d block remains indivisible and must fit on its
+    owning GPU.
     """
 
     def __init__(
@@ -100,6 +110,7 @@ class VdfCNN(nn.Module):
         raw_encoder_config=None,
         hermite_encoder_config=None,
         shared_hidden_size=64,
+        plasma_context_hidden_size=32,
         dropout=0.2,
     ):
         """Initialize representation-specific encoders and output heads."""
@@ -118,6 +129,12 @@ class VdfCNN(nn.Module):
             str(name) for name in topology_target_names
         )
         self.shared_hidden_size = int(shared_hidden_size)
+        self.plasma_context_hidden_size = int(
+            plasma_context_hidden_size
+        )
+        self.combined_embedding_size = (
+            self.shared_hidden_size + self.plasma_context_hidden_size
+        )
         self.dropout_probability = float(dropout)
         self.raw_encoder_config = _encoder_config(
             raw_encoder_config,
@@ -158,18 +175,25 @@ class VdfCNN(nn.Module):
             nn.Linear(encoded_size, self.shared_hidden_size),
             nn.ReLU(),
         )
+        self.plasma_context_projection = nn.Sequential(
+            nn.Linear(
+                len(PLASMA_CONTEXT_FEATURE_NAMES),
+                self.plasma_context_hidden_size,
+            ),
+            nn.ReLU(),
+        )
         self.output_dropout = nn.Dropout(self.dropout_probability)
         self.class_head = nn.Linear(
-            self.shared_hidden_size,
+            self.combined_embedding_size,
             len(self.class_ids),
         )
         self.topology_head = nn.Linear(
-            self.shared_hidden_size,
+            self.combined_embedding_size,
             len(self.topology_target_names),
         )
 
-    def forward(self, inputs):
-        """Predict class logits and scaled topology values.
+    def forward(self, inputs, plasma_context):
+        """Predict outputs from a complete VDF and 16 plasma features.
 
         Stage 5 consumes both output heads for training; evaluation and
         prediction apply softmax or inverse topology scaling afterward.
@@ -181,13 +205,17 @@ class VdfCNN(nn.Module):
         inputs : torch.Tensor
             Raw ``(batch, 1, vx, vy, vz)`` tensor or Hermite
             ``(batch, 1, *saved_coefficient_shape)`` tensor.
+        plasma_context : torch.Tensor
+            Training-scaled context with shape ``(batch, 16)`` in
+            ``PLASMA_CONTEXT_FEATURE_NAMES`` order. All Cartesian B, E, and
+            configured-population fluid-velocity components are retained.
 
         Returns
         -------
         dict
             Class logits ``(batch, n_classes)``, scaled topology values
-            ``(batch, 6)``, and ``embedding`` with shape
-            ``(batch, shared_hidden_size)``.
+            ``(batch, 6)``, and combined ``embedding`` with shape
+            ``(batch, shared_hidden_size + plasma_context_hidden_size)``.
         """
 
         encoded = self.normalize_inputs(inputs)
@@ -199,8 +227,18 @@ class VdfCNN(nn.Module):
             encoded = encoded.to(block_device)
             for layer_index in range(block_slice.start, block_slice.stop):
                 encoded = self.encoder[layer_index](encoded)
-        embedding = self.shared_projection(
+        vdf_embedding = self.shared_projection(
             encoded.to(self.output_device)
+        )
+        context_embedding = self.plasma_context_projection(
+            plasma_context.to(
+                device=self.output_device,
+                dtype=vdf_embedding.dtype,
+            )
+        )
+        embedding = torch.cat(
+            (vdf_embedding, context_embedding),
+            dim=1,
         )
         head_input = self.output_dropout(embedding)
         return {
@@ -298,9 +336,10 @@ class VdfCNN(nn.Module):
         Notes
         -----
         Existing modules remain registered only under ``encoder``,
-        ``shared_projection``, and the two output-head names. Runtime
-        placement therefore does not alter checkpoint state-dictionary keys.
-        Encoder blocks and the shared output path form sequential stages.
+        ``shared_projection``, ``plasma_context_projection``, and the two
+        output-head names. Runtime placement therefore does not alter
+        checkpoint state-dictionary keys. Encoder blocks and the shared
+        fused output path form sequential stages.
         Their balanced, contiguous device indices are calculated as
         ``stage_index * effective_device_count // stage_count``.
         Normalization uses the first occupied device and every returned tensor
@@ -331,6 +370,7 @@ class VdfCNN(nn.Module):
                 self.encoder[layer_index].to(block_device)
         output_device = devices[stage_device_indices[-1]]
         self.shared_projection.to(output_device)
+        self.plasma_context_projection.to(output_device)
         self.output_dropout.to(output_device)
         self.class_head.to(output_device)
         self.topology_head.to(output_device)
@@ -402,6 +442,9 @@ class VdfCNN(nn.Module):
                 self.hermite_encoder_config
             ),
             "shared_hidden_size": self.shared_hidden_size,
+            "plasma_context_hidden_size": (
+                self.plasma_context_hidden_size
+            ),
             "dropout": self.dropout_probability,
         }
 
@@ -451,6 +494,7 @@ def build_cnn(data, input_scaler, config):
             ),
         },
         shared_hidden_size=model_config["shared_hidden_size"],
+        plasma_context_hidden_size=config["plasma_context"]["hidden_size"],
         dropout=model_config["dropout"],
     )
 

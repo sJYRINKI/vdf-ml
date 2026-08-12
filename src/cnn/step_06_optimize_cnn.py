@@ -298,28 +298,32 @@ def train_cnn_epoch(
     valid_topology_count = 0
 
     for batch in loader:
-        inputs = batch["inputs"].to(
+        inputs = batch["vdf_input"].to(
             device,
             non_blocking=device.type == "cuda",
         )
+        output_device = model.output_device
+        plasma_context = batch["plasma_context"].to(
+            output_device,
+            non_blocking=output_device.type == "cuda",
+        )
         batch_size = int(inputs.shape[0])
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(inputs)
-        output_device = outputs["class_logits"].device
+        outputs = model(inputs, plasma_context)
         targets = {
             name: batch[name].to(
                 output_device,
                 non_blocking=output_device.type == "cuda",
             )
             for name in (
-                "class_targets",
+                "class_target",
                 "topology_targets",
                 "topology_mask",
             )
         }
         loss = calculate_cnn_loss(
             outputs,
-            targets["class_targets"],
+            targets["class_target"],
             targets["topology_targets"],
             targets["topology_mask"],
             topology_loss_weight=topology_loss_weight,
@@ -465,6 +469,7 @@ def create_partition_loader(
     data,
     indices,
     topology_scaler,
+    plasma_context_scaler,
     config,
     *,
     shuffle,
@@ -484,6 +489,8 @@ def create_partition_loader(
         Saved rows in this partition.
     topology_scaler : TopologyTargetScaler
         Training-derived target scaling.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-derived scaling for the 16-value plasma context.
     config : mapping
         CNN data-loader and random-seed configuration.
     shuffle : bool
@@ -497,17 +504,18 @@ def create_partition_loader(
         Sample-wise representation loader.
     """
 
-    pin_memory = config["data_loader"]["pin_memory"]
+    pin_memory = config["loader"]["pin_memory"]
     if pin_memory == "auto":
         pin_memory = device.type == "cuda"
     return create_cnn_dataloader(
         data,
         indices=indices,
         topology_scaler=topology_scaler,
-        batch_size=config["data_loader"]["batch_size"],
+        plasma_context_scaler=plasma_context_scaler,
+        batch_size=config["loader"]["batch_size"],
         shuffle=shuffle,
         random_seed=config["random_state"],
-        num_workers=config["data_loader"]["num_workers"],
+        num_workers=config["loader"]["num_workers"],
         pin_memory=pin_memory,
     )
 

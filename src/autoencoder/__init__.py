@@ -3,11 +3,11 @@
 Workflow
 --------
 Stage 0 orchestrates the complete reconstruction training run.
-Stage 1 reads complete raw or Hermite volumes on demand from read-only
-memory maps and aligns their topology targets.
+Stage 1 reads complete raw or Hermite volumes plus aligned 16-value plasma
+context on demand from read-only memory maps.
 Stage 2 splits complete timesteps into three partitions.
 Stage 3 fits training-only representation normalization.
-Stage 4 constructs and places one Conv3d latent multitask autoencoder.
+Stage 4 constructs and places one Conv3d autoencoder with context fusion.
 Stage 5 optimizes combined reconstruction and masked topology loss.
 Stage 6 reports reconstruction, topology, and total objectives.
 Stage 7 saves the checkpoint and four established artifacts.

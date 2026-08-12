@@ -2,10 +2,12 @@
 # dataset, output directory, and representation (raw or hermite). Physical
 # class and topology values never enter the model input. Raw uses every voxel
 # in X.npy with model shape (batch, 1, vx, vy, vz); Hermite uses every signed
-# coefficient in X_hermite.npy with shape (batch, 1, n1, n2, n3). Both use the
-# same Conv3d autoencoder. The latent vector also predicts six masked topology
-# targets, and training writes autoencoder.pt, metrics.txt,
-# training_history.csv, and reconstruction_examples.png.
+# coefficient in X_hermite.npy with shape (batch, 1, n1, n2, n3). Both use
+# the aligned 16-value plasma_context.npy row containing B, E, and velocity
+# components, number density, and six pressure-tensor components. The fused
+# latent also predicts six masked topology targets, and training writes
+# autoencoder.pt, metrics.txt, training_history.csv, and
+# reconstruction_examples.png.
 
 random_state: 1234
 # Device choices are auto, cpu, cuda, or cuda:N. auto selects the current
@@ -36,11 +38,19 @@ model:
   # axes. The effective shape is capped by the encoded volume on each axis.
   # Smaller values reduce dense bottleneck parameters and memory use.
   bottleneck_shape: [10, 10, 10]
-  # Size of the shared reconstruction/topology latent vector.
+  # Size of the VDF latent vector before plasma-context fusion.
   latent_size: 64
   # Pooling choice; average is the only supported option and halves every
   # spatial axis that is still large enough for another reduction.
   pooling: average
+
+# Same-cell plasma context in fixed vector-component, density, and pressure-
+# tensor order. Training rows alone fit its independent feature scaling before
+# fusion with the complete three-dimensional VDF latent.
+plasma_context:
+  # Width of the dense branch that encodes the 16 same-cell plasma values
+  # before fusion with the VDF latent representation.
+  hidden_size: 32
 
 # Auxiliary targets in fixed project order: X distance, O distance, X dx,
 # X dz, O dx, and O dz, all in Earth radii. Finite training values alone fit
@@ -70,12 +80,13 @@ split:
 
 # On-demand memory-mapped sample loading and bounded float64 normalization.
 # Batch and worker choices trade throughput against accelerator and host memory.
-data_loader:
+loader:
   # Positive integer samples per optimizer update; larger batches may improve
   # throughput but increase activation and accelerator memory use.
   batch_size: 1
   # Number of DataLoader worker processes used only for loading and
-  # preprocessing samples. This does not distribute model training.
+  # preprocessing samples. This is independent of model_parallel_gpus and
+  # does not distribute model training.
   num_workers: 0
   # Positive integer samples per float64 normalization-statistics batch;
   # smaller values reduce peak host memory without changing the statistics.
@@ -84,8 +95,8 @@ data_loader:
   # false disables pinning, and auto pins only for CUDA/ROCm execution.
   pin_memory: auto
 
-# One AdamW optimizer owns every encoder, bottleneck, decoder, reconstruction,
-# and topology-head parameter across all occupied model-stage devices.
+# One AdamW optimizer owns every encoder, plasma-context, bottleneck, decoder,
+# reconstruction, and topology-head parameter across occupied stage devices.
 optimizer:
   # Positive float AdamW step size; larger values make faster but potentially
   # less stable parameter updates.

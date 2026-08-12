@@ -1,9 +1,9 @@
 """Stage 5: optimize and select the full-volume multitask autoencoder.
 
-One optimizer owns every encoder, bottleneck, decoder, reconstruction, and
-topology parameter even when those modules occupy several CUDA devices.
-Each batch is normalized once, passed sequentially through the placed
-Conv3d stages, and updated from one backward call on the combined objective.
+One optimizer owns every encoder, plasma-context, bottleneck, decoder,
+reconstruction, and topology parameter even when those modules occupy
+several CUDA devices. Each batch is normalized once, passed sequentially
+through the placed stages, and updated from one backward call.
 
 Validation total loss, rather than reconstruction MSE alone, selects the
 best epoch. The selected state is copied to CPU so checkpoint content is
@@ -208,8 +208,11 @@ def train_autoencoder_epoch(
     topology_error = 0.0
     valid_topology_count = 0
     for batch in loader:
-        normalized = model.normalize_inputs(batch["inputs"])
-        output = model.forward_from_normalized(normalized)
+        normalized = model.normalize_inputs(batch["vdf_input"])
+        output = model.forward_from_normalized(
+            normalized,
+            batch["plasma_context"],
+        )
         target_inputs = normalized.to(model.output_device)
         topology_targets = batch["topology_targets"].to(model.output_device)
         topology_mask = batch["topology_mask"].to(model.output_device)

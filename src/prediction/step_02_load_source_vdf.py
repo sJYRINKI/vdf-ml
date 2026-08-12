@@ -2,8 +2,9 @@
 
 This stage follows CNN loading and precedes per-cell representation
 preparation. It receives prediction settings, a timestep, and the loaded
-checkpoint and returns an open reader, resolved source producers, a dense
-VDF extractor, and the raw interpolation plan when needed.
+checkpoint and returns an open reader, resolved VDF and plasma-context
+plasma-context producers, a dense extractor, and the raw interpolation plan
+when needed.
 """
 
 from dataclasses import dataclass
@@ -23,7 +24,7 @@ from src.data.velocity_grid import (
 from src.physics.physical_context import (
     resolve_sparsity_threshold_variable,
 )
-from src.physics.vlsv_physical_values import resolve_bulk_velocity_source
+from src.physics.plasma_context import resolve_plasma_context_sources
 
 
 _DEFAULT_BACKGROUND_LIMIT_MS = 1.5e6
@@ -122,13 +123,16 @@ class PreparedPredictionSource:
     reader : object
         Open Analysator VLSV reader.
     resolved_source : ResolvedVlsvSource
-        File-scoped density, magnetic-field, population, and velocity-mesh
+        File-scoped VDF population, source identity, and velocity-mesh
         information.
     sparsity_threshold_variable : str
         Historical or population-scoped raw-VDF plotting threshold selected
         once when combined figure output is enabled.
-    bulk_velocity_source : tuple or None
-        Total-flow producer selected once only for rotated Hermite input.
+    plasma_context_sources : dict
+        Opaque file-scoped producers for complete B/E/V vectors,
+        configured-population density, and six pressure components. Field-grid
+        B/E values are sampled at the VDF-cell centre. Complete B and V vectors
+        are reused directly for optional Hermite rotation.
     extractor : VdfExtractor
         Sparse-to-dense VDF extractor for the selected population.
     interpolation_plan : dict or None
@@ -138,7 +142,7 @@ class PreparedPredictionSource:
     reader: object
     resolved_source: object
     sparsity_threshold_variable: str | None
-    bulk_velocity_source: tuple | None
+    plasma_context_sources: dict
     extractor: VdfExtractor
     interpolation_plan: dict | None
 
@@ -311,13 +315,13 @@ def load_source_vdf(
         population,
     )
     representation = loaded.checkpoint["representation"]
-    hermite_rotate = representation == "hermite" and bool(
-        loaded.checkpoint["hermite_rotate"]
-    )
     resolved_source = resolve_vlsv_source(
         reader,
         selected_population,
-        require_magnetic_field=hermite_rotate,
+    )
+    plasma_context_sources = resolve_plasma_context_sources(
+        reader,
+        selected_population,
     )
     sparsity_threshold_variable = (
         resolve_sparsity_threshold_variable(
@@ -325,11 +329,6 @@ def load_source_vdf(
             selected_population,
         )
         if plotting_enabled
-        else None
-    )
-    bulk_velocity_source = (
-        resolve_bulk_velocity_source(reader, selected_population)
-        if hermite_rotate
         else None
     )
     extractor = VdfExtractor(
@@ -352,7 +351,7 @@ def load_source_vdf(
         reader=reader,
         resolved_source=resolved_source,
         sparsity_threshold_variable=sparsity_threshold_variable,
-        bulk_velocity_source=bulk_velocity_source,
+        plasma_context_sources=plasma_context_sources,
         extractor=extractor,
         interpolation_plan=interpolation_plan,
     )

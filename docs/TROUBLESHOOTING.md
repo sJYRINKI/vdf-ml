@@ -47,24 +47,44 @@ an unrelated producer.
 
 ### Missing density
 
-A density producer is expected when the operation uses density or divides a
-momentum field.
+A configured-population number-density producer is part of every extracted
+or predicted plasma-context row. Resolution uses `<population>/vg_rho`,
+`<population>/rho`, then historical unprefixed `rho`. Mass-density,
+thermal/nonthermal, or backstream densities are not substituted.
 
 ### Missing velocity
 
-Spatial maps check direct total bulk velocity in this order:
-`<population>/vg_v`, `<population>/V`, `vg_v`, then `V`. EGI normally uses
+Plasma context and spatial maps check direct total bulk velocity in this
+order: `<population>/vg_v`, `<population>/V`, `vg_v`, `V`, then `fg_v`. EGI normally uses
 `proton/vg_v`; BFA-style sources may use `proton/V`. Only when no direct
 producer exists does a BCH-style source use `rho_v / rho`. Thermal,
 nonthermal, backstream, and drift velocities are not substitutes.
 
 ### Missing magnetic field
 
-Only Hermite extraction or prediction with rotation enabled reads a magnetic
-field. Unrotated Hermite and raw-only work do not require B. For a rotated
-run, inspect the same-cell current magnetic-field producer and total
-bulk-velocity producer used to construct the
+Every extraction and VLSV prediction reads a magnetic field for plasma
+context. Resolution uses `vg_b_vol`, `B_vol`, `fg_b_vol`, `fg_b`, then
+supported legacy `B`. Field-grid values are centred and sampled at the VDF
+cell centre. `Bx`, `By`, and `Bz` are saved in tesla; rotated Hermite also
+reuses the same vector to construct the
 `(parallel, perpendicular bulk flow, cross-product)` frame.
+
+### Missing electric field or pressure tensor
+
+Electric field uses `vg_e_vol`, `E_vol`, `fg_e_vol`, `fg_e`, then `E`;
+`vg_e_gradpe` is not total E. Pressure requires a complete current or
+historical total diagonal/off-diagonal pair, or a supported complete
+thermal/nonthermal or backstream/nonbackstream pair that can be summed. A
+scalar pressure is not substituted. Analysator's off-diagonal order is
+mapped into saved `(Pxy, Pxz, Pyz)` order.
+
+### Missing `plasma_context.npy`
+
+Current CNN and autoencoder datasets require this float32 aligned array with
+shape `(n_samples, 16)`. Earlier context-layout and context-free datasets
+require regeneration; the training path does not zero-fill context or migrate
+an older layout. PCA remains a
+representation-only consumer.
 
 ### Missing VDF sparsity threshold
 
@@ -98,11 +118,12 @@ raises.
 
 ## Unsupported legacy-B geometry
 
-The legacy magnetic-field reconstruction used only by optional rotated
-Hermite work assumes an unrefined polar `(nx, 1, nz)` SpatialGrid with usable
-interior neighbors. Refined, nonpolar, 3-D, or boundary geometry should
-provide a direct cell-centred volume field. Unrotated Hermite bypasses this
-producer entirely.
+The legacy magnetic-field reconstruction assumes an unrefined polar
+`(nx, 1, nz)` SpatialGrid with usable interior neighbors. Refined, nonpolar,
+3-D, or boundary geometry should provide a direct cell-centred volume field.
+Plasma context always needs all three magnetic-field components; an
+unrotated Hermite transform merely bypasses the field direction in its
+coefficient mathematics.
 
 ## Unexpected Hermite values
 
@@ -162,6 +183,10 @@ Useful first steps:
   support more;
 - keep `extraction_n_jobs` at or below the allocated physical CPU count and
   increase it only after measuring memory use and VLSV filesystem I/O;
+- remember that Analysator temporarily materializes one field-grid producer
+  at a time in each active timestep worker; the project immediately keeps
+  only selected vectors and releases the grid, but worker count still
+  multiplies that temporary source memory;
 - one-cell region smoke;
 - disable optional prediction plotting when testing inference alone; and
 - measure with `/usr/bin/time -v`.
@@ -205,7 +230,7 @@ GPUs in one process. The autoencoder distributes encoder, bottleneck, decoder,
 reconstruction, and topology stages. Neither workflow shards one `Conv3d`, so
 an oversized convolution stage and its local activation must still fit on its
 owner. Model parallelism may also be slower for small models because
-activations cross device boundaries. `data_loader.num_workers` affects only
+activations cross device boundaries. `loader.num_workers` affects only
 loading and preprocessing and cannot distribute the model.
 
 For the autoencoder, `model.bottleneck_shape` is the maximum retained spatial
@@ -318,7 +343,10 @@ historical workflows are not inspected or converted; recover the
 appropriate historical commit in a separate directory.
 
 Direct representation names, preprocessing values, architecture fields, and
-topology target order define current model checkpoints.
+topology target order define current model checkpoints. Context-aware CNN and
+autoencoder checkpoints additionally require the exact 16 context names and
+their training mean and scale; earlier context-layout and context-free models
+require retraining.
 
 The autoencoder checkpoint stores a CPU state dictionary and no runtime
 CUDA identifiers, stage map, or requested GPU count. Choose CPU, one-GPU, or
@@ -440,7 +468,7 @@ through the sample's peak `vy` index. The standalone command defaults to
 the order of repeated `--plane` options. Their axes are km/s.
 
 For the selected CID, confirm that the source VLSV provides a finite positive
-same-cell sparsity threshold under one of the three supported producer names
+same-cell sparsity threshold under one of the four supported producer names
 and that `dv = (vymax - vymin) / nvy` is positive. The renderer multiplies a
 float32 plane copy by `dv`, sets only values strictly below `threshold * dv`
 to zero, and masks all nonpositive entries. It then uses unmodified

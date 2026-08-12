@@ -67,7 +67,8 @@ The complete path matrix is:
 ## Dataset extraction
 
 The extraction command selects and labels VDF cells, writes full-resolution
-raw arrays, and optionally writes Hermite coefficients. The output base
+raw arrays and aligned plasma context, and optionally writes Hermite
+coefficients. The output base
 directory comes from `output_dirs` in `configs/data/extraction.yaml`.
 
 Local command:
@@ -85,10 +86,21 @@ training output directory. It contains:
 
 ```text
 X.npy
+plasma_context.npy
 metadata.csv
 velocity_grid.npz
 X_hermite.npy       when Hermite output is enabled
 ```
+
+`plasma_context.npy` is always float32 `(n_samples, 16)` in fixed order:
+`magnetic_field_x_t`, `magnetic_field_y_t`, `magnetic_field_z_t`,
+`electric_field_x_vm`, `electric_field_y_vm`, `electric_field_z_vm`,
+`bulk_velocity_x_ms`, `bulk_velocity_y_ms`, `bulk_velocity_z_ms`,
+`number_density_m3`, `pressure_xx_pa`, `pressure_yy_pa`, `pressure_zz_pa`,
+`pressure_xy_pa`, `pressure_xz_pa`, and `pressure_yz_pa`. The suffixes encode
+tesla, volts per metre, metres per second, particles per cubic metre, and
+pascals. Components preserve direction and magnitude, so no redundant vector
+magnitudes are stored.
 
 To save the default order-22 physical-VDF Hermite representation and its
 per-CID coefficient frames, use the live nested settings:
@@ -113,14 +125,15 @@ The transform projects the physical linear VDF with endpoint velocity axes,
 a physically normalized physicists' Hermite basis, and `dv**3` quadrature.
 It applies no logarithm or `MinValue` threshold. `planning_n_jobs` plans
 independent timesteps, while `extraction_n_jobs` controls timestep workers
-for raw-only or aligned raw-plus-Hermite output. The parent streams the first
-nonempty timestep for shape discovery; each remaining worker owns one
+for raw-plus-context or aligned raw-plus-context-plus-Hermite output. The
+planned velocity-grid descriptor supplies the raw shape; each worker owns one
 timestep, reuses one reader and extractor, and processes samples
-sequentially into paired temporary memory maps. The parent alone merges
+sequentially into aligned temporary memory maps. B and V read for context are
+reused when Hermite rotation is enabled. The parent alone merges
 those rows in planned order. Set `extraction_n_jobs: 1` for serial execution.
 The value `4` is an example that must fit the allocated physical cores,
-memory, and VLSV filesystem workload. A one-timestep run has no remaining
-timestep to submit, so it cannot use more than one extraction worker.
+memory, and VLSV filesystem workload. A one-timestep run submits one task and
+therefore cannot use more than one extraction worker concurrently.
 
 Manual plasma-region coordinates in `class_coords_re` use
 `[x_re, y_re, z_re]` order and Earth-radii units. Each entry maps to the
@@ -722,6 +735,12 @@ option. Raw training sends the complete `(vx, vy, vz)` VDF through
 profile when available. Actual memory use and runtime depend on the data
 shape, architecture, and device.
 
+CNN batches also require the matching `(batch, 16)` row from
+`plasma_context.npy`. Training-only scaling precedes a configured dense
+context branch, whose output is fused with the Conv3d embedding. The same
+combined embedding feeds class and topology heads; context remains part of
+every current model input and is not broadcast over velocity space.
+
 Raw CNN on CPU:
 
 ```bash
@@ -838,6 +857,10 @@ split policy, auxiliary six-target topology task, and combined validation
 objective. `model.bottleneck_shape` sets the maximum retained spatial cells
 along the three encoded axes; smaller values reduce dense bottleneck capacity
 and memory. There is no raw slice, raw downsampling, or two-dimensional mode.
+Each VDF row is paired with training-scaled 16-value plasma context.
+Its dense embedding is concatenated with the VDF latent on the bottleneck
+device; the combined latent drives the decoder and topology head, while only
+the VDF is reconstructed.
 
 Raw autoencoder on CPU:
 
@@ -878,7 +901,7 @@ python -m scripts.models.train_autoencoder \
 
 The CLI also accepts `auto` and indexed devices such as `cuda:0`.
 `--model-parallel-gpus` overrides the YAML value. It controls consecutive
-model stages in one Python process; `data_loader.num_workers` controls only
+model stages in one Python process; `loader.num_workers` controls only
 sample loading and preprocessing.
 
 Turso CPU submission:
@@ -941,7 +964,8 @@ reconstruction_examples.png
 ```
 
 `metrics.txt` describes the complete input shape, Conv3d model, configured and
-effective bottleneck shapes, latent size, requested and effective stage
+effective bottleneck shapes, VDF latent, context hidden, and combined latent
+sizes, requested and effective stage
 placement, topology scaling and order, and reconstruction, topology, and total
 losses by split. It retains reconstruction MSE by current physical class and
 reports each topology target's valid count, MAE, and RMSE in Earth radii. Class
@@ -987,6 +1011,10 @@ the optional combined PNG are visualization only. Those raw physical panels
 reuse the shared historical preparation and drawing where applicable, with
 km/s axes and transparent masked regions over white axes; they do not alter
 the saved VDF or model input.
+The same open source supplies same-CID B/E/V Cartesian components, number
+density, and six pressure components. Prediction applies checkpoint training
+scaling to this 16-value row and passes it with the VDF tensor; it does not
+read `plasma_context.npy` or add context columns to the CSV.
 `--file-source` selects a key from the configured source templates. Use
 `--no-plot` to disable a figure enabled in the YAML.
 
@@ -1051,7 +1079,7 @@ coordinates, `predicted_probability`, dynamic class probabilities, and all
 six topology values. The CSV is the sole serialized coordinate prediction.
 
 The combined map prefers direct x velocity from `<population>/vg_v`,
-`<population>/V`, `vg_v`, or `V`, then uses legacy `rho_v / rho`. It keeps
+`<population>/V`, `vg_v`, `V`, or `fg_v`, then uses legacy `rho_v / rho`. It keeps
 black magnetic streamlines over the default x-z box
 `[-30, 30, -15, 15]` R_E. The requested coordinate is a compact blue star,
 the selected VDF uses a compact predicted-class marker, scalar X/O distances
@@ -1085,6 +1113,8 @@ two-dimensional cuts in the combined figure are visualization only. Those
 raw physical panels reuse the shared historical preparation and drawing
 where applicable, with km/s axes and transparent masked regions over white
 axes; they do not alter saved VDFs or model inputs.
+Context producers resolve once per timestep reader, and region batches keep
+the 16-value context rows aligned with VDF tensors in stable CID order.
 
 Turso CPU submission:
 

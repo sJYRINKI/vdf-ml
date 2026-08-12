@@ -8,7 +8,9 @@ The project has one implementation package:
 src/
 ├── data/
 ├── physics/
+│   └── plasma_context.py
 ├── representations/
+│   └── plasma_context.py
 ├── analysis/
 ├── cnn/
 ├── autoencoder/
@@ -32,6 +34,7 @@ data and physics
     -> VDF-cell discovery
     -> X/O detection and physical labels
     -> raw VDF extraction
+    -> aligned 16-value plasma context
     -> optional Hermite coefficients
     |
     v
@@ -66,21 +69,23 @@ directories.
 Disabled postprocessing does not import or run either visual
 stage. The package does not depend on analysis or model code.
 
-Stage 0 streams the first nonempty timestep through the parent process to
-discover the raw VDF shape. Stage 4 then submits one Joblib task per remaining
-timestep when `extraction_n_jobs` is greater than one, for either raw-only or
+Stage 0 reads the raw VDF shape from the planned velocity-grid descriptor.
+Stage 4 submits one Joblib task per timestep when `extraction_n_jobs` is
+greater than one, for either raw-only or
 paired raw-plus-Hermite extraction. A worker opens one source, reuses one VDF
-extractor, and processes samples sequentially into worker-local memory maps.
-The parent alone consumes results in submission order, copies raw and
-optional Hermite rows into the identical next final range, and places
-metadata at those indexes. Workers never receive or write the final staged
-memory maps, and `extraction_n_jobs: 1` retains the serial path.
+extractor, resolves plasma producers once, and processes samples sequentially
+into worker-local raw, context, and optional Hermite memory maps.
+The parent alone consumes results in submission order, copies every array
+into the identical next final range, and places metadata at those indexes.
+Workers never receive or write the final staged memory maps, and
+`extraction_n_jobs: 1` retains the serial path.
 
 ### `src.physics`
 
 This package owns X/O point selection and topology, physical labels,
-same-cell magnetic-field and velocity producers, VDF sparsity-threshold
-resolution for physical plotting, and the Hermite transform. Threshold
+same-cell plasma producers, vector-component and pressure-tensor context,
+VDF sparsity-threshold resolution for physical plotting, and the Hermite
+transform. Threshold
 resolution follows
 Analysator-era order: `MinValue`, then `<population>/MinValue`, then
 `<population>/EffectiveSparsityThreshold`, then
@@ -91,12 +96,13 @@ do not import PCA, CNN, autoencoder, prediction, or command-line code.
 
 The Hermite transform projects the physical linear VDF on endpoint velocity
 axes with a physically normalized physicists' basis and `dv**3` quadrature.
-It is unrotated by default; optional rotation uses the magnetic-field and
+The shipped extraction configuration rotates it; the optional rotation uses
+the magnetic-field and
 perpendicular total-bulk-flow frame. `MinValue` is not a Hermite input.
 
 ### `src.representations`
 
-This package is the shared feature boundary for PCA and CNN workflows.
+This package is the shared feature boundary for PCA and neural-model workflows.
 `step_01_load_saved_representation.py` directly opens the selected saved
 representation; stages 2 and 3 prepare the alternative raw and Hermite
 inputs. The package creates either:
@@ -109,6 +115,11 @@ The source arrays remain read-only. The package does not own training splits
 or model-specific normalization. Raw PCA transforms and flattens complete
 sample batches on demand, while raw CNN training preserves all three
 velocity axes and adds one channel for `Conv3d`.
+
+`plasma_context.py` memory-maps the aligned `(n_samples, 16)` float32 context
+and owns one training-only mean/scale implementation shared by
+the CNN and autoencoder. It does not alter `plasma_context.npy`; topology and
+class values remain in their existing owners.
 
 ### `src.analysis`
 
@@ -149,7 +160,9 @@ This package owns CNN data loading, timestep splitting, training-only
 normalization, topology scaling, the raw/Hermite `Conv3d` model, loss,
 evaluation, checkpoint, and the two training outputs. Its training path is
 `step_00_train_cnn.py` through `step_08_save_cnn.py`;
-`load_cnn_checkpoint.py` is the reusable inference loader.
+`load_cnn_checkpoint.py` is the reusable inference loader. A small dense
+context branch on the output device fuses the scaled 16-value same-cell
+context with the Conv3d embedding before both output heads.
 
 ### `src.autoencoder`
 
@@ -161,9 +174,11 @@ checkpoint, and the four training outputs. Its ordered path remains
 artificial numbered stage, and `load_autoencoder_checkpoint.py` reconstructs
 the current saved model directly. Raw inputs retain every `X.npy` voxel in
 `(vx, vy, vz)` order, while Hermite inputs retain the complete signed saved
-coefficient cube. One latent vector feeds the decoder and the six-target
-topology head; topology metadata is an auxiliary masked target rather than an
-input. Physical class labels are joined only after final reconstruction to
+coefficient cube. The VDF latent is concatenated with a dense encoding of the
+16-value context on the bottleneck device. The combined latent
+feeds the decoder and the six-target topology head; topology metadata is an
+auxiliary masked target rather than an input, and the decoder reconstructs
+only the VDF. Physical class labels are joined only after final reconstruction to
 produce split and class tables in `metrics.txt`.
 
 The configured three-axis bottleneck shape is a per-axis maximum after
@@ -175,7 +190,11 @@ Runtime placement keeps one model and optimizer in one process. Consecutive
 encoder, bottleneck, decoder, reconstruction, and topology stages own
 consecutive devices, and activations transfer only when ownership changes.
 CPU and one-GPU execution use the same path. Runtime CUDA IDs are not
-checkpoint architecture. For `reconstruction_examples.png`, inverse
+checkpoint architecture. Dataset `extraction_n_jobs` controls independent
+timestep processes, each model's `loader.num_workers` controls
+memory-mapped sample reading, and `model_parallel_gpus` controls consecutive
+GPU stages in the single training process; these settings are independent.
+For `reconstruction_examples.png`, inverse
 preprocessing first restores the complete raw volume, then delegates one
 original-peak x-z visualization to the shared physical VDF renderer. Signed
 Hermite coefficients retain their symmetric display convention on white axes.
@@ -196,14 +215,20 @@ become model inputs. The fixed target order remains owned by
 ### `src.prediction`
 
 This package owns checkpoint-driven coordinate and region prediction. It
-resolves source data, builds the checkpoint representation, performs bounded
-inference, inverse-scales topology outputs, and saves structured CSV results
+resolves source data, builds the checkpoint representation and same-cell
+plasma context, runs bounded two-input inference, inverse-scales topology
+outputs, and saves structured CSV results
 through one common row builder and writer. Coordinate prediction writes its
 one-row CSV before optional rendering; region prediction streams per-timestep
 rows in stable CID order.
 For a raw checkpoint it resamples the complete physical `(vx, vy, vz)` VDF
 to the training velocity grid before the full-volume logarithmic transform
 and `Conv3d` inference.
+Each prepared source resolves the same B/E/V/density/pressure families used by
+extraction once. Coordinate prediction creates one 16-value context row;
+region prediction batches rows in the same CID order as VDFs. Stored training
+context scaling is applied before the CNN call, while context is never added
+to CSV output or figures.
 The public coordinate and region orchestrators call shared stages 1 through
 5 for checkpoint loading, source loading, input preparation, inference, and
 output saving.
@@ -225,7 +250,7 @@ saved cube, groups rows by CID and timestep, and plots the signed
 Prediction plotting combines a fixed x-velocity spatial background,
 predicted-class markers, and representative source VDFs without rerunning the
 model. The shared renderer prefers `<population>/vg_v`, `<population>/V`,
-`vg_v`, or `V`, then derives legacy velocity from `rho_v / rho`. Coordinate
+`vg_v`, `V`, or `fg_v`, then derives legacy velocity from `rho_v / rho`. Coordinate
 maps distinguish the compact requested star from the compact selected VDF
 cell, retain the CID/class/probability title, and draw scalar X/O distances as
 unfilled circles. Region maps contain only compact predicted-class markers
@@ -326,10 +351,10 @@ Each functionality guide documents the configuration it owns.
 ## Output ownership
 
 Dataset writing uses a hidden same-parent staging directory. Parallel
-timestep workers write only raw and optional Hermite memory maps beneath a
-staging-local temporary directory; the parent merges ordered results with a
-monotonically increasing row offset, writes metadata at the same indexes,
-flushes and closes the final staged arrays, and uses an
+timestep workers write raw, plasma-context, and optional Hermite memory maps
+beneath a staging-local temporary directory; the parent merges ordered
+results with a monotonically increasing row offset, writes metadata at the
+same indexes, flushes and closes the final staged arrays, and uses an
 ordinary directory rename. Other workflows create their output directories
 and save the artifacts they own directly. PCA is report-only: it saves
 `pca_physical_classes.png`,

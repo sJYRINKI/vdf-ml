@@ -1,8 +1,15 @@
-"""Produce one selected cell-centred magnetic field for Hermite rotation.
+"""Produce one same-cell magnetic vector for context and Hermite rotation.
 
-Direct volume-average fields are preferred. The established
-``legacy_b_polar_2d`` reconstruction averages component-specific face values
-only on an unrefined polar ``(nx, 1, nz)`` SpatialGrid.
+The plasma-context resolver supplies its file-scoped choice from
+``vg_b_vol``, ``B_vol``, ``fg_b_vol``, ``fg_b``, and ``B``. This module reads
+direct SpatialGrid vectors in tesla or reuses the established
+``legacy_b_polar_2d`` component-face reconstruction on an unrefined polar
+``(nx, 1, nz)`` SpatialGrid. Field-grid centering and VDF-cell-centre sampling
+belong to ``src.physics.plasma_context``.
+
+Dataset and prediction context save all three Cartesian components, retaining
+the complete vector's direction and magnitude. Optional Hermite rotation
+reuses the same vector without another source read.
 """
 
 import numpy as np
@@ -20,11 +27,15 @@ MAGNETIC_FIELD_DIRECTION_ATOL = 1e-6
 MAGNETIC_FIELD_UNITS = "T"
 
 
-def get_cell_centered_magnetic_field(reader, cid, resolved_source=None):
+def get_cell_centered_magnetic_field(
+    reader,
+    cid,
+    magnetic_source=None,
+):
     """Read the selected VDF cell's magnetic field in teslas.
 
-    Hermite physical-context loading calls this for the same spatial cell as
-    the extracted VDF. Direct volume-average variables take precedence; when
+    Plasma-context loading calls this for the same spatial cell as the
+    extracted VDF. Direct volume-average variables take precedence; when
     both names are present, ``vg_b_vol`` remains the selected value and their
     comparison is descriptive only. Otherwise the established polar-plane
     component-face reconstruction is used.
@@ -35,9 +46,10 @@ def get_cell_centered_magnetic_field(reader, cid, resolved_source=None):
         Open VLSV reader used for raw VDF extraction.
     cid : int
         Positive selected spatial cell identifier.
-    resolved_source : ResolvedVlsvSource, optional
-        File-scoped producer resolution reused for all samples. Direct calls
-        without it retain focused reader-based selection.
+    magnetic_source : mapping, optional
+        Plain source selected by the plasma-context resolver. Its
+        exact variable and direct or legacy method are reused without
+        checking candidate names for every selected cell.
 
     Returns
     -------
@@ -49,23 +61,34 @@ def get_cell_centered_magnetic_field(reader, cid, resolved_source=None):
     """
 
     cid = int(cid)
-    magnetic_producer = _resolved_magnetic_producer(resolved_source)
-    if magnetic_producer is None:
-        direct_variables = tuple(
-            variable
-            for variable in MAGNETIC_FIELD_CANDIDATES
-            if reader.check_variable(variable)
+    if magnetic_source is not None:
+        if magnetic_source["method"] == "legacy_b_polar_2d":
+            magnetic_field, units = _reconstruct_legacy_polar_magnetic_field(
+                reader,
+                cid,
+            )
+            return magnetic_field, _magnetic_field_provenance(
+                variable="B",
+                units=units,
+                stored_centering="face_centered_components",
+                reconstruction="polar_2d_component_face_average",
+                reconstruction_version=LEGACY_B_POLAR_2D,
+            )
+        variable = magnetic_source["variable"]
+        magnetic_field, units = read_vector(reader, variable, cid)
+        return magnetic_field, _magnetic_field_provenance(
+            variable=variable,
+            units=units,
+            stored_centering="cell_centered_volume_average",
+            reconstruction="none",
+            reconstruction_version=None,
         )
-    else:
-        producer_variables = tuple(
-            producer.variable
-            for producer in magnetic_producer.variables
-        )
-        direct_variables = tuple(
-            variable
-            for variable in MAGNETIC_FIELD_CANDIDATES
-            if variable in producer_variables
-        )
+
+    direct_variables = tuple(
+        variable
+        for variable in MAGNETIC_FIELD_CANDIDATES
+        if reader.check_variable(variable)
+    )
 
     if len(direct_variables) == 1:
         variable = direct_variables[0]
@@ -120,18 +143,6 @@ def get_cell_centered_magnetic_field(reader, cid, resolved_source=None):
         reconstruction="polar_2d_component_face_average",
         reconstruction_version=LEGACY_B_POLAR_2D,
     )
-
-
-def _resolved_magnetic_producer(resolved_source):
-    """Return the file-scoped magnetic producer selected by data stage 1.
-
-    Direct plotting or physics calls may omit the source record, in which case
-    the caller performs the same reader-based candidate selection.
-    """
-
-    if resolved_source is None:
-        return None
-    return resolved_source.magnetic_field
 
 
 def _reconstruct_legacy_polar_magnetic_field(reader, cid):

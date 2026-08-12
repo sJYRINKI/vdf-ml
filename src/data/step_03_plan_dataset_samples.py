@@ -31,9 +31,6 @@ from src.data.step_02_find_vdf_cells import (
 )
 from src.data.dense_vdf import resolve_velocity_population
 from src.data.step_01_open_vlsv_files import create_timestep_path
-from src.data.step_04_extract_vdf_samples import (
-    iter_timestep_sample_specs,
-)
 from src.data.velocity_grid import create_velocity_grid_descriptor
 from src.data.velocity_grid import normalize_velocity_grid_descriptor
 from src.physics.point_labels import (
@@ -87,7 +84,9 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
     ----------
     config : dict
         Extraction configuration with VLSV/flux templates, manual plasma
-        classes, point-selection methods, and the magnetotail region.
+        classes, point-selection methods, the magnetotail region, and the
+        explicit VDF population or ``auto`` selection. The selected
+        population owns both the VDF and its fluid moments.
     timestep : int
         Simulation timestep identifier.
 
@@ -114,7 +113,10 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
     reader = pt.vlsvfile.VlsvReader(str(file_location))
     reader_elapsed = time.perf_counter() - reader_start
 
-    population = resolve_velocity_population(reader)
+    population = resolve_velocity_population(
+        reader,
+        config.get("population"),
+    )
     velocity_grid = create_velocity_grid_descriptor(
         reader=reader,
         pop=population,
@@ -522,8 +524,8 @@ def plan_dataset_sample_specs(config, timesteps, planning_n_jobs):
 def count_sample_specs_by_timestep(sample_specs_by_timestep):
     """Count planned sample records independently for each timestep.
 
-    Stage 0 retains these counts to locate the first nonempty timestep and to
-    report the sample distribution without extracting any VDF values.
+    Stage 0 retains these counts to report the sample distribution and
+    allocate the leading array dimension without extracting any VDF values.
 
     Parameters
     ----------
@@ -562,35 +564,6 @@ def count_sample_counts(sample_counts_by_timestep):
     return sum(sample_counts_by_timestep.values())
 
 
-def find_first_nonempty_timestep(sample_counts_by_timestep, timesteps):
-    """Locate the first timestep that contributes a dataset sample.
-
-    Stage 0 extracts one row from this timestep to learn the physical VDF
-    shape before allocating memory maps, while retaining the open iterator for
-    the rest of the same file.
-
-    Parameters
-    ----------
-    sample_counts_by_timestep : dict
-        Mapping from timestep to sample count.
-    timesteps : sequence of int
-        Requested timesteps in output order.
-
-    Returns
-    -------
-    timestep_index : int
-        Position in ``timesteps``.
-    timestep : int
-        First timestep with a sample.
-    """
-
-    return next(
-        (index, int(timestep))
-        for index, timestep in enumerate(timesteps)
-        if sample_counts_by_timestep[int(timestep)] > 0
-    )
-
-
 def get_planned_velocity_grid(sample_specs_by_timestep):
     """Return the grid recorded by the first nonempty timestep plan.
 
@@ -617,38 +590,3 @@ def get_planned_velocity_grid(sample_specs_by_timestep):
             if sample_specs
         )
     )
-
-
-def extract_first_sample_from_specs(
-    sample_specs,
-    *,
-    include_rotation_context=False,
-):
-    """Extract the first sample while retaining its timestep iterator.
-
-    Dataset orchestration uses this look-ahead to discover the raw cube shape
-    without reopening the first source file. The returned iterator remains
-    responsible for the rest of that timestep and is consumed immediately
-    after staged arrays are allocated.
-
-    Parameters
-    ----------
-    sample_specs : list of dict
-        Ordered sample specifications for one nonempty timestep.
-    include_rotation_context : bool, optional
-        Whether each sample includes same-cell vectors for optional Hermite
-        rotation.
-
-    Returns
-    -------
-    first_sample : dict
-        First extracted VDF sample.
-    sample_iter : iterator
-        Live iterator yielding remaining samples from the same reader.
-    """
-
-    sample_iter = iter_timestep_sample_specs(
-        sample_specs,
-        include_rotation_context=include_rotation_context,
-    )
-    return next(sample_iter), sample_iter

@@ -1,10 +1,11 @@
 """Orchestrate the ordered stages for one coordinate prediction.
 
 The public workflow calls Stage 1 to load the CNN, Stage 2 to open the VLSV
-source, Stage 3 to prepare the selected VDF, Stage 4 to run inference, and
-Stage 5 to save one ``predictions_<timestep>.csv`` row. The CSV is written
-before an enabled combined figure reuses the same source reader, selected
-cell, and already-decoded prediction.
+source, Stage 3 to prepare the selected VDF and same-cell 16-value
+plasma context, Stage 4 to run inference, and Stage 5 to save one
+``predictions_<timestep>.csv`` row. The CSV is written before an enabled
+combined figure reuses the same source reader, selected cell, and
+already-decoded prediction.
 """
 
 from pathlib import Path
@@ -14,6 +15,9 @@ import numpy as np
 from src.data.step_02_find_vdf_cells import (
     get_nearest_vdf_cellid,
     get_vdf_cells_with_coords_re,
+)
+from src.physics.plasma_context import (
+    prepare_plasma_context_sources_for_cells,
 )
 from src.prediction.step_01_load_cnn_model import (
     load_prediction_model,
@@ -135,6 +139,11 @@ def run_coordinate_prediction(
         cellids,
         coordinates_re,
     )
+    prepare_plasma_context_sources_for_cells(
+        prepared_source.reader,
+        prepared_source.plasma_context_sources,
+        (cid,),
+    )
     selected_index = int(np.flatnonzero(cellids == cid)[0])
     selected_coordinate_re = coordinates_re[selected_index]
     sample = prepare_prediction_input(
@@ -145,6 +154,7 @@ def run_coordinate_prediction(
     prediction = run_cnn_prediction(
         loaded,
         sample.tensor[None, ...],
+        sample.plasma_context[None, ...],
     )
     row = create_prediction_rows(
         prediction,

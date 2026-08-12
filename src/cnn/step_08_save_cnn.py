@@ -4,8 +4,9 @@ This final stage follows evaluation. It writes the model checkpoint and a
 human-readable report describing the run, chronological split, final
 physical-class performance, and auxiliary topology errors.
 
-The stage receives the restored model, both training-derived scalers,
-representation preprocessing, fit summary, split, and final evaluations.
+The stage receives the restored model, representation, plasma-context, and
+topology scalers, representation preprocessing, fit summary, split, and
+final evaluations.
 It returns a concise run summary after directly writing ``model.pt`` and
 ``metrics.txt``. Prediction reads only the checkpoint.
 """
@@ -21,6 +22,7 @@ from src.cnn.class_mapping import ClassMapping
 from src.data.load_velocity_grid import load_velocity_grid
 from src.data.metadata_columns import TOPOLOGY_TARGET_COLUMNS
 from src.data.velocity_grid import normalize_velocity_grid_geometry
+from src.physics.plasma_context import PLASMA_CONTEXT_FEATURE_NAMES
 
 
 def save_cnn_outputs(
@@ -28,6 +30,7 @@ def save_cnn_outputs(
     *,
     model,
     input_scaler,
+    plasma_context_scaler,
     topology_scaler,
     data,
     config,
@@ -51,6 +54,8 @@ def save_cnn_outputs(
         Validation-selected model.
     input_scaler : InputFeatureScaler
         Training-only representation normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-only normalization for the 16 plasma-context features.
     topology_scaler : TopologyTargetScaler
         Training-only topology scaling.
     data : CnnTrainingData
@@ -80,6 +85,7 @@ def save_cnn_outputs(
         model,
         output_dir / "model.pt",
         input_scaler=input_scaler,
+        plasma_context_scaler=plasma_context_scaler,
         topology_scaler=topology_scaler,
         preprocessing=_prediction_preprocessing(data),
         hermite_rotate=(
@@ -207,6 +213,16 @@ def create_cnn_metrics_text(
         f"Source array: {data.source_path}",
         f"Source array shape: {spec.source_shape}",
         f"Source array dtype: {spec.source_dtype}",
+        f"Plasma context array: {data.plasma_context_path}",
+        "Plasma context shape: (n_samples, 16)",
+        "Plasma context feature order: "
+        + ", ".join(PLASMA_CONTEXT_FEATURE_NAMES),
+        "Plasma vector components saved: Bx, By, Bz, Ex, Ey, Ez, Vx, Vy, Vz",
+        "Redundant plasma vector magnitudes saved: no",
+        "Plasma context hidden size: "
+        f"{config['plasma_context']['hidden_size']}",
+        "Combined embedding size: "
+        f"{config['model']['shared_hidden_size'] + config['plasma_context']['hidden_size']}",
         f"Model input shape: {spec.tensor_shape}",
         f"Features per sample: {prod(spec.tensor_shape)}",
         *representation_details,
@@ -384,6 +400,7 @@ def save_cnn_checkpoint(
     checkpoint_path,
     *,
     input_scaler,
+    plasma_context_scaler,
     topology_scaler,
     preprocessing,
     hermite_rotate,
@@ -405,6 +422,8 @@ def save_cnn_checkpoint(
         Destination checkpoint file.
     input_scaler : InputFeatureScaler
         Training-derived feature normalization.
+    plasma_context_scaler : PlasmaContextScaler
+        Training-derived mean and scale for the fixed 16 context values.
     topology_scaler : TopologyTargetScaler
         Training-derived topology normalization.
     preprocessing : dict
@@ -433,14 +452,23 @@ def save_cnn_checkpoint(
             None,
         )
     checkpoint = {
-        "model_state_dict": {
+        "state_dict": {
             name: value.detach().cpu()
             for name, value in model.state_dict().items()
         },
         "representation": model.representation,
-        "expected_input_shape": list(model.input_shape),
+        "input_shape": list(model.input_shape),
         "preprocessing": checkpoint_preprocessing,
         "input_normalization": input_scaler.to_dict(),
+        "plasma_context_feature_names": list(
+            PLASMA_CONTEXT_FEATURE_NAMES
+        ),
+        "plasma_context_mean": plasma_context_scaler.mean.tolist(),
+        "plasma_context_scale": plasma_context_scaler.scale.tolist(),
+        "plasma_context_hidden_size": (
+            model.plasma_context_hidden_size
+        ),
+        "combined_embedding_size": model.combined_embedding_size,
         "class_mapping": class_mapping.to_dict(),
         "topology_target_names": list(TOPOLOGY_TARGET_COLUMNS),
         "topology_scaler": topology_scaler.to_dict(),

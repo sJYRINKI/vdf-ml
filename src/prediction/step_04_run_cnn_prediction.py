@@ -1,9 +1,9 @@
 """Stage 4: run CNN inference and restore physical topology units.
 
 This stage follows raw or Hermite tensor preparation and precedes output
-serialization. It receives a batch of unnormalized representation tensors
-and returns physical-class probabilities plus six topology predictions in
-Earth radii.
+serialization. It receives aligned batches of unnormalized representation
+tensors and physical plasma-context rows, then returns
+physical-class probabilities plus six topology predictions in Earth radii.
 """
 
 from dataclasses import dataclass
@@ -44,22 +44,28 @@ class PredictionBatch:
     topology_values: np.ndarray
 
 
-def run_cnn_prediction(loaded, tensors):
-    """Infer physical classes and topology values for prepared VDF tensors.
+def run_cnn_prediction(loaded, tensors, plasma_context):
+    """Infer outputs from prepared VDF tensors and plasma context.
 
     This stage inserts a missing channel axis, moves float32 inputs to the
-    model device, and evaluates the current CNN without gradients. It maps
-    argmax output indices through the checkpoint's explicit physical-class
-    order and restores all six topology outputs from training-scaled space
-    to Earth radii before returning.
+    model device, scales the aligned physical context with training-only
+    checkpoint statistics, and evaluates the current CNN without gradients.
+    It maps argmax output indices through the checkpoint's explicit
+    physical-class order and restores all six topology outputs from
+    training-scaled space to Earth radii before returning.
 
     Parameters
     ----------
     loaded : LoadedCnnCheckpoint
-        CNN, training input scaler, topology scaler, and checkpoint mapping.
+        CNN, training representation/context/topology scalers, and checkpoint
+        mapping.
     tensors : numpy.ndarray
         Unnormalized raw VDF volumes or Hermite coefficient volumes with shape
         ``(batch, *input_shape)`` or ``(batch, 1, *input_shape)``.
+    plasma_context : numpy.ndarray
+        Physical same-cell values with shape ``(batch, 16)`` in fixed
+        B-component, E-component, fluid-velocity-component, density, and
+        pressure order stored by the checkpoint.
 
     Returns
     -------
@@ -69,8 +75,11 @@ def run_cnn_prediction(loaded, tensors):
 
     Notes
     -----
-    The model receives only the normalized representation tensor. Spatial
-    coordinates and topology values are never model inputs.
+    All Cartesian B, E, and V components are supplied to the model after
+    training-only scaling; no redundant vector magnitude is appended. Spatial
+    coordinates and topology values remain outside model inputs. The scaled
+    context tensor moves directly to the output device while Conv3d stages
+    retain their existing one-process model-parallel placement.
     """
 
     values = np.asarray(tensors, dtype=np.float32)
@@ -82,9 +91,14 @@ def run_cnn_prediction(loaded, tensors):
         dtype=torch.float32,
         device=device,
     )
+    scaled_context = loaded.plasma_context_scaler.transform(plasma_context)
+    context_inputs = torch.as_tensor(
+        scaled_context,
+        device=loaded.model.output_device,
+    )
     loaded.model.eval()
     with torch.inference_mode():
-        outputs = loaded.model(inputs)
+        outputs = loaded.model(inputs, context_inputs)
         probabilities = torch.softmax(
             outputs["class_logits"],
             dim=1,

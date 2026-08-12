@@ -1,8 +1,9 @@
 """Stage 4: build and place the full-volume multitask autoencoder.
 
 Both raw ``(vx, vy, vz)`` VDFs and complete Hermite coefficient cubes use
-the same Conv3d encoder and decoder. A compact latent vector feeds both the
-full-volume reconstruction branch and a six-value auxiliary topology head.
+the same Conv3d encoder and decoder. A compact VDF latent vector is fused
+with the 16-value, training-scaled same-cell plasma context before
+feeding the full-volume reconstruction branch and six-value topology head.
 
 One Python process owns the complete model and optimizer. Meaningful
 consecutive encoder, bottleneck, decoder, and output stages can be placed on
@@ -17,6 +18,7 @@ from torch import nn
 from torch.nn import functional
 
 from src.data.metadata_columns import TOPOLOGY_TARGET_COLUMNS
+from src.physics.plasma_context import PLASMA_CONTEXT_FEATURE_NAMES
 
 
 DEFAULT_CHANNELS = (8, 16, 32)
@@ -35,12 +37,17 @@ class VdfAutoencoder(nn.Module):
 
     The encoder spatially reduces the complete volume before adaptive pooling
     to the configured per-axis bottleneck maximum and projection to one
-    ``(batch_size, latent_size)`` vector. The effective bottleneck never
-    exceeds the encoded shape. The decoder expands that spatial bottleneck
-    and reconstructs the normalized three-dimensional input, while an
-    auxiliary head predicts six scaled Earth-radius distances and x-z
-    displacement components to the nearest physical X and O points. Topology
-    values supervise the latent space but are never model inputs.
+    ``(batch_size, latent_size)`` VDF vector. The effective bottleneck never
+    exceeds the encoded shape. A dense branch encodes the same-cell context
+    ``(Bx, By, Bz, Ex, Ey, Ez, Vx, Vy, Vz, n, Pxx, Pyy, Pzz, Pxy, Pxz,
+    Pyz)`` after training-only scaling. B is measured in teslas, E in volts
+    per metre, the configured-population fluid velocity in metres per second,
+    density in particles per cubic metre, and pressure in pascals. No
+    redundant vector magnitude is included. The combined latent feeds the
+    decoder and an auxiliary head that predicts six scaled Earth-radius
+    distances and x-z displacement components to the nearest physical X and O
+    points.
+    Topology values supervise the fused latent but are never model inputs.
 
     Runtime model parallelism places consecutive encoder, bottleneck,
     decoder, reconstruction, and topology stages across CUDA devices in one
@@ -62,11 +69,15 @@ class VdfAutoencoder(nn.Module):
     channels : sequence of int, optional
         Ordered Conv3d encoder widths. The decoder reverses these widths.
     latent_size : int, optional
-        Width of the shared reconstruction/topology embedding.
+        Width of the VDF encoder latent before plasma-context fusion. The
+        decoder and topology head receive this vector concatenated with the
+        configured context embedding.
     pooling : str, optional
         Spatial reduction convention, currently average pooling.
     topology_hidden_size : int, optional
         Hidden width of the auxiliary topology head.
+    plasma_context_hidden_size : int, optional
+        Hidden width of the dense branch encoding 16 plasma features.
     topology_target_names : sequence of str, optional
         Fixed six-target order, with all values measured in Earth radii.
     bottleneck_shape : sequence of int, optional
@@ -87,7 +98,10 @@ class VdfAutoencoder(nn.Module):
     ``distance_to_o_point_re``, ``vdf_to_x_point_dx_re``,
     ``vdf_to_x_point_dz_re``, ``vdf_to_o_point_dx_re``, and
     ``vdf_to_o_point_dz_re``. Missing-value masks and training-only topology
-    scaling belong to the loss workflow, not this input-only forward method.
+    scaling belong to the loss workflow, not the two-input forward method.
+    PyTorch DataLoader workers only read and preprocess aligned rows;
+    ``model_parallel_gpus`` controls this model's one-process stage placement,
+    while dataset ``extraction_n_jobs`` controls unrelated timestep workers.
     """
 
     def __init__(
@@ -102,6 +116,7 @@ class VdfAutoencoder(nn.Module):
         topology_hidden_size=64,
         topology_target_names=TOPOLOGY_TARGET_COLUMNS,
         bottleneck_shape=DEFAULT_BOTTLENECK_SHAPE,
+        plasma_context_hidden_size=32,
     ):
         """Initialize the Conv3d encoder, bottleneck, decoder, and head."""
 
@@ -112,6 +127,8 @@ class VdfAutoencoder(nn.Module):
         self.latent_size = int(latent_size)
         self.pooling = str(pooling).strip().lower()
         self.topology_hidden_size = int(topology_hidden_size)
+        self.plasma_context_hidden_size = int(plasma_context_hidden_size)
+        self.plasma_context_feature_names = PLASMA_CONTEXT_FEATURE_NAMES
         self.topology_target_names = tuple(
             str(name) for name in topology_target_names
         )
@@ -148,7 +165,20 @@ class VdfAutoencoder(nn.Module):
             self.channels[-1] * prod(self.bottleneck_shape)
         )
         self.to_latent = nn.Linear(bottleneck_count, self.latent_size)
-        self.from_latent = nn.Linear(self.latent_size, bottleneck_count)
+        self.plasma_context_branch = nn.Sequential(
+            nn.Linear(
+                len(self.plasma_context_feature_names),
+                self.plasma_context_hidden_size,
+            ),
+            nn.ReLU(),
+        )
+        self.combined_latent_size = (
+            self.latent_size + self.plasma_context_hidden_size
+        )
+        self.from_latent = nn.Linear(
+            self.combined_latent_size,
+            bottleneck_count,
+        )
         self.decoder_blocks = _create_decoder_blocks(self.channels)
         self.reconstruction_head = nn.Conv3d(
             self.channels[0],
@@ -157,7 +187,10 @@ class VdfAutoencoder(nn.Module):
             padding=1,
         )
         self.topology_head = nn.Sequential(
-            nn.Linear(self.latent_size, self.topology_hidden_size),
+            nn.Linear(
+                self.combined_latent_size,
+                self.topology_hidden_size,
+            ),
             nn.ReLU(),
             nn.Linear(
                 self.topology_hidden_size,
@@ -171,21 +204,26 @@ class VdfAutoencoder(nn.Module):
         self.requested_model_parallel_gpus = 1
         self.effective_model_parallel_gpus = 1
 
-    def forward(self, inputs):
-        """Reconstruct a full volume and predict auxiliary topology.
+    def forward(self, inputs, plasma_context):
+        """Reconstruct a full volume from VDF and plasma-context inputs.
 
         Parameters
         ----------
         inputs : torch.Tensor
             Unstandardized raw or Hermite samples with shape
             ``(batch_size, 1, depth_1, depth_2, depth_3)``.
+        plasma_context : torch.Tensor
+            Training-scaled same-cell context with shape ``(batch_size, 16)``
+            in ``PLASMA_CONTEXT_FEATURE_NAMES`` order. The first nine values
+            retain the Cartesian B, E, and fluid-velocity components.
 
         Returns
         -------
         dict
             ``reconstruction`` is the complete normalized input shape,
             ``topology_predictions`` has shape ``(batch_size, 6)``, and
-            ``latent_embedding`` has shape ``(batch_size, latent_size)``.
+            ``combined_latent`` has shape
+            ``(batch_size, latent_size + plasma_context_hidden_size)``.
 
         Notes
         -----
@@ -194,27 +232,33 @@ class VdfAutoencoder(nn.Module):
         validity masks, and physical classes are never forward arguments.
         """
 
-        return self.forward_from_normalized(self.normalize_inputs(inputs))
+        return self.forward_from_normalized(
+            self.normalize_inputs(inputs),
+            plasma_context,
+        )
 
-    def forward_from_normalized(self, normalized):
+    def forward_from_normalized(self, normalized, plasma_context):
         """Run placed Conv3d stages for an already normalized batch.
 
         Training and evaluation normalize each complete volume once so the
         same tensor can serve as the reconstruction target. The public
-        :meth:`forward` remains the input-only inference interface and calls
-        this operation after applying its checkpointed normalization.
+        :meth:`forward` receives the VDF volume and aligned plasma context,
+        then calls this operation after applying checkpointed VDF
+        normalization.
 
         Parameters
         ----------
         normalized : torch.Tensor
             Complete normalized batch on :attr:`input_device` with shape
             ``(batch_size, 1, depth_1, depth_2, depth_3)``.
+        plasma_context : torch.Tensor
+            Training-scaled plasma context with shape ``(batch_size, 16)``.
 
         Returns
         -------
         dict
             Complete reconstruction, six topology predictions, and shared
-            latent embedding, all on :attr:`output_device`.
+            ``combined_latent``, all on :attr:`output_device`.
         """
 
         encoded = normalized
@@ -228,9 +272,19 @@ class VdfAutoencoder(nn.Module):
         bottleneck_index = len(self.encoder_blocks)
         bottleneck_device = self._stage_devices[bottleneck_index]
         pooled = self.bottleneck_pool(encoded.to(bottleneck_device))
-        latent = self.to_latent(torch.flatten(pooled, start_dim=1))
-        decoded = self.from_latent(latent).reshape(
-            len(latent),
+        vdf_latent = self.to_latent(torch.flatten(pooled, start_dim=1))
+        context_embedding = self.plasma_context_branch(
+            plasma_context.to(
+                device=bottleneck_device,
+                dtype=vdf_latent.dtype,
+            )
+        )
+        combined_latent = torch.cat(
+            (vdf_latent, context_embedding),
+            dim=1,
+        )
+        decoded = self.from_latent(combined_latent).reshape(
+            len(combined_latent),
             self.channels[-1],
             *self.bottleneck_shape,
         )
@@ -266,12 +320,12 @@ class VdfAutoencoder(nn.Module):
                 align_corners=False,
             )
         reconstruction = self.reconstruction_head(decoded)
-        latent_embedding = latent.to(self.output_device)
-        topology_predictions = self.topology_head(latent_embedding)
+        combined_latent = combined_latent.to(self.output_device)
+        topology_predictions = self.topology_head(combined_latent)
         return {
             "reconstruction": reconstruction,
             "topology_predictions": topology_predictions,
-            "latent_embedding": latent_embedding,
+            "combined_latent": combined_latent,
         }
 
     def normalize_inputs(self, inputs):
@@ -434,6 +488,7 @@ class VdfAutoencoder(nn.Module):
         bottleneck_device = stage_devices[bottleneck_index]
         self.bottleneck_pool.to(bottleneck_device)
         self.to_latent.to(bottleneck_device)
+        self.plasma_context_branch.to(bottleneck_device)
         self.from_latent.to(bottleneck_device)
         decoder_start = bottleneck_index + 1
         for offset, block in enumerate(self.decoder_blocks):
@@ -456,8 +511,10 @@ class VdfAutoencoder(nn.Module):
         -------
         dict
             Representation, complete input shape, Conv3d widths, latent
-            size, configured bottleneck maximum, pooling, topology head
-            width, and fixed target order.
+            size, configured bottleneck maximum, pooling, context branch and
+            topology head widths, and the fixed topology-target order. The
+            plasma feature order is the module-level 16-value constant and
+            is stored once in the checkpoint's top-level context metadata.
 
         Notes
         -----
@@ -475,12 +532,21 @@ class VdfAutoencoder(nn.Module):
                 self.configured_bottleneck_shape
             ),
             "pooling": self.pooling,
+            "plasma_context_hidden_size": (
+                self.plasma_context_hidden_size
+            ),
             "topology_hidden_size": self.topology_hidden_size,
             "topology_target_names": list(self.topology_target_names),
         }
 
 
-def build_autoencoder(data, input_scaler, model_config, topology_config):
+def build_autoencoder(
+    data,
+    input_scaler,
+    model_config,
+    plasma_context_config,
+    topology_config,
+):
     """Construct the shared Conv3d raw/Hermite autoencoder.
 
     This factory joins the memory-mapped representation description,
@@ -496,6 +562,8 @@ def build_autoencoder(data, input_scaler, model_config, topology_config):
     model_config : mapping
         Conv3d channels, latent size, per-axis bottleneck maximum, and pooling
         convention.
+    plasma_context_config : mapping
+        Hidden width of the 16-feature dense context branch.
     topology_config : mapping
         Auxiliary hidden width and loss weight. Only the hidden width affects
         architecture; the weight belongs to the combined loss.
@@ -515,6 +583,7 @@ def build_autoencoder(data, input_scaler, model_config, topology_config):
         latent_size=model_config["latent_size"],
         bottleneck_shape=model_config["bottleneck_shape"],
         pooling=model_config["pooling"],
+        plasma_context_hidden_size=plasma_context_config["hidden_size"],
         topology_hidden_size=topology_config["hidden_size"],
         topology_target_names=TOPOLOGY_TARGET_COLUMNS,
     )
